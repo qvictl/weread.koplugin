@@ -94,9 +94,18 @@ local function log_error(err)
     return text
 end
 
+-- Enough to see errCode/errMsg or the start of an HTML error page. Full reader
+-- pages are hundreds of KB, bloat crash.log on the device's slow storage and
+-- contain the user's reading data.
+local LOG_BODY_MAX_BYTES = 1024
+
 local function log_response(label, context, text)
     context = context or {}
     text = text or ""
+    local logged = text
+    if #logged > LOG_BODY_MAX_BYTES then
+        logged = logged:sub(1, LOG_BODY_MAX_BYTES) .. "...(truncated)"
+    end
     logger.err(
         label,
         "method=", tostring(context.method or "unknown"),
@@ -105,7 +114,7 @@ local function log_response(label, context, text)
         "status=", tostring(context.code or "unknown"),
         "content_type=", tostring(header_value(context.headers, "content-type") or "unknown"),
         "body_bytes=", tostring(#text),
-        "response_body=", text
+        "response_body=", logged
     )
 end
 
