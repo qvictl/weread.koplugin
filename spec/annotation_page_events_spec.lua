@@ -6,7 +6,7 @@ package.preload["weread.lib.content"] = function() return {} end
 package.preload["weread.lib.protocol"] = function() return {} end
 package.preload["weread.lib.plugin_util"] = function() return { tr = function(s) return s end } end
 package.preload["weread.lib.logger"] = function()
-    return { scoped = function() return {} end }
+    return { scoped = function() return {} end, warn = function() end }
 end
 local Controller = require("weread.ui.annotation_sync_controller")
 local Lifecycle = require("weread.lib.reader_lifecycle")
@@ -66,4 +66,13 @@ before = reads
 host:onPageUpdate()
 assert(loaded() == "19,20,21" and reads == before + 3,
     "missing page anchor caused an unbounded annotation load")
+-- A locked/broken annotation database must not crash a page turn.
+local real_get = context.store.get
+context.store.get = function() error("database is locked") end
+page = 301
+local turned = pcall(host.onPageUpdate, host)
+assert(turned and loaded() == "19,20,21", "busy database crashed the page turn or dropped the underlines")
+context.store.get = real_get
+host:onPageUpdate()
+assert(loaded() == "29,30,31", "underlines were not reloaded once the database was readable")
 print("annotation_page_events_spec: page/scroll/jump/cache and 5000-chapter CPU bounds passed")
