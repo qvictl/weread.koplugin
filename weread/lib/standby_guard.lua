@@ -15,13 +15,26 @@ local function platform_services()
     return require("device"), require("pluginshare")
 end
 
+-- Values of the shared AutoSuspend flags before we took them, so another
+-- component (e.g. the KeepAlive plugin) keeps its own state when we release.
+local saved_flags
+
 local function prevent_platform_standby()
     local Device, PluginShare = platform_services()
+    saved_flags = {
+        pause_auto_suspend = PluginShare.pause_auto_suspend,
+        keepalive = PluginShare.keepalive,
+    }
+    -- KOReader's AutoSuspend runs on every platform: without this it still
+    -- suspends the device after its timeout (15 min by default) in the
+    -- middle of a long download.
+    PluginShare.pause_auto_suspend = true
     if Device:isKindle() then
         os.execute("lipc-set-prop com.lab126.powerd preventScreenSaver 1")
-    end
-    if Device:isCervantes() or Device:isKobo() then
-        PluginShare.pause_auto_suspend = true
+        -- Mirror the KeepAlive plugin: AutoSuspend must not keep resetting
+        -- powerd's t1 timeout while the screensaver is prevented, which is
+        -- known to crash the device.
+        PluginShare.keepalive = true
     end
 end
 
@@ -30,9 +43,10 @@ local function allow_platform_standby()
     if Device:isKindle() then
         os.execute("lipc-set-prop com.lab126.powerd preventScreenSaver 0")
     end
-    if Device:isCervantes() or Device:isKobo() then
-        PluginShare.pause_auto_suspend = false
-    end
+    local saved = saved_flags or {}
+    saved_flags = nil
+    PluginShare.pause_auto_suspend = saved.pause_auto_suspend or false
+    PluginShare.keepalive = saved.keepalive or false
 end
 
 function Guard.acquire()
