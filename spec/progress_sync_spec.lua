@@ -342,8 +342,87 @@ test("suspend captures movement even without a page event", function()
     f.drain()
     f.document.page = 40
     f.sync:on_suspend()
-    eq(#f.uploads, 1, "suspend uploads captured movement")
+    eq(#f.uploads, 0, "suspend itself does no network I/O")
+    eq(f.values.books.book.pending_upload_position, nil, "suspend itself does not write")
+    f.sync:on_resume()
+    f.drain()
+    eq(#f.uploads, 1, "captured movement is uploaded after resume")
     eq(f.uploads[1].percent, 40, "suspend uses current page")
+end)
+
+test("suspend upload waits for the link after resume", function()
+    local online = true
+    local f = fixture({
+        bookId = "book",
+        progress = 25,
+        chapterUid = 22,
+        chapterIdx = 2,
+        chapterOffset = 150,
+        updateTime = 10,
+    }, { is_online = function() return online end })
+    f.sync:on_reader_ready()
+    f.drain()
+    f.document.page = 40
+    f.sync:on_suspend()
+    online = false
+    f.sync:on_resume()
+    f.step()
+    f.step()
+    eq(#f.uploads, 0, "no upload while offline")
+    online = true
+    f.drain()
+    eq(#f.uploads, 1, "upload once the link is back")
+end)
+
+test("long sleep keeps local progress when the cloud did not move", function()
+    local now = 0
+    local f = fixture({
+        bookId = "book",
+        progress = 25,
+        chapterUid = 22,
+        chapterIdx = 2,
+        chapterOffset = 150,
+        updateTime = 10,
+    }, { now = function() return now end })
+    f.sync:on_reader_ready()
+    f.drain()
+    f.document.page = 40
+    f.sync:on_suspend()
+    now = 60 * 60
+    f.sync:on_resume()
+    f.drain()
+    eq(#f.choices, 0, "no conflict dialog for our own unsent progress")
+    eq(#f.uploads, 1, "pending progress uploaded after the recheck")
+    eq(f.uploads[1].percent, 40, "local position wins")
+    eq(f.sync:status().verified, true, "session verified again")
+end)
+
+test("long sleep asks when the cloud moved meanwhile", function()
+    local now = 0
+    local remote = {
+        bookId = "book",
+        progress = 25,
+        chapterUid = 22,
+        chapterIdx = 2,
+        chapterOffset = 150,
+        updateTime = 10,
+    }
+    local f = fixture(remote, { now = function() return now end })
+    f.sync:on_reader_ready()
+    f.drain()
+    f.document.page = 40
+    f.sync:on_suspend()
+    -- Read on another device while this one slept.
+    remote.progress = 90
+    remote.chapterUid = 33
+    remote.chapterIdx = 3
+    remote.chapterOffset = 500
+    remote.updateTime = 20
+    now = 60 * 60
+    f.sync:on_resume()
+    f.drain()
+    eq(#f.uploads, 0, "nothing uploaded over newer cloud progress")
+    eq(#f.choices, 1, "user is asked")
 end)
 
 test("single chapter cloud choice waits for target chapter then jumps", function()

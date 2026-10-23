@@ -10,6 +10,10 @@ local RESUME_RECHECK_SECONDS = 5 * 60
 local PULL_RETRY_DELAY_SECONDS = 15
 local PULL_MAX_RETRIES = 3
 local BUSY_RETRY_SECONDS = 2
+-- Uploads deferred from suspend wait this long after resume, so Wi-Fi has a
+-- chance to come back first, and retry a few times while it is still down.
+local RESUME_UPLOAD_DELAY_SECONDS = 5
+local RESUME_UPLOAD_MAX_ATTEMPTS = 6
 local BUSY_RETRY_LIMIT = 10
 local SAME_THRESHOLD_PERCENT = 2
 local SOURCE_CONFLICT_THRESHOLD_PERCENT = 2
@@ -424,7 +428,7 @@ function ProgressSync:_keep_local(local_position, remote, options)
         remote
     )
     if options.upload_now then
-        self:_upload_snapshot(local_position, options.reason, true)
+        self:_upload_snapshot(local_position, options.reason, not options.silent)
     elseif options.manual then
         self.notify("local_kept", { position = local_position })
     end
@@ -451,6 +455,20 @@ function ProgressSync:_resolve(local_position, remote, context, options)
         if options.manual then
             self.notify("already_synced", { position = local_position })
         end
+        return
+    end
+
+    -- Reading progress from before a suspend is uploaded after resume. If the
+    -- cloud position is still the one we knew before sleeping, nobody read
+    -- elsewhere in the meantime: the local position wins without asking.
+    local resume_pending = options.resume_pending
+    if resume_pending and resume_pending.baseline and not remote.conflict
+        and PositionMapper.same_position(remote, resume_pending.baseline) then
+        self:_keep_local(local_position, remote, {
+            upload_now = true,
+            silent = true,
+            reason = "suspend",
+        })
         return
     end
 
@@ -521,6 +539,7 @@ function ProgressSync:_schedule_pull_retry(options, retry_token)
             manual = false,
             retry = attempt,
             retry_token = retry_token,
+            resume_pending = options.resume_pending,
         })
     end)
     log("info", "pull retry scheduled:",
@@ -755,19 +774,55 @@ function ProgressSync:on_suspend()
         and not PositionMapper.same_position(position, self.local_position) then
         self.dirty = true
     end
+    -- Never touch the disk or the network here: the device is going to sleep
+    -- (and Wi-Fi with it), so a blocking request or settings rewrite can hang
+    -- the suspend. Remember what to upload, and do it after resume.
     if position and self.verified and self.dirty
         and self:_config().upload_on_close == true then
-        self:_upload_snapshot(position, "suspend", false)
+        self.pending_resume_upload = {
+            position = copy(position),
+            baseline = copy(self.remote_position),
+            generation = self.generation,
+        }
     end
+end
+
+function ProgressSync:_flush_resume_upload(pending, attempt)
+    if pending.generation ~= self.generation or not self.verified then return end
+    if tostring(self.detect_book() or "") ~= tostring(pending.position.book_id) then return end
+    if self.uploading then return end
+    if not self.is_online() then
+        if attempt < RESUME_UPLOAD_MAX_ATTEMPTS then
+            self.scheduler:scheduleIn(RESUME_UPLOAD_DELAY_SECONDS, function()
+                self:_flush_resume_upload(pending, attempt + 1)
+            end)
+        else
+            log("warn", "suspend upload dropped while offline:",
+                "book=", tostring(pending.position.book_id))
+        end
+        return
+    end
+    self:_upload_snapshot(pending.position, "suspend", false)
 end
 
 function ProgressSync:on_resume()
     local slept = self.suspended_at and self.now() - self.suspended_at or 0
     self.suspended_at = nil
+    local pending = self.pending_resume_upload
+    self.pending_resume_upload = nil
     if slept >= RESUME_RECHECK_SECONDS
         and self:_config().pull_on_open == true then
+        -- Someone may have read elsewhere while we slept: the pending upload
+        -- goes through the pull, which keeps it only if the cloud position
+        -- did not move.
         self:_clear_verified("resume_recheck")
-        self:_pull({ manual = false })
+        self:_pull({ manual = false, resume_pending = pending })
+        return
+    end
+    if pending then
+        self.scheduler:scheduleIn(RESUME_UPLOAD_DELAY_SECONDS, function()
+            self:_flush_resume_upload(pending, 1)
+        end)
     end
 end
 
