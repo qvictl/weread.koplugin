@@ -777,6 +777,33 @@ test("failed manual pull notifies without scheduling a retry", function()
     eq(f.notifications[#f.notifications].code, "pull_failed", "manual failure is reported")
 end)
 
+test("a pull that throws does not block later pulls", function()
+    local f = fixture({
+        bookId = "book",
+        progress = 25,
+        chapterUid = 22,
+        chapterIdx = 2,
+        chapterOffset = 150,
+        updateTime = 10,
+    }, {
+        -- Like runOnlineTask: the task runs under xpcall.
+        run_online = function(_kind, callback)
+            pcall(callback)
+            return true
+        end,
+    })
+    f.values.sync.pull_on_open = false
+    f.sync:on_reader_ready()
+    f.drain()
+    local real_fetch = f.sync._fetch_remote
+    f.sync._fetch_remote = function() error("boom") end
+    f.sync:sync_now()
+    eq(f.sync:status().state, "error", "failed pull reports an error state")
+    f.sync._fetch_remote = real_fetch
+    eq(f.sync:sync_now(), true, "next manual pull starts")
+    eq(f.sync:status().verified, true, "next manual pull verifies")
+end)
+
 print(string.format(
     "progress_sync_spec: %d checks, %d failure(s)", checks, failures))
 os.exit(failures == 0 and 0 or 1)
