@@ -254,7 +254,14 @@ function M:_refreshAnnotationOverlay()
     for index = math.max(1, active - 1), math.min(#context.chapters, last + 1) do
         local uid = Chapters.uid(context.chapters[index])
         local key = context.store:projectionKey(context.document_key, uid)
-        local projection = context.store:get(context.book_id, "projection", key)
+        -- Runs on every page turn: a busy or broken database must not crash
+        -- the reader. Keep the current underlines and retry on the next turn.
+        local ok, projection = pcall(context.store.get, context.store,
+            context.book_id, "projection", key)
+        if not ok then
+            logger.warn("annotation projection read failed:", tostring(projection))
+            return
+        end
         for _, record in ipairs(projection and projection.records or {}) do
             records[#records + 1] = record
         end
