@@ -153,8 +153,11 @@ end
 -- omit those generated labels, so they must not participate in matching.
 local function footnote_marker_len_at(text, i)
     if text:byte(i) ~= 0x5B then return 0 end -- "["
-    local start, stop = text:find("%[%d+%]", i)
-    return start == i and stop - i + 1 or 0
+    -- Anchored at i: an unanchored find would scan ahead to the next
+    -- "[digits]" (or the end of the chapter) for every "[" that is not a
+    -- marker, making a chapter full of "[注]" quadratic.
+    local _start, stop = text:find("^%[%d+%]", i)
+    return stop and stop - i + 1 or 0
 end
 
 local function ignored_footnote_bytes(text)
