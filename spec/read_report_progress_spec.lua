@@ -68,7 +68,8 @@ local function test(name, fn)
     fn()
 end
 
-local function fixture(provider)
+local function fixture(provider, overrides)
+    overrides = overrides or {}
     local records = {}
     local settings = {
         get = function(_self, key)
@@ -103,7 +104,8 @@ local function fixture(provider)
         detect_book = function() return "book" end,
         position_provider = provider,
         is_online = function() return true end,
-        subprocess = false,
+        subprocess = overrides.subprocess or false,
+        memory_gate = overrides.memory_gate,
         now = function() return 100 end,
     }
     return report, records
@@ -199,6 +201,41 @@ test("report context backfills SQLite from catalog.json", function()
     }
     report:_build_context("book", false, book)
     eq(written_catalog, disk_catalog, "catalog.json backfills SQLite")
+end)
+
+test("low memory skips the tick instead of forking or reporting inline", function()
+    local forks = 0
+    local runner = {
+        run = function() forks = forks + 1; return 42, 7 end,
+    }
+    local report, records = fixture(function()
+        return { chapter_uid = 22, chapter_offset = 150, percent = 25 }, nil, true
+    end, {
+        subprocess = runner,
+        memory_gate = function() return false, 20000 end,
+    })
+    local inline = 0
+    report._run_pipeline = function() inline = inline + 1 end
+    report.task = function() end
+    report:_tick(report.generation, report.task)
+    eq(forks, 0, "no fork under memory pressure")
+    eq(inline, 0, "no inline network pipeline on the UI loop")
+    eq(#records, 0, "nothing reported")
+    eq(report:status().state, "waiting_for_memory", "state shows the wait")
+end)
+
+test("failed fork does not fall back to an inline report", function()
+    local report = fixture(function()
+        return { chapter_uid = 22, chapter_offset = 150, percent = 25 }, nil, true
+    end, {
+        subprocess = { run = function() return false, "fork failed: Cannot allocate memory" end },
+        memory_gate = function() return true, 200000 end,
+    })
+    local inline = 0
+    report._run_pipeline = function() inline = inline + 1 end
+    report.task = function() end
+    report:_tick(report.generation, report.task)
+    eq(inline, 0, "no inline network pipeline on the UI loop")
 end)
 
 print(string.format(

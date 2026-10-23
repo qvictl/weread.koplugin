@@ -358,4 +358,45 @@ local worker_ok, worker_err = pcall(downloader._runInterruptible, downloader, dl
 expect(not worker_ok and tostring(worker_err):find("could not start download worker", 1, true)
     and not dl.cancelled, "worker launch failure was mistaken for user cancellation")
 
+-- Low memory: wait (yielding to the UI) before forking, then fork once it frees up.
+do
+    local gate_calls = 0
+    downloader.memory_gate = function()
+        gate_calls = gate_calls + 1
+        return gate_calls >= 3, gate_calls >= 3 and 200000 or 10000
+    end
+    local waiting = { book = {}, total = 1, trapper = trapper }
+    downloader:_ensureProgressDialog(waiting)
+    local value
+    local before = #scheduled
+    trapper:wrap(function()
+        value = downloader:_runInterruptible(waiting, function() return "unused" end)
+    end)
+    expect(child_pending == nil and #scheduled == before + 1, "fork happened under memory pressure")
+    table.remove(scheduled)()
+    expect(child_pending == nil and #scheduled == before + 1, "second low-memory check did not wait")
+    table.remove(scheduled)()
+    expect(child_pending ~= nil, "fork did not resume once memory freed up")
+    resumed("after-wait")
+    expect(value == "after-wait", "result lost after waiting for memory")
+end
+
+-- Memory never frees up: the job stops instead of skipping the chapter.
+do
+    downloader.memory_gate = function() return false, 1000 end
+    local starved = { book = {}, total = 1, trapper = trapper }
+    downloader:_ensureProgressDialog(starved)
+    local ok, err
+    trapper:wrap(function()
+        ok, err = pcall(downloader._runInterruptible, downloader, starved, function() end)
+    end)
+    for _i = 1, 12 do table.remove(scheduled)() end
+    expect(ok == false and tostring(err):find("Not enough free memory", 1, true),
+        "starved download did not stop with a low-memory error")
+    local retry_ok, retry_err = pcall(downloader._retryChapterSource, downloader, starved, err)
+    expect(not retry_ok and tostring(retry_err):find("Not enough free memory", 1, true),
+        "low memory was treated as a chapter failure and skipped")
+    downloader.memory_gate = function() return true end
+end
+
 print(("downloader_lifecycle_spec: %d checks"):format(checks))
