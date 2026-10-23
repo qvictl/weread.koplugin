@@ -56,6 +56,26 @@ function Content.book_resolved_dir(settings, book_id, book)
     return dir or Content.book_cache_dir(settings, book_id)
 end
 
+-- Delete a book's cache directory without a shell. Only a per-book directory
+-- (named after the book id, below some root) is removed: a stored path that
+-- resolves to a download root or a user library folder is refused.
+function Content.remove_book_dir(settings, book_id, book, purge)
+    local dir = Content.book_resolved_dir(settings, book_id, book)
+    local normalized = tostring(dir or ""):gsub("/+$", "")
+    local name = normalized:match("([^/]+)$")
+    if normalized == "" or not normalized:find("/", 1, true)
+        or name ~= Content.book_dir_name(book_id)
+        or normalized == tostring(settings.cache_dir or ""):gsub("/+$", "") then
+        return false, "refusing to delete non-book directory: " .. tostring(dir)
+    end
+    local lfs = require("libs/libkoreader-lfs")
+    if lfs.attributes(normalized, "mode") ~= "directory" then return true end
+    purge = purge or require("ffi/util").purgeDir
+    local ok, err = purge(normalized)
+    if not ok then return false, tostring(err) end
+    return true
+end
+
 function Content.catalog_cache_path(settings, book)
     local book_id = book and (book.book_id or book.bookId)
     if not book_id then

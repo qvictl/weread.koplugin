@@ -86,6 +86,7 @@ package.preload["weread.lib.content"] = function()
         book_resolved_dir = function(_settings, book_id, _book)
             return "/cache/" .. tostring(book_id)
         end,
+        remove_book_dir = function() return true end,
     }
 end
 package.preload["weread.ui.download_dialog"] = function() return {} end
@@ -281,6 +282,19 @@ local function make_cache_host(books)
         host[key] = value
     end
     return host
+end
+
+-- Cache operations are refused while a download runs.
+do
+    local before_removes = #coll_removes
+    local host = make_cache_host({ book = { cached_file = "/cache/book/full.epub" } })
+    local shown
+    host.downloader = { _active_job = {} }
+    host.showInfo = function(_self, text) shown = text end
+    host:clearBookCache("book")
+    host:clearAllCache()
+    eq(#coll_removes, before_removes, "cache cleared under a running download")
+    eq(shown ~= nil, true, "user told why nothing happened")
 end
 
 -- clearBookCache removes the full-book path from the collection.
