@@ -20,6 +20,7 @@ local ScrollableContainer = require("ui/widget/container/scrollablecontainer")
 local Size = require("ui/size")
 local TextWidget = require("ui/widget/textwidget")
 local UIManager = require("ui/uimanager")
+local TapFeedback = require("weread.ui.tap_feedback")
 local VerticalGroup = require("ui/widget/verticalgroup")
 local VerticalSpan = require("ui/widget/verticalspan")
 local Widget = require("ui/widget/widget")
@@ -436,14 +437,7 @@ end
 
 function ShelfRow:onTapShelfRow()
     if not self.callback then return true end
-    self.frame.invert = true
-    UIManager:widgetRepaint(self.frame, self.frame.dimen.x, self.frame.dimen.y)
-    UIManager:forceRePaint()
-    self.frame.invert = false
-    UIManager:widgetRepaint(self.frame, self.frame.dimen.x, self.frame.dimen.y)
-    UIManager:setDirty(nil, "fast", self.frame.dimen)
-    self.callback()
-    return true
+    return TapFeedback.run(self.frame, self.callback)
 end
 
 function ShelfRow:onFocus()
