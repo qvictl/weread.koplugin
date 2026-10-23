@@ -224,4 +224,28 @@ expect(legacy_replacement_result and legacy_replacement_result.ok
         and not worker:busy(),
     "kind-less replacement did not run")
 
+-- A long suspend advances the wall clock but not the monotonic one: a running
+-- job must not be killed as stalled on resume.
+do
+    local wall, mono = 5000, 50
+    local suspended = BackgroundWorker:new {
+        temp_dir = temp_dir, runner = runner, scheduler = scheduler,
+        now = function() return wall end,
+        clock = function() return mono end,
+        read_memory = function() return "MemAvailable: 262144 kB\n" end,
+        timeout = 180,
+    }
+    local before = next_pid
+    local ok_start = suspended:start { task = function() return "slow" end }
+    expect(ok_start and next_pid == before + 1, "suspend test job did not start")
+    local pid = next_pid
+    wall = wall + 3600 -- one hour asleep
+    mono = mono + 1
+    poll()
+    expect(not terminated[pid], "job killed as stalled after a suspend")
+    mono = mono + 181
+    poll()
+    expect(terminated[pid], "a really stalled job is still timed out")
+end
+
 print(("background_worker_spec: %d checks"):format(checks))
