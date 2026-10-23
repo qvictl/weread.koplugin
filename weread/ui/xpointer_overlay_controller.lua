@@ -2,6 +2,7 @@
 local UIManager = require("ui/uimanager")
 
 local External = require("weread.lib.external_annotations")
+local logger = require("weread.lib.logger")
 local Overlay = require("weread.ui.xpointer_overlay")
 local PluginUtil = require("weread.lib.plugin_util")
 local ThoughtPopupConfig = require("weread.ui.thought_popup.popup_config")
@@ -117,8 +118,13 @@ function M:_onXPointerOverlayTap(ges)
     local items = record.items
     local context = self._annotation_context
     if context and not items then
-        items = context.store:get(context.book_id, "thought",
-            record.chapter_uid .. ":" .. record.range)
+        local ok, stored = pcall(context.store.get, context.store, context.book_id,
+            "thought", record.chapter_uid .. ":" .. record.range)
+        if ok then
+            items = stored
+        else
+            logger.warn("annotation thought read failed:", tostring(stored))
+        end
     end
     if type(items) ~= "table" or #items == 0 then
         items = {
