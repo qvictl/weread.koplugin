@@ -17,6 +17,22 @@ local file_exists = PluginUtil.file_exists
 
 local M = {}
 
+-- Deleting or moving a book's directory under a running download makes the
+-- job write into a stale path, and its completion brings the record back.
+function M:refuseWhileDownloading()
+    if self.downloader and self.downloader._active_job then
+        self:showInfo(_("A download is in progress. Cancel it or wait for it to finish first."))
+        return true
+    end
+    return false
+end
+
+function M:removeBookDir(book_id, book)
+    local ok, err = Content.remove_book_dir(self.settings, book_id, book)
+    if not ok then logger.warn("book cache not removed:", tostring(err)) end
+    return ok
+end
+
 function M:setMPImageDownload(enabled)
     local cache = self.settings:get("cache")
     cache.download_mp_images = enabled == true
@@ -114,6 +130,7 @@ function M:offerMoveBooksToNewDir(old_dir, new_dir)
 end
 
 function M:moveBooksToNewDir(movable, new_dir)
+    if self:refuseWhileDownloading() then return end
     self:showBusy(_("Moving cached books..."))
     UIManager:scheduleIn(0.1, function()
         local books = self.settings:get("books", {})
@@ -735,12 +752,12 @@ function M:clearBookAnnotationData(book_id, book)
 end
 
 function M:clearBookCache(book_id)
+    if self:refuseWhileDownloading() then return end
     local books = self.settings:get("books", {})
     local book = books[book_id]
     local path_to_remove = book and (book.cached_full_book or book.cached_file)
-    local cache_dir = Content.book_resolved_dir(self.settings, book_id, book)
     self:clearBookAnnotationData(book_id, book)
-    os.execute("rm -rf " .. string.format("%q", cache_dir))
+    self:removeBookDir(book_id, book)
     if book then
         books[book_id] = nil
         self.settings:set("books", books)
@@ -760,6 +777,7 @@ function M:clearBookCache(book_id)
 end
 
 function M:clearAllMPCache()
+    if self:refuseWhileDownloading() then return end
     -- Delete each MP book's real directory (which may sit under an old download
     -- root) rather than scanning only the current cache_dir, and only touch
     -- plugin-owned entries tracked in the books table.
@@ -782,7 +800,7 @@ function M:clearAllMPCache()
     end)
     for book_id, book in pairs(books) do
         if WeRead.is_mp_book(book_id) then
-            os.execute("rm -rf " .. string.format("%q", Content.book_resolved_dir(self.settings, book_id, book)))
+            self:removeBookDir(book_id, book)
             books[book_id] = nil
         end
     end
@@ -792,6 +810,7 @@ function M:clearAllMPCache()
 end
 
 function M:clearAllCache()
+    if self:refuseWhileDownloading() then return end
     local books = self.settings:get("books", {})
     pcall(function()
         local ReadCollection = require("readcollection")
@@ -811,7 +830,7 @@ function M:clearAllCache()
     end)
     for book_id, book in pairs(books) do
         self:clearBookAnnotationData(book_id, book)
-        os.execute("rm -rf " .. string.format("%q", Content.book_resolved_dir(self.settings, book_id, book)))
+        self:removeBookDir(book_id, book)
     end
     self.settings:set("books", {})
     self.settings:flush()
