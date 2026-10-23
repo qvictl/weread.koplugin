@@ -202,21 +202,32 @@ local function basename(path)
     return tostring(path or ""):match("([^/]+)$") or tostring(path or "")
 end
 
+-- Asset file names end up raw in src="../images/<name>" and on the Kindle's
+-- FAT storage, so keep them to case-insensitively unique, URL/XML-safe ASCII.
+-- "cover.*" is reserved for the cover image save_book_epub() adds itself.
+local function asset_name_taken(used, candidate)
+    local key = candidate:lower()
+    return used[key] or used[candidate] or key:match("^cover%.") ~= nil
+end
+
 local function unique_asset_name(used, name, ext)
-    local base = filename_safe(name)
+    local base = filename_safe(name):gsub("[^%w%._-]", "_"):gsub("_+", "_")
+    if base:gsub("[_%.]", "") == "" then base = "img" end
     if not base:lower():match(ext:gsub("%.", "%%.") .. "$") then
         base = base .. ext
     end
     local candidate = base
     local index = 2
-    while used[candidate] do
+    while asset_name_taken(used, candidate) do
         local stem = base:gsub("%.[^%.]+$", "")
         candidate = stem .. "-" .. tostring(index) .. ext
         index = index + 1
     end
-    used[candidate] = true
+    used[candidate:lower()] = true
     return candidate
 end
+
+Content._unique_asset_name = unique_asset_name -- exposed for specs
 
 local function write_file(path, data)
     local file, err = io.open(path, "wb")
@@ -489,7 +500,7 @@ function Content.full_download_workspace_used_asset_names(workspace)
     local used = {}
     for _, asset in ipairs(Content.full_download_workspace_assets(workspace)) do
         local name = basename(asset.href)
-        if name ~= "" then used[name] = true end
+        if name ~= "" then used[name:lower()] = true end
     end
     return used
 end
