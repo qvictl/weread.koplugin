@@ -590,7 +590,7 @@ function ProgressSync:_pull(options)
     local generation = self.generation
     self.pulling = true
     self.state = "pulling"
-    local started = self.run_online("progress_pull", function()
+    local function pull_task()
         if not local_position then
             local book_id = tostring(self.detect_book() or "")
             local refresh_ok, refreshed, refresh_error = pcall(
@@ -645,6 +645,18 @@ function ProgressSync:_pull(options)
             last_sync_error = false,
         })
         self:_resolve(local_position, remote, context, options)
+    end
+    local started = self.run_online("progress_pull", function()
+        -- Anything in pull_task may throw (catalog refresh, capture, remote
+        -- normalization). run_online catches it, but a pull left marked in
+        -- flight would make every later pull, manual ones included, return
+        -- early until KOReader restarts.
+        local ok, err = xpcall(pull_task, debug.traceback)
+        if not ok then
+            self.pulling = false
+            self.state = "error"
+            error(err, 0)
+        end
     end, { silent_offline = true })
     if not started then
         self.pulling = false
@@ -708,6 +720,9 @@ end
 function ProgressSync:on_reader_ready()
     self.generation = self.generation + 1
     local generation = self.generation
+    -- A request of the previous document may still be marked in flight.
+    self.pulling = false
+    self.uploading = false
     self.current_book_id = nil
     self.local_position = nil
     self.remote_position = nil
