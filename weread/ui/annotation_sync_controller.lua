@@ -706,10 +706,14 @@ function M:onUnifiedAnnotationsReady()
     if not context then return end
     -- Recover partial chapter selections created by older builds that wrote a
     -- projection but waited for the whole document before marking it usable.
-    if self:_annotationSummary(context).located > 0 then
+    -- Only write when the flag is missing: a write transaction per book open
+    -- is avoidable I/O on the UI thread.
+    local display = context.store:get(context.book_id, "display", context.document_key) == true
+    if not display and self:_annotationSummary(context).located > 0 then
         context.store:put(context.book_id, "display", context.document_key, true)
+        display = true
     end
-    self._unified_annotations_active = self:_usesUnifiedAnnotations()
+    self._unified_annotations_active = display or self:_usesUnifiedAnnotations()
     started = perf("annotation_display_state", started)
     self:_refreshAnnotationOverlay()
     started = perf("saved_annotation_overlay", started)
