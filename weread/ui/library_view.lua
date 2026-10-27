@@ -642,6 +642,19 @@ function CoverCell:onTapCoverCell()
     return true
 end
 
+-- Rebuild this cell in place once its cover finished loading (or failed),
+-- without rebuilding the page or re-showing the view. `path` nil turns a
+-- loading placeholder into the "No cover" one.
+function CoverCell:setCover(path)
+    local old_frame = self.frame
+    local focused = old_frame and old_frame.invert
+    self.cover_path = path
+    self.cover_loading = false
+    self:init()
+    self.frame.invert = focused
+    if old_frame and old_frame.free then old_frame:free() end
+end
+
 function CoverCell:onFocus()
     self.frame.invert = true
     return true
@@ -683,6 +696,7 @@ local LibraryView = FocusManager:extend{
     cover_paths = nil,
     cover_loading = nil,
     on_page_changed = nil,
+    on_closed = nil,
 }
 
 -- Defer destructive callbacks until Button has finished repainting its feedback.
@@ -1123,8 +1137,30 @@ function LibraryView:onShow()
     return true
 end
 
+-- Swap in covers that a background batch finished after the page was built.
+-- `path_for(book)` returns the cached thumbnail or nil. Only cells still
+-- showing a placeholder are touched; returns true when anything changed.
+-- Safe while another widget covers the shelf: UIManager repaints the shelf
+-- with the new cells once it is uncovered.
+function LibraryView:updateCovers(path_for)
+    if not self.cover_mode then return false end
+    local updated = false
+    for _i, cell in ipairs(self._item_rows or {}) do
+        if cell.setCover and not cell._has_cover then
+            local path = path_for(cell.book)
+            if path or cell.cover_loading then
+                cell:setCover(path)
+                updated = true
+            end
+        end
+    end
+    if updated then UIManager:setDirty(self, "ui") end
+    return updated
+end
+
 function LibraryView:onCloseWidget()
     UIManager:setDirty(nil, function() return "ui", self.dimen end)
+    if self.on_closed then self.on_closed(self) end
 end
 
 function LibraryView:onClose()
@@ -1191,6 +1227,7 @@ function M.show(data, callbacks)
         on_filter = callbacks.on_filter,
         on_select = callbacks.on_select,
         on_page_changed = callbacks.on_page_changed,
+        on_closed = callbacks.on_closed,
     }
     UIManager:show(view)
     return view

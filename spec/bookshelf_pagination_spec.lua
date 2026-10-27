@@ -7,10 +7,17 @@ local function expect(condition, message)
 end
 
 local dialogs = {}
+local closed_views = {}
 package.preload["ui/uimanager"] = function()
     return {
         show = function(_self, dialog) dialogs[#dialogs + 1] = dialog end,
-        close = function() end,
+        close = function(_self, widget)
+            if widget then
+                closed_views[widget] = true
+                if widget.on_closed then widget.on_closed(widget) end
+            end
+        end,
+        isWidgetShown = function(_self, widget) return not closed_views[widget] end,
         nextTick = function(_self, callback) callback() end,
         scheduleIn = function(_self, _delay, callback) callback() end,
     }
@@ -98,15 +105,25 @@ package.preload["weread.ui.library_view"] = function()
             return { page_size = 10 }
         end,
         show = function(data, callbacks)
-            shown[#shown + 1] = { data = data, callbacks = callbacks }
+            local entry = { data = data, callbacks = callbacks }
+            shown[#shown + 1] = entry
             local source = data.mode == "public_account" and data.accounts or data.books
             local page_count = math.max(1, math.ceil(#source / data.page_size))
             local page = math.max(1, math.min(data.page or 1, page_count))
-            return { page = page, page_count = page_count, page_size = data.page_size,
+            entry.view = { page = page, page_count = page_count, page_size = data.page_size,
                 on_refresh = callbacks.on_refresh,
+                on_closed = callbacks.on_closed,
+                cover_updates = {},
+                updateCovers = function(self, path_for)
+                    for _i, book in ipairs(source) do
+                        self.cover_updates[book] = path_for(book)
+                    end
+                    return true
+                end,
                 setRefreshing = function(self, busy) self.refreshing = busy end,
                 getScrollOffset = function() return { x = 0, y = 125 } end,
             }
+            return entry.view
         end,
     }
 end
@@ -238,10 +255,26 @@ expect(subprocess_runs == 9,
 expect(cover_requests[1].options.skip_cookie == true
         and cover_requests[1].options.persist_response_cookies == false,
     "public cover request did not suppress account credentials")
-expect(#shown == 10 and shown[10].data.cover_paths[shelf[1]] ~= nil,
-    "cover batch did not refresh the page once with cached paths")
-expect(shown[10].data.cover_loading[shelf[1]] ~= true,
-    "cached cover incorrectly remained in its loading state")
+expect(#shown == 9, "cover batch re-showed the shelf instead of updating it in place")
+expect(shown[9].view.cover_updates[shelf[1]] ~= nil,
+    "cover batch did not update the visible cells with cached paths")
+
+-- A batch that finishes after the shelf was closed must not touch it or
+-- bring it back.
+for index = 13, 21 do shelf[index].cover = "https://cdn.example/" .. tostring(index) end
+local deferred_polls = {}
+local uimanager = package.loaded["ui/uimanager"]
+local immediate_schedule = uimanager.scheduleIn
+uimanager.scheduleIn = function(_self, _delay, callback) deferred_polls[#deferred_polls + 1] = callback end
+shown[9].callbacks.on_page_changed(2)
+local closing_view = shown[10].view
+expect(host.shelf_view == closing_view, "page turn did not register the new shelf")
+uimanager:close(closing_view)
+expect(host.shelf_view == nil, "closed shelf stayed registered")
+uimanager.scheduleIn = immediate_schedule
+for _i, poll in ipairs(deferred_polls) do poll() end
+expect(#shown == 10 and next(closing_view.cover_updates) == nil,
+    "cover batch updated or re-opened a closed shelf")
 
 local requests_before_unsafe_url = #cover_requests
 local unsafe_view = { page = 1 }
@@ -331,6 +364,16 @@ expect(fetches == 1 and written_archives[2].archiveId == 7 and not host.shelf_re
 expect(shown[#shown].data.page == 2 and shown[#shown].data.group_key == "archive:7"
         and shown[#shown].data.scroll_offset.y == 125,
     "refresh lost group, page or scroll position after archive reorder")
+
+-- A refresh that finishes after the user left the shelf keeps the snapshot
+-- but does not re-open the shelf.
+local before_left = #shown
+shown[#shown].callbacks.on_refresh()
+uimanager:close(shown[#shown].view)
+pending()
+expect(#shown == before_left and not host.shelf_refreshing,
+    "refresh re-opened a shelf the user had closed")
+closed_views[shown[#shown].view] = nil
 
 host.client.get_shelf = function() return { books = grouped_books, archive = {} } end
 shown[#shown].callbacks.on_refresh()

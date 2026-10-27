@@ -201,6 +201,12 @@ function M:refreshBookshelf(old_view, view_options)
             or {}
         local archives = type(result) == "table" and type(result.archive) == "table" and result.archive or {}
         if self.library_db then self.library_db:cacheShelf(all_books, archives) end
+        if old_view and not UIManager:isWidgetShown(old_view) then
+            -- The user left the shelf while it refreshed: keep the new
+            -- snapshot for the next visit instead of re-opening the shelf.
+            self:applyShelfSnapshot(all_books, archives)
+            return
+        end
         local old_group_key = self.shelf_group_key
         self:applyShelfSnapshot(all_books, archives)
         local next_options = {}
@@ -303,18 +309,20 @@ function M:fetchVisibleShelfCovers(view, items, options)
     local index, changed = 1, false
     local function finish_batch()
         self.shelf_cover_job = nil
-        if changed and generation == self.shelf_cover_generation and self.shelf_view == view then
-            local pruned = pcall(cache.prune, cache)
-            if not pruned then logger.warn("bookshelf cover cache pruning failed") end
-            local next_options = {}
-            for key, value in pairs(options) do next_options[key] = value end
-            next_options.prepared_shelf = {
-                books = options.prepared_books or self.shelf_regular or {},
-                accounts = options.prepared_accounts or self.shelf_mp or {},
-            }
-            next_options.page = view.page
-            next_options.skip_cover_fetch_once = true
-            self:showShelfView(options.mode or "books", options.keyword, view, next_options)
+        if generation == self.shelf_cover_generation and self.shelf_view == view then
+            if changed then
+                local pruned = pcall(cache.prune, cache)
+                if not pruned then logger.warn("bookshelf cover cache pruning failed") end
+            end
+            -- Update the cells in place. Re-showing the shelf would put it on
+            -- top of whatever the user opened meanwhile (a book page, a
+            -- dialog, the keyboard) and flash the whole screen.
+            if view.updateCovers then
+                local ok, err = pcall(view.updateCovers, view, function(book)
+                    return cache:pathFor(book)
+                end)
+                if not ok then logger.warn("bookshelf cover update failed:", log_error(err)) end
+            end
         end
         local pending = self.shelf_cover_pending
         self.shelf_cover_pending = nil
@@ -390,8 +398,6 @@ function M:showShelfView(mode, keyword, old_view, options)
     mode = mode or "books"
     options.mode = mode
     options.keyword = keyword
-    local skip_cover_fetch_once = options.skip_cover_fetch_once == true
-    options.skip_cover_fetch_once = nil
     self.shelf_cover_generation = (self.shelf_cover_generation or 0) + 1
     self.shelf_view_mode = mode
     self.shelf_search_keyword = keyword
@@ -542,14 +548,17 @@ function M:showShelfView(mode, keyword, old_view, options)
             next_options.page = new_page
             self:showShelfView(mode, keyword, view, next_options)
         end,
+        on_closed = function(closed_view)
+            -- A closed shelf must not be updated or brought back by a
+            -- cover batch or a refresh that finishes later.
+            if self.shelf_view == closed_view then self.shelf_view = nil end
+        end,
     })
     if paged then self.shelf_view_pages[mode] = view.page end
     self.shelf_view = view
-    if cover_mode and not skip_cover_fetch_once then
+    if cover_mode then
         local fetch_options = {}
         for key, value in pairs(options) do fetch_options[key] = value end
-        fetch_options.prepared_books = books
-        fetch_options.prepared_accounts = accounts
         self:fetchVisibleShelfCovers(view, source, fetch_options)
     end
 end
