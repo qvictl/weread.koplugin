@@ -79,7 +79,7 @@ Content.ensure_reader_state(client, book)
 local chapters = Content.fetch_catalog(client, book)
 Content.save_catalog_cache(client, settings, book, chapters)
 local path = Content.fetch_chapters_epub(client, settings, book, chapters, { suffix = 'annotation-test' })
-settings:set('books', { [book.bookId] = book }); settings:flush()
+settings:put_book(book.bookId, book); settings:flush()
 local reader, plugin
 local function open_reader()
     reader = require('apps/reader/readerui'):new { dimen = Screen:getSize(),

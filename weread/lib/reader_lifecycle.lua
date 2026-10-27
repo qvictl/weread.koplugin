@@ -182,7 +182,8 @@ function M:onCloseDocument()
     -- Nothing here may touch the network (F3): ProgressSync only records the
     -- final position for a later upload and ReadReport pauses its credit
     -- clock, so the order of the two calls below does not matter.
-    self.progress_sync:on_close_document()
+    local closed, close_err = pcall(self.progress_sync.on_close_document, self.progress_sync)
+    if not closed then logger.warn("progress sync close failed:", tostring(close_err)) end
     self._reader_session_gen = (self._reader_session_gen or 0) + 1
     self.downloader:cancelPrefetch("document_closed")
     if self._cancelUnifiedAnnotationSync then self:_cancelUnifiedAnnotationSync() end
@@ -198,7 +199,8 @@ function M:onCloseDocument()
         self._orig_onEndOfBook = nil
     end
 
-    self.read_report:on_close_document()
+    local reported, report_err = pcall(self.read_report.on_close_document, self.read_report)
+    if not reported then logger.warn("read report close failed:", tostring(report_err)) end
 end
 
 function M:showPrefetchNotice(text, timeout)
@@ -332,8 +334,10 @@ function M:onSuspend()
     -- A QR login would keep long-polling into the screensaver.
     if self.qr_login and self.qr_login.on_suspend then self.qr_login:on_suspend() end
     -- O(1) and network-free: the device and its Wi-Fi are going to sleep.
-    self.progress_sync:on_suspend()
-    self.read_report:on_suspend()
+    local ok, err = pcall(self.progress_sync.on_suspend, self.progress_sync)
+    if not ok then logger.warn("progress sync suspend failed:", tostring(err)) end
+    ok, err = pcall(self.read_report.on_suspend, self.read_report)
+    if not ok then logger.warn("read report suspend failed:", tostring(err)) end
 end
 
 function M:onResume()

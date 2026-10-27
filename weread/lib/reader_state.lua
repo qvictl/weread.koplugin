@@ -44,6 +44,9 @@ function ReaderState.apply_to_book(book, state)
         or tonumber(book.chapter_offset) or 0
     book.progress = tonumber(progress.progress) or tonumber(book.progress) or 0
     book.summary = progress.summary or book.summary or ""
+    -- The record now holds the cloud's position, not one this device
+    -- reported (see ReadReport/ProgressSync use of reported_local).
+    book.reported_local = false
     return book
 end
 
