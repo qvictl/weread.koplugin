@@ -36,7 +36,7 @@ package.preload["ui/uimanager"] = function()
         show = function() end, close = function() end,
         nextTick = function(_self, callback) callback() end,
         scheduleIn = function(_self, _delay, callback) callback() end,
-        isWidgetShown = function() return true end,
+        isWidgetShown = function(_self, widget) return not widget.closed end,
     }
 end
 package.preload["weread.lib.plugin_util"] = function()
@@ -57,9 +57,15 @@ local detail_data
 package.preload["weread.ui.book_detail_view"] = function()
     return { show = function(data) detail_data = data return {} end }
 end
-local catalog_views = {}
+local catalog_views, list_views = {}, {}
 package.preload["weread.ui.chapter_list_view"] = function()
-    return { show = function(data) catalog_views[#catalog_views + 1] = data return { page = 1 } end }
+    return { show = function(data, callbacks)
+        catalog_views[#catalog_views + 1] = data
+        local view = { page = 1, callbacks = callbacks, updates = 0 }
+        function view:setChapters(rows) self.updates = self.updates + 1 self.rows = rows end
+        list_views[#list_views + 1] = view
+        return view
+    end }
 end
 
 local Library = require("weread.ui.library")
@@ -122,5 +128,20 @@ book.chapter_uid = 700
 catalog_views = {}
 host:showChapterList(book)
 expect(catalog_views[1].focus_index == 700, "chapter list did not focus the reading chapter")
+
+-- A finished download refreshes the list in place while it is shown, and
+-- leaves the user alone once they left it.
+local downloaded
+host.openChapter = function(_self, _book, _chapter, on_downloaded) downloaded = on_downloaded end
+local view = list_views[#list_views]
+local shown_before = #catalog_views
+view.callbacks.on_select(catalog[1])
+downloaded()
+expect(view.updates == 1 and #catalog_views == shown_before,
+    "download completion re-showed the list instead of updating it")
+view.closed = true
+downloaded()
+expect(view.updates == 1 and #catalog_views == shown_before,
+    "download completion touched or re-opened a closed chapter list")
 
 print(("catalog_persistence_spec: %d checks"):format(checks))

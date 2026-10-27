@@ -803,7 +803,12 @@ function M:refreshBookRecord(book, old_view, options)
             self:showInfo(T(_("%1 failed:\n%2"), _("Book info"), display_error(err)))
             return
         end
-        if old_view then UIManager:close(old_view) end
+        if old_view then
+            -- The user left the page while it refreshed: keep the data,
+            -- do not bring the page back over whatever is shown now.
+            if not UIManager:isWidgetShown(old_view) then return end
+            UIManager:close(old_view)
+        end
         self:showBookMenu(book)
         self:showTransientInfo(_("Book information updated."), 2)
     end)
@@ -889,8 +894,10 @@ function M:showBookMenu(book)
     local view
     local open_chapter_list = self:safeCallback(_("Chapter list"), function()
         self:showChapterList(book, function()
+            -- Rebuild for new download state, unless the page is gone.
+            if not (view and UIManager:isWidgetShown(view)) then return end
             local latest = BookRecords.get(self.settings, book_id) or book
-            if view then UIManager:close(view) end
+            UIManager:close(view)
             self:showBookMenu(latest)
         end)
     end)
@@ -1388,12 +1395,7 @@ function M:showChapterList(book, on_close)
             if tostring(chapter.chapterUid or chapter.chapterId) == uid then return index end
         end
     end
-    local showCatalog
-    showCatalog = function(chapters, old_view)
-        -- Downloads persist their cache paths before invoking on_complete.
-        -- Always rebuild from that persisted record instead of the snapshot
-        -- captured when the chapter list was first opened.
-        reloadBookCache()
+    local function catalog_rows(chapters)
         local rows = {}
         for _i, chapter in ipairs(chapters) do
             rows[#rows + 1] = setmetatable({
@@ -1402,39 +1404,50 @@ function M:showChapterList(book, on_close)
                 source = chapter,
             }, row_meta)
         end
-        local page = old_view and old_view.page or nil
-        if old_view then
-            UIManager:close(old_view)
-            if self._chapter_list_view == old_view then
-                self._chapter_list_view = nil
-            end
-        end
+        return rows
+    end
+    local state = {}
+    -- Downloads persist their cache paths before invoking on_complete.
+    -- Always rebuild from that persisted record instead of the snapshot
+    -- captured when the chapter list was first opened. The list is updated
+    -- in place, and only while it is still shown: a download that finishes
+    -- after the user left (or started reading) must not bring it back.
+    local function refreshCatalog(chapters)
+        local view = state.view
+        if not view or not UIManager:isWidgetShown(view) then return false end
+        reloadBookCache()
+        if chapters then state.chapters = chapters end
+        view:setChapters(catalog_rows(state.chapters))
+        return true
+    end
+    local function showCatalog(chapters)
+        reloadBookCache()
+        state.chapters = chapters
         local view
         view = ChapterListView.show({
             title = book.title or _("Chapter list"),
-            chapters = rows,
-            page = page,
-            focus_index = not page and reading_index(chapters) or nil,
+            chapters = catalog_rows(chapters),
+            focus_index = reading_index(chapters),
         }, {
             on_refresh = self:safeCallback(_("Refresh chapter list"), function()
                 self:loadChapters(book, function(refreshed_chapters)
-                    showCatalog(refreshed_chapters, view)
-                    self:showTransientInfo(T(_("Chapter list refreshed: %1 chapters"),
-                        tostring(#refreshed_chapters)), 2)
+                    if refreshCatalog(refreshed_chapters) then
+                        self:showTransientInfo(T(_("Chapter list refreshed: %1 chapters"),
+                            tostring(#refreshed_chapters)), 2)
+                    end
                 end, true)
             end),
             on_select_download = self:safeCallback(_("Select chapters to download"), function()
-                self:showChapterDownloadSelection(book, chapters, function()
-                    showCatalog(chapters, view)
+                self:showChapterDownloadSelection(book, state.chapters, function()
+                    refreshCatalog()
                 end)
             end),
             on_select = function(chapter)
                 self:openChapter(book, chapter, function()
-                    -- The downloader has persisted the new chapter path before
-                    -- this callback runs. Rebuild beneath the completion dialog
-                    -- so either "Read now" or "Close" leaves current cache state.
+                    -- Refresh beneath the completion dialog so either
+                    -- "Read now" or "Close" leaves current cache state.
                     UIManager:scheduleIn(0.1, function()
-                        showCatalog(chapters, view)
+                        refreshCatalog()
                     end)
                 end)
             end,
@@ -1445,6 +1458,7 @@ function M:showChapterList(book, on_close)
                 if on_close then on_close() end
             end,
         })
+        state.view = view
         self._chapter_list_view = view
     end
     self:loadChapters(book, function(chapters)
