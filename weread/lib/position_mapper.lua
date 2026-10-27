@@ -257,6 +257,43 @@ function PositionMapper.remote_to_local(chapters, remote, options)
     }
 end
 
+-- Whole-book percent with full precision: the local capture keeps the exact
+-- fraction while its wire `percent` is floored to an integer.
+local function exact_percent(position)
+    local fraction = tonumber(position and position.fraction)
+    if fraction then return fraction * 100 end
+    return tonumber(position and position.percent) or 0
+end
+
+PositionMapper.exact_percent = exact_percent
+
+-- True when `position` lies before `reference` by more than `tolerance`
+-- percent of the whole book (default 0.3). Used to decide whether sending
+-- `position` would move cloud progress backwards.
+function PositionMapper.is_behind(position, reference, tolerance)
+    if type(position) ~= "table" or type(reference) ~= "table" then
+        return false
+    end
+    tolerance = math.max(0, tonumber(tolerance) or 0.3)
+    return exact_percent(reference) - exact_percent(position) > tolerance
+end
+
+-- Same reading spot: same chapter and chapter offset (one word of slack)
+-- when both sides carry them, otherwise whole-book percent within 0.5.
+function PositionMapper.same_spot(left, right)
+    if type(left) ~= "table" or type(right) ~= "table" then return false end
+    local left_offset = tonumber(left.chapter_offset)
+    local right_offset = tonumber(right.chapter_offset)
+    if left.chapter_uid ~= nil and right.chapter_uid ~= nil
+        and left_offset and right_offset
+        and left.has_chapter_offset ~= false
+        and right.has_chapter_offset ~= false then
+        return tostring(left.chapter_uid) == tostring(right.chapter_uid)
+            and math.abs(left_offset - right_offset) <= 1
+    end
+    return math.abs(exact_percent(left) - exact_percent(right)) <= 0.5
+end
+
 function PositionMapper.compare(local_position, remote, threshold)
     if type(local_position) ~= "table" or type(remote) ~= "table" then
         return "unknown", 0

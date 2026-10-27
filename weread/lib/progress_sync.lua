@@ -16,6 +16,8 @@ local RESUME_UPLOAD_DELAY_SECONDS = 5
 local RESUME_UPLOAD_MAX_ATTEMPTS = 6
 local BUSY_RETRY_LIMIT = 10
 local SAME_THRESHOLD_PERCENT = 2
+-- Positions closer than this (whole-book percent) are the same spot.
+local EXACT_THRESHOLD_PERCENT = 0.3
 local SOURCE_CONFLICT_THRESHOLD_PERCENT = 2
 
 local function log(level, ...)
@@ -478,52 +480,7 @@ function ProgressSync:_resolve(local_position, remote, context, options)
 
     local ask = self:_config().ask_on_conflict ~= false
     if remote.conflict or ask or manual_difference then
-        self.state = "awaiting_choice"
-        local choice_generation = self.generation
-        local function choice_is_current()
-            return choice_generation == self.generation
-                and tostring(self.detect_book() or "") == context.book_id
-        end
-        local function chapter_title(position)
-            local uid = position and position.chapter_uid
-            if uid ~= nil and type(context.chapters) == "table" then
-                for _, chapter in ipairs(context.chapters) do
-                    if tostring(chapter.chapterUid or chapter.chapterId) == tostring(uid) then
-                        if chapter.title and chapter.title ~= "" then
-                            return chapter.title
-                        end
-                    end
-                end
-            end
-            return position and position.summary or ""
-        end
-        local local_choice = copy(local_position)
-        local remote_choice = copy(remote)
-        local_choice.chapter_title = chapter_title(local_position)
-        remote_choice.chapter_title = chapter_title(remote)
-        self.on_choice({
-            book_title = context.book.title or context.book_id,
-            local_position = local_choice,
-            remote_position = remote_choice,
-            source_conflict = remote.conflict == true,
-            use_remote = function()
-                if not choice_is_current() then return end
-                local ok, reason = self:_apply_remote(
-                    remote, context, { manual = options.manual })
-                if not ok then
-                    self.state = "error"
-                    self.notify("jump_failed", { error = reason })
-                end
-            end,
-            keep_local = function()
-                if not choice_is_current() then return end
-                self:_keep_local(local_position, remote, {
-                    manual = options.manual,
-                    upload_now = true,
-                    reason = "explicit_local_choice",
-                })
-            end,
-        })
+        self:_offer_choice(local_position, remote, context, options)
         return
     end
 
@@ -541,6 +498,97 @@ function ProgressSync:_resolve(local_position, remote, context, options)
             reason = "manual_sync",
         })
     end
+end
+
+-- Closes a choice dialog that is still on screen without treating it as an
+-- answer (document closed, device suspended). Returns true when one was open.
+function ProgressSync:_close_choice(reason)
+    local choice = self.choice
+    if not choice then return false end
+    self.choice = nil
+    if type(choice.close) == "function" then
+        local ok, err = pcall(choice.close)
+        if not ok then log("warn", "closing progress choice failed:", tostring(err)) end
+    end
+    if self.state == "awaiting_choice" then
+        self.state = "unverified"
+    end
+    log("info", "progress choice closed without an answer:",
+        "book=", tostring(self.current_book_id),
+        "reason=", tostring(reason))
+    return true
+end
+
+function ProgressSync:_offer_choice(local_position, remote, context, options)
+    -- One dialog at a time. A second conflict (resume recheck, manual sync)
+    -- would otherwise stack another box whose callbacks are also "current".
+    if self.choice then return end
+    self.state = "awaiting_choice"
+    local choice_generation = self.generation
+    local choice
+    local function choice_is_current()
+        return self.choice == choice
+            and choice_generation == self.generation
+            and tostring(self.detect_book() or "") == context.book_id
+    end
+    local function chapter_title(position)
+        local uid = position and position.chapter_uid
+        if uid ~= nil and type(context.chapters) == "table" then
+            for _, chapter in ipairs(context.chapters) do
+                if tostring(chapter.chapterUid or chapter.chapterId) == tostring(uid) then
+                    if chapter.title and chapter.title ~= "" then
+                        return chapter.title
+                    end
+                end
+            end
+        end
+        return position and position.summary or ""
+    end
+    local local_choice = copy(local_position)
+    local remote_choice = copy(remote)
+    local_choice.chapter_title = chapter_title(local_position)
+    remote_choice.chapter_title = chapter_title(remote)
+    choice = {
+        book_title = context.book.title or context.book_id,
+        local_position = local_choice,
+        remote_position = remote_choice,
+        source_conflict = remote.conflict == true,
+        -- Keeping the local position would move cloud progress back:
+        -- the dialog asks for a second confirmation first.
+        local_behind_remote = PositionMapper.is_behind(
+            local_position, remote, EXACT_THRESHOLD_PERCENT),
+        use_remote = function()
+            if not choice_is_current() then return end
+            self.choice = nil
+            local ok, reason = self:_apply_remote(
+                remote, context, { manual = options.manual })
+            if not ok then
+                self.state = "error"
+                self.notify("jump_failed", { error = reason })
+            end
+        end,
+        keep_local = function()
+            if not choice_is_current() then return end
+            self.choice = nil
+            self:_keep_local(local_position, remote, {
+                manual = options.manual,
+                upload_now = true,
+                reason = "explicit_local_choice",
+            })
+        end,
+        -- Tap outside / Back: no answer. Nothing is uploaded or moved;
+        -- the session stays unverified and the choice is offered again
+        -- on the next open, resume recheck or manual sync.
+        dismiss = function()
+            if not choice_is_current() then return end
+            self.choice = nil
+            self.state = "unverified"
+            log("info", "progress choice dismissed, nothing uploaded:",
+                "book=", context.book_id)
+        end,
+    }
+    self.choice = choice
+    self.on_choice(choice)
 end
 
 function ProgressSync:_schedule_pull_retry(options, retry_token)
@@ -573,6 +621,8 @@ end
 function ProgressSync:_pull(options)
     options = options or {}
     if self.pulling then return false end
+    -- A choice dialog is still waiting for an answer: do not stack another.
+    if self.choice then return false end
     local retry_token = options.retry_token
     if retry_token == nil then
         self.pull_retry_token = self.pull_retry_token + 1
@@ -737,6 +787,7 @@ function ProgressSync:cancel_pending_jump(reason)
 end
 
 function ProgressSync:on_reader_ready()
+    self:_close_choice("document_changed")
     self.generation = self.generation + 1
     local generation = self.generation
     -- A request of the previous document may still be marked in flight.
@@ -789,6 +840,8 @@ function ProgressSync:on_page_update()
 end
 
 function ProgressSync:on_close_document()
+    -- A choice left on screen would float over the next document.
+    self:_close_choice("document_closed")
     local position = self:capture_local() or self.local_position
     if position and self.verified
         and self:_config().upload_on_close == true then
@@ -810,6 +863,11 @@ end
 
 function ProgressSync:on_suspend()
     self.suspended_at = self.now()
+    -- Positions in an unanswered dialog may be stale after sleeping; ask
+    -- again with fresh data after resume instead.
+    if self:_close_choice("suspend") then
+        self.reask_after_resume = true
+    end
     local position = self:capture_local() or self.local_position
     if position and self.local_position
         and not PositionMapper.same_position(position, self.local_position) then
@@ -851,7 +909,9 @@ function ProgressSync:on_resume()
     self.suspended_at = nil
     local pending = self.pending_resume_upload
     self.pending_resume_upload = nil
-    if slept >= RESUME_RECHECK_SECONDS
+    local reask = self.reask_after_resume == true
+    self.reask_after_resume = nil
+    if (slept >= RESUME_RECHECK_SECONDS or reask)
         and self:_config().pull_on_open == true then
         -- Someone may have read elsewhere while we slept: the pending upload
         -- goes through the pull, which keeps it only if the cloud position
