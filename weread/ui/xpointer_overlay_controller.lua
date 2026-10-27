@@ -169,8 +169,13 @@ function M:bindExternalAnnotationsBook(touchmenu_instance)
             callback = function()
                 local keyword = dialog:getInputText()
                 UIManager:close(dialog)
-                self:runOnlineTask(_("Search"), function()
-                    local result = self.client:gateway("/store/search", { keyword = keyword, count = 20 })
+                local client = self.client
+                local function search()
+                    return client:gateway("/store/search", { keyword = keyword, count = 20 })
+                end
+                local function show_results(result)
+                    -- The reader may have moved to another book meanwhile.
+                    if current_file(self) ~= path then return end
                     local items = {}
                     for _index, book in ipairs(External.normalize_search(result)) do
                         items[#items + 1] = {
@@ -216,6 +221,14 @@ function M:bindExternalAnnotationsBook(touchmenu_instance)
                         }
                     end
                     self:showList(_("Select matching WeRead book"), items, _("No search results."))
+                end
+                self:runOnlineTask(_("Search"), function()
+                    -- Keep the HTTP request off the UI thread when possible.
+                    if self._runAnnotationRequest then
+                        return self:_runAnnotationRequest(_("Search WeRead"), _("Search"),
+                            search, show_results)
+                    end
+                    show_results(search())
                 end)
             end,
         } } },
