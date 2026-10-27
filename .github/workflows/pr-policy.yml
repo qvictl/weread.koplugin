@@ -81,11 +81,11 @@ jobs:
         id: coverage
         continue-on-error: true
         run: |
+          python3 scripts/coverage_tools.py total coverage/luacov.report.out | tee "$RUNNER_TEMP/total.txt"
           python3 scripts/coverage_tools.py diff coverage/luacov.report.out \
             --base "origin/${{ steps.pr.outputs.base_ref }}" --head HEAD \
             --threshold "$DIFF_COVERAGE_THRESHOLD" \
             --summary "$RUNNER_TEMP/coverage.md" --json "$RUNNER_TEMP/coverage.json"
-          python3 scripts/coverage_tools.py total coverage/luacov.report.out | tee "$RUNNER_TEMP/total.txt"
 
       - name: Compose summary
         if: always()
