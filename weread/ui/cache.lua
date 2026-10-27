@@ -539,7 +539,20 @@ function M:showCacheManagement()
         })
     end
 
-    self.cache_menu = self:showList(_("Cache management"), items, _("No cached items"))
+    local menu = self:showList(_("Cache management"), items, _("No cached items"))
+    self.cache_menu = menu
+    -- Do not retain the menu and its items after it is closed (F12).
+    if menu then
+        local on_close_widget = menu.onCloseWidget
+        menu.onCloseWidget = function(menu_self, ...)
+            if self.cache_menu == menu_self then
+                self.cache_menu = nil
+            end
+            if on_close_widget then
+                return on_close_widget(menu_self, ...)
+            end
+        end
+    end
 end
 
 function M:refreshCacheManagement(message)

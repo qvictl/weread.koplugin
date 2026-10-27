@@ -642,6 +642,21 @@ function M:showShelfPage()
     menu = self:showList(_("WeRead Bookshelf"), buildItems(), _("Your WeRead shelf is empty."))
     self.shelf_menu = menu
     self._shelf_refresh = refresh
+    -- Forget the menu once it is closed, so finished downloads do not keep
+    -- rebuilding (and retaining) a menu that is no longer shown (F12).
+    if menu then
+        local on_close_widget = menu.onCloseWidget
+        menu.onCloseWidget = function(menu_self, ...)
+            if self.shelf_menu == menu_self then
+                self.shelf_menu = nil
+                self._shelf_refresh = nil
+                self._shelf_saved_books = nil
+            end
+            if on_close_widget then
+                return on_close_widget(menu_self, ...)
+            end
+        end
+    end
 end
 
 function M:refreshShelfCacheIndicators()

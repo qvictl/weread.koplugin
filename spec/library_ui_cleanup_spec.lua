@@ -112,4 +112,33 @@ host:openFile(nil)
 expect(#closed == 0 and host.shelf_view == shelf_view,
     "invalid open request unexpectedly closed the bookshelf")
 
+-- F12: a closed shelf menu is forgotten, so later download completions do
+-- not rebuild a menu that is no longer shown.
+local rebuilds = 0
+local base_close_calls = 0
+local shelf_menu = {
+    onCloseWidget = function() base_close_calls = base_close_calls + 1 end,
+    switchItemTable = function() rebuilds = rebuilds + 1 end,
+}
+host.shelf_books = { { bookId = "book", title = "Book" } }
+host.settings.get = function(_self, key, default)
+    if key == "books" then return books end
+    if key == "shelf" then return {} end
+    return default
+end
+host.shelfToolbarItems = function() return {} end
+host.bookMatchesFilters = function() return true end
+host.isBookDownloaded = function() return false end
+host.showList = function() return shelf_menu end
+host:showShelfPage()
+expect(host.shelf_menu == shelf_menu, "open shelf menu is tracked")
+host:refreshShelfCacheIndicators()
+expect(rebuilds == 1, "open shelf menu refreshes")
+shelf_menu:onCloseWidget()
+expect(base_close_calls == 1, "menu's own close handler still runs")
+expect(host.shelf_menu == nil and host._shelf_refresh == nil,
+    "closed shelf menu reference was retained")
+host:refreshShelfCacheIndicators()
+expect(rebuilds == 1, "closed shelf menu was rebuilt")
+
 print(("library_ui_cleanup_spec: %d checks"):format(checks))
