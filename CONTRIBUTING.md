@@ -48,7 +48,7 @@ fixtures). Plugin files no test loads count as 0%.
 | --- | --- | --- |
 | Diff, unit | changed executable Lua lines covered by unit specs ≥ 80% | yes (waived by `no-tests-needed`) |
 | Diff, combined | changed lines covered by unit specs + emulator scenarios ≥ 90% | yes (waived by `no-tests-needed`) |
-| Ratchet | overall unit and overall combined coverage must not drop below `main`'s latest value (0.05 pp tolerance for run-to-run noise) | yes |
+| Ratchet | overall unit and overall combined coverage must not drop below `main`'s latest value (0.1 pp tolerance: emulator runs vary by a few timing-dependent lines, observed 0.03 pp) | yes |
 | Target 4 weeks | overall combined ≥ max(75%, day-one baseline 80.78%) from 2026-11-24 | report-only before the date, then yes |
 | Target 8 weeks | overall combined ≥ 85% from 2026-12-22 | report-only before the date, then yes |
 
