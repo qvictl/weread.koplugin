@@ -194,23 +194,25 @@ function LibraryDB:getShelf()
     local db = self:open()
     if not db then return nil end
     local books = {}
-    local ok, stmt = pcall(function()
-        return db:prepare([[
+    local stmt
+    -- Stepping can raise (busy/corrupt database); keep it inside pcall so the
+    -- statement and connection are always closed.
+    local ok, err = pcall(function()
+        stmt = db:prepare([[
             SELECT payload FROM books
             WHERE on_shelf=1
             ORDER BY shelf_position, book_id
         ]])
-    end)
-    if ok and stmt then
         local row = stmt:reset():step()
         while row do
             local book = decode(row[1])
             if book then books[#books + 1] = book end
             row = stmt:step()
         end
-    end
+    end)
     close_statement(stmt)
     pcall(function() db:close() end)
+    if not ok then logger.warn("library_db shelf read failed:", err) end
     return ok and books or nil
 end
 
@@ -266,9 +268,10 @@ function LibraryDB:putChapters(book_id, chapters)
     local ok, err = pcall(function()
         db:exec("BEGIN")
         transaction_open = true
-        local delete_stmt = db:prepare("DELETE FROM chapters WHERE book_id=?")
-        delete_stmt:reset():bind(tostring(book_id)):step()
-        delete_stmt:close()
+        stmt = db:prepare("DELETE FROM chapters WHERE book_id=?")
+        stmt:reset():bind(tostring(book_id)):step()
+        close_statement(stmt)
+        stmt = nil
         stmt = db:prepare([[
             INSERT INTO chapters (book_id, chapter_uid, position, payload, updated_at)
             VALUES (?, ?, ?, ?, ?)
