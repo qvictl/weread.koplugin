@@ -218,14 +218,21 @@ function WeReadPlugin:onCloseWidget()
     if self.runtime then
         self.runtime:detach(self)
     end
-    if self.read_report and self.read_report.stop then
-        -- The close-document progress upload scheduled by onCloseDocument
-        -- still runs: upload_position does not depend on the report timer.
-        self.read_report:stop("plugin_closed")
-    end
     local function teardown(label, fn, ...)
         local ok, err = pcall(fn, ...)
         if not ok then logger.warn("teardown failed:", label, tostring(err)) end
+    end
+    -- Both cancel all their timers and poll chains; unsent progress stays
+    -- persisted in the book records and is uploaded by the next instance.
+    if self.read_report then
+        if self.read_report.teardown then
+            teardown("read_report", self.read_report.teardown, self.read_report, "plugin_closed")
+        elseif self.read_report.stop then
+            teardown("read_report", self.read_report.stop, self.read_report, "plugin_closed")
+        end
+    end
+    if self.progress_sync and self.progress_sync.teardown then
+        teardown("progress_sync", self.progress_sync.teardown, self.progress_sync, "plugin_closed")
     end
     if self.qr_login and self.qr_login.cancel then
         teardown("qr_login", self.qr_login.cancel, self.qr_login)

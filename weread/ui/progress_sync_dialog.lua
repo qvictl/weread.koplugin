@@ -12,49 +12,121 @@ local function _(text)
 end
 
 local function percent(position)
-    return string.format("%.0f", tonumber(position and position.percent) or 0)
+    local fraction = tonumber(position and position.fraction)
+    return string.format("%.1f%%", fraction and fraction * 100
+        or tonumber(position and position.percent) or 0)
+end
+
+-- One decimal, with the percent sign added here. Putting "%" immediately
+-- after %1 in a KOReader template is parsed as part of the placeholder, so
+-- the dialog shows the raw "%1" and "%2".
+local function place(position)
+    local value = percent(position)
+    local chapter = position and position.chapter_title or ""
+    if chapter ~= "" then
+        return value .. "\n" .. chapter
+    end
+    return value
 end
 
 function ProgressSyncDialog.show_choice(context)
+    local title = tostring(context.book_title or "")
     local message
     if context.source_conflict then
-        message = T(_(
-            "WeRead's two progress sources disagree for \"%1\".\n\n"
-            .. "KOReader: %2%\nSelected cloud position: %3%\n\n"
-            .. "Choose which position to keep."
-        ), context.book_title, percent(context.local_position),
-            percent(context.remote_position))
+        message = T(_("WeRead's two progress sources disagree for \"%1\"."), title)
+            .. "\n\n" .. "KOReader\n" .. place(context.local_position)
+            .. "\n\n" .. _("Selected cloud position") .. "\n" .. place(context.remote_position)
     else
-        message = T(_(
-            "Reading progress differs for \"%1\".\n\n"
-            .. "KOReader: %2%\nWeRead: %3%\n\n"
-            .. "Choose which position to keep."
-        ), context.book_title, percent(context.local_position),
-            percent(context.remote_position))
+        message = T(_("Reading progress differs for \"%1\"."), title)
+            .. "\n\n" .. "KOReader\n" .. place(context.local_position)
+            .. "\n\n" .. _("WeRead") .. "\n" .. place(context.remote_position)
+    end
+    message = message .. "\n\n" .. _("Choose which position to keep.")
+
+    -- Only an explicit button press may change anything. Tapping outside the
+    -- box or pressing Back used to run cancel_callback, i.e. "Keep KOReader
+    -- progress", which uploaded an older local position over newer cloud
+    -- progress. Dismissal now calls context.dismiss: nothing is uploaded and
+    -- the choice is offered again later.
+    local current
+    local function show(widget)
+        current = widget
+        UIManager:show(widget)
+    end
+    local function dismissible(widget)
+        widget.onClose = function(self_)
+            if current == self_ then current = nil end
+            UIManager:close(self_)
+            if context.dismiss then context.dismiss() end
+            return true
+        end
+        return widget
+    end
+    -- Lets the sync state machine close a stale dialog (document closed,
+    -- device suspended) without treating it as a choice.
+    context.close = function()
+        local widget = current
+        current = nil
+        if widget then UIManager:close(widget) end
     end
 
-    UIManager:show(ConfirmBox:new{
-        title = _("Reading progress sync"),
-        text = message,
-        ok_text = _("Use WeRead progress"),
-        cancel_text = _("Keep KOReader progress"),
-        ok_callback = context.use_remote,
-        cancel_callback = context.keep_local,
-    })
+    local show_choice_box
+    local function confirm_move_back()
+        show(dismissible(ConfirmBox:new{
+            title = _("Move WeRead progress back?"),
+            text = T(_("WeRead is further ahead than KOReader.\n\nWeRead: %1\nKOReader: %2\n\nKeeping the KOReader position moves your WeRead progress back."),
+                percent(context.remote_position), percent(context.local_position)),
+            ok_text = _("Move back"),
+            cancel_text = _("Back"),
+            flush_events_on_show = true,
+            ok_callback = function()
+                current = nil
+                context.keep_local()
+            end,
+            cancel_callback = function()
+                current = nil
+                show_choice_box()
+            end,
+        }))
+    end
+    show_choice_box = function()
+        show(dismissible(ConfirmBox:new{
+            title = _("Reading progress sync"),
+            text = message,
+            ok_text = _("Use WeRead progress"),
+            cancel_text = _("Keep KOReader progress"),
+            -- The dialog appears shortly after a book opens, while the reader
+            -- may already be tapping to turn pages: drop queued taps.
+            flush_events_on_show = true,
+            ok_callback = function()
+                current = nil
+                context.use_remote()
+            end,
+            cancel_callback = function()
+                current = nil
+                if context.local_behind_remote then
+                    confirm_move_back()
+                else
+                    context.keep_local()
+                end
+            end,
+        }))
+    end
+    show_choice_box()
 end
 
 function ProgressSyncDialog.notify(code, data)
     data = data or {}
     local text
     if code == "upload_success" then
-        text = T(_("Progress uploaded to WeRead: %1%"),
+        text = T(_("Progress uploaded to WeRead: %1"),
             percent(data.position))
     elseif code == "upload_failed" then
         text = T(_("Progress upload failed:\n%1"), tostring(data.error or ""))
     elseif code == "already_synced" then
         text = _("KOReader and WeRead are already at the same position.")
     elseif code == "remote_applied" then
-        text = T(_("Jumped to WeRead progress: %1%"),
+        text = T(_("Jumped to WeRead progress: %1"),
             percent(data.position))
     elseif code == "local_kept" then
         text = _("Kept the current KOReader position.")

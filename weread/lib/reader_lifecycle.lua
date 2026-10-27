@@ -1,4 +1,5 @@
 -- KOReader event lifecycle and reader-state orchestration.
+local CatalogMemo = require("weread.lib.catalog_memo")
 local Content = require("weread.lib.content")
 local logger = require("weread.lib.logger").scoped("Prefetch")
 local UIManager = require("ui/uimanager")
@@ -169,6 +170,7 @@ end
 
 function M:onPageUpdate()
     self.progress_sync:on_page_update()
+    if self.read_report then self.read_report:on_page_update() end
     if self._refreshAnnotationOverlay then self:_refreshAnnotationOverlay() end
 end
 
@@ -177,9 +179,9 @@ function M:onPosUpdate()
 end
 
 function M:onCloseDocument()
-    -- Capture the immutable local position while the document is still alive.
-    -- The network upload is scheduled; stopping ReadReport below also frees any
-    -- in-flight report slot before that scheduled upload begins.
+    -- Nothing here may touch the network (F3): ProgressSync only records the
+    -- final position for a later upload and ReadReport pauses its credit
+    -- clock, so the order of the two calls below does not matter.
     self.progress_sync:on_close_document()
     self._reader_session_gen = (self._reader_session_gen or 0) + 1
     self.downloader:cancelPrefetch("document_closed")
@@ -327,6 +329,9 @@ end
 function M:onSuspend()
     if self._cancelUnifiedAnnotationSync then self:_cancelUnifiedAnnotationSync() end
     self._annotation_pending_prefetch = nil
+    -- A QR login would keep long-polling into the screensaver.
+    if self.qr_login and self.qr_login.on_suspend then self.qr_login:on_suspend() end
+    -- O(1) and network-free: the device and its Wi-Fi are going to sleep.
     self.progress_sync:on_suspend()
     self.read_report:on_suspend()
 end
@@ -372,7 +377,7 @@ function M:ensureChaptersLoaded(book)
     if type(book.chapters) == "table" and #book.chapters > 0 then
         local book_id = book.book_id or book.bookId
         if self.library_db and book_id then
-            self.library_db:putChapters(book_id, book.chapters)
+            CatalogMemo.put_chapters(self.library_db, book_id, book.chapters)
         end
         local catalog_path = Content.catalog_cache_path(self.settings, book)
         if catalog_path and not file_exists(catalog_path) then
@@ -387,11 +392,10 @@ function M:ensureChaptersLoaded(book)
     end
 
     local book_id = book.book_id or book.bookId
-    local chapters = Content.load_catalog_cache(
-        self.client, self.settings, book)
+    local chapters = CatalogMemo.load(self.client, self.settings, book)
     if type(chapters) == "table" and #chapters > 0 then
         if self.library_db then
-            self.library_db:putChapters(book_id, chapters)
+            CatalogMemo.put_chapters(self.library_db, book_id, chapters)
         end
         return chapters
     end

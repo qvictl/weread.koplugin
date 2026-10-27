@@ -139,11 +139,10 @@ function PositionMapper.choose_remote(web, gateway, threshold)
     local percent_gap = math.abs(
         (tonumber(web.percent) or 0) - (tonumber(gateway.percent) or 0)
     )
-    local chapter_differs = web.chapter_uid ~= nil
-        and gateway.chapter_uid ~= nil
-        and tostring(web.chapter_uid) ~= tostring(gateway.chapter_uid)
+    -- Chapter ids often differ between the web and gateway payloads for the
+    -- same early position in a long book. That is not a second conflict on
+    -- top of the percent gap.
     local conflict = percent_gap > threshold
-        or (chapter_differs and percent_gap > 0.5)
     local selected
     if (tonumber(gateway.updated_at) or 0) > (tonumber(web.updated_at) or 0) then
         selected = gateway
@@ -258,19 +257,58 @@ function PositionMapper.remote_to_local(chapters, remote, options)
     }
 end
 
+-- Whole-book percent with full precision: the local capture keeps the exact
+-- fraction while its wire `percent` is floored to an integer.
+local function exact_percent(position)
+    local fraction = tonumber(position and position.fraction)
+    if fraction then return fraction * 100 end
+    return tonumber(position and position.percent) or 0
+end
+
+PositionMapper.exact_percent = exact_percent
+
+-- True when `position` lies before `reference` by more than `tolerance`
+-- percent of the whole book (default 0.3). Used to decide whether sending
+-- `position` would move cloud progress backwards.
+function PositionMapper.is_behind(position, reference, tolerance)
+    if type(position) ~= "table" or type(reference) ~= "table" then
+        return false
+    end
+    tolerance = math.max(0, tonumber(tolerance) or 0.3)
+    return exact_percent(reference) - exact_percent(position) > tolerance
+end
+
+-- Same reading spot: same chapter and chapter offset (one word of slack)
+-- when both sides carry them, otherwise whole-book percent within 0.5.
+function PositionMapper.same_spot(left, right)
+    if type(left) ~= "table" or type(right) ~= "table" then return false end
+    local left_offset = tonumber(left.chapter_offset)
+    local right_offset = tonumber(right.chapter_offset)
+    if left.chapter_uid ~= nil and right.chapter_uid ~= nil
+        and left_offset and right_offset
+        and left.has_chapter_offset ~= false
+        and right.has_chapter_offset ~= false then
+        return tostring(left.chapter_uid) == tostring(right.chapter_uid)
+            and math.abs(left_offset - right_offset) <= 1
+    end
+    return math.abs(exact_percent(left) - exact_percent(right)) <= 0.5
+end
+
 function PositionMapper.compare(local_position, remote, threshold)
     if type(local_position) ~= "table" or type(remote) ~= "table" then
         return "unknown", 0
     end
     threshold = math.max(0, tonumber(threshold) or 2)
-    local delta = (tonumber(remote.percent) or 0)
-        - (tonumber(local_position.percent) or 0)
-    if local_position.chapter_uid ~= nil and remote.chapter_uid ~= nil
-        and tostring(local_position.chapter_uid)
-            ~= tostring(remote.chapter_uid)
-        and math.abs(delta) <= threshold then
-        return "different", delta
-    end
+    -- Keep integer percentages for the wire protocol; comparison needs the
+    -- exact whole-book fraction captured from the local document.
+    local local_percent = tonumber(local_position.fraction)
+        and tonumber(local_position.fraction) * 100
+        or tonumber(local_position.percent) or 0
+    local remote_percent = tonumber(remote.percent) or 0
+    local delta = remote_percent - local_percent
+    -- A single-chapter EPUB changes chapter id every time the reader opens
+    -- the next file. Whole-book percent is what the dialog can show. A
+    -- chapter id change inside the percent threshold is the same position.
     if math.abs(delta) <= threshold then return "same", delta end
     return delta > 0 and "remote_ahead" or "local_ahead", delta
 end
@@ -278,8 +316,11 @@ end
 function PositionMapper.same_position(left, right, tolerance)
     if type(left) ~= "table" or type(right) ~= "table" then return false end
     tolerance = math.max(0, tonumber(tolerance) or 0.5)
-    return math.abs((tonumber(left.percent) or 0) - (tonumber(right.percent) or 0))
-            <= tolerance
+    local left_percent = tonumber(left.fraction) and tonumber(left.fraction) * 100
+        or tonumber(left.percent) or 0
+    local right_percent = tonumber(right.fraction) and tonumber(right.fraction) * 100
+        or tonumber(right.percent) or 0
+    return math.abs(left_percent - right_percent) <= tolerance
         and tostring(left.chapter_uid or "") == tostring(right.chapter_uid or "")
         and math.abs((tonumber(left.chapter_offset) or 0)
             - (tonumber(right.chapter_offset) or 0)) <= 1
