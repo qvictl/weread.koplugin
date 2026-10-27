@@ -77,4 +77,25 @@ function MemoryGate.check(min_kb, read_memory)
     return true, available
 end
 
+-- Call first thing in a freshly forked worker child. A GC cycle marks (writes)
+-- every inherited object, so the first cycle copies the whole parent heap.
+-- The parent just ran a full collection, so the inherited threshold would
+-- start that cycle after about one heap's worth of child allocations.
+-- Postpone it until the child has allocated headroom_kb on top of the
+-- inherited heap; most chapter workers then exit without ever collecting,
+-- while a runaway child is still collected (bounded memory).
+MemoryGate.CHILD_GC_HEADROOM_KB = 48 * 1024
+
+function MemoryGate.defer_child_gc(headroom_kb)
+    local heap = math.max(collectgarbage("count"), 1)
+    local pause = math.ceil(100 * (heap + (headroom_kb
+        or MemoryGate.CHILD_GC_HEADROOM_KB)) / heap)
+    pause = math.max(200, math.min(pause, 1000))
+    collectgarbage("setpause", pause)
+    -- LuaJIT: restart(-1) sets threshold = heap * pause / 100 instead of
+    -- starting a new cycle right away.
+    collectgarbage("restart", -1)
+    return pause
+end
+
 return MemoryGate
