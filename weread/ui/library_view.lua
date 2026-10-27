@@ -638,8 +638,9 @@ function CoverCell:init()
 end
 
 function CoverCell:onTapCoverCell()
-    if self.callback then self.callback() end
-    return true
+    if not self.callback then return true end
+    -- Flash like the list rows; an unpainted cell lets the tap propagate.
+    return TapFeedback.run(self.frame, self.callback)
 end
 
 -- Rebuild this cell in place once its cover finished loading (or failed),
@@ -702,6 +703,31 @@ local LibraryView = FocusManager:extend{
 -- Defer destructive callbacks until Button has finished repainting its feedback.
 local function after_tap(callback)
     return function() UIManager:nextTick(callback) end
+end
+
+-- Opening a book and turning a page do heavy synchronous work. Run it after
+-- the tap feedback has painted, and drop further requests until it ran:
+-- taps and swipes queued while the UI was busy must not each open a book or
+-- rebuild the page again.
+function LibraryView:selectItem(book)
+    if self._select_pending or not self.on_select then return end
+    self._select_pending = true
+    UIManager:nextTick(function()
+        self._select_pending = nil
+        if UIManager:isWidgetShown(self) then self.on_select(book, self.mode) end
+    end)
+end
+
+function LibraryView:requestPage(page)
+    if not self.paged or not self.on_page_changed then return false end
+    if page < 1 or page > (self.page_count or 1) or page == self.page then return false end
+    if self._page_change_pending then return true end
+    self._page_change_pending = true
+    UIManager:nextTick(function()
+        self._page_change_pending = nil
+        if UIManager:isWidgetShown(self) then self.on_page_changed(page) end
+    end)
+    return true
 end
 
 function LibraryView:headerBar()
@@ -980,9 +1006,7 @@ function LibraryView:content()
                 width = width,
                 height = math.max(1, height),
                 show_parent = self,
-                callback = function()
-                    if self.on_select then self.on_select(book, self.mode) end
-                end,
+                callback = function() self:selectItem(book) end,
             }
             self._item_rows[#self._item_rows + 1] = cover_cell
             grid_row[#grid_row + 1] = cover_cell
@@ -996,9 +1020,7 @@ function LibraryView:content()
                 width = self.list_width,
                 font_size = self.mode == "books" and 20 or 22,
                 show_parent = self,
-                callback = function()
-                    if self.on_select then self.on_select(book, self.mode) end
-                end,
+                callback = function() self:selectItem(book) end,
             }
             self._item_rows[#self._item_rows + 1] = shelf_row
             self._focus_item_rows[#self._focus_item_rows + 1] = { shelf_row }
@@ -1023,11 +1045,7 @@ function LibraryView:pageBar()
         text = _("Previous"), width = cell_w, height = button_height,
         text_font_size = 22, text_font_bold = true, radius = 0, margin = 0, padding = 0,
         bordersize = 0, enabled = self.page > 1, show_parent = self,
-        callback = after_tap(function()
-            if self.page > 1 and self.on_page_changed then
-                self.on_page_changed(self.page - 1)
-            end
-        end),
+        callback = function() self:requestPage(self.page - 1) end,
     }
     local page_text = Button:new{
         text = T(_("%1/%2 pages"), tostring(self.page), tostring(self.page_count)),
@@ -1040,11 +1058,7 @@ function LibraryView:pageBar()
         height = button_height, text_font_size = 22, text_font_bold = true,
         radius = 0, margin = 0, bordersize = 0, padding = 0,
         enabled = self.page < self.page_count, show_parent = self,
-        callback = after_tap(function()
-            if self.page < self.page_count and self.on_page_changed then
-                self.on_page_changed(self.page + 1)
-            end
-        end),
+        callback = function() self:requestPage(self.page + 1) end,
     }
     self._page_buttons = { previous, page_text, next_page }
     return HorizontalGroup:new{ previous, page_text, next_page }
@@ -1109,15 +1123,11 @@ function LibraryView:init()
     end
     if self.paged and Device:hasKeys() then
         self.onNextPage = function(view)
-            if view.page < view.page_count and view.on_page_changed then
-                view.on_page_changed(view.page + 1)
-            end
+            view:requestPage(view.page + 1)
             return true
         end
         self.onPrevPage = function(view)
-            if view.page > 1 and view.on_page_changed then
-                view.on_page_changed(view.page - 1)
-            end
+            view:requestPage(view.page - 1)
             return true
         end
     end
@@ -1127,8 +1137,7 @@ function LibraryView:onShelfSwipe(_, ges)
     if not self.paged then return false end
     local delta = ges.direction == "west" and 1 or ges.direction == "east" and -1
     if not delta then return false end
-    local page = self.page + delta
-    if page >= 1 and page <= self.page_count and self.on_page_changed then self.on_page_changed(page) end
+    self:requestPage(self.page + delta)
     return true
 end
 
