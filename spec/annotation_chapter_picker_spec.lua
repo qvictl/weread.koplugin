@@ -235,5 +235,24 @@ local initial = live_buttons
 view:onNextPage(); view:onPrevPage()
 assert(live_buttons == initial, "chooser kept old page widgets")
 view.action_button.callback(); assert(removed)
-view:onClose(); assert(live_buttons == 0)
+-- Swipes are handled inside the gesture handler: never rebuild there, and
+-- coalesce several page changes from one input batch into one rebuild.
+do
+    local manager = require("ui/uimanager")
+    local next_tick, ticks = manager.nextTick, {}
+    manager.nextTick = function(_, callback) ticks[#ticks + 1] = callback end
+    local body, start_page = view.body, view.page
+    view.pages = math.max(view.pages, start_page + 2)
+    view:onSwipe(nil, { direction = "west" })
+    view:onSwipe(nil, { direction = "west" })
+    assert(view.body == body and view.page == start_page + 2 and #ticks == 1,
+        "swipes rebuilt the page inside the gesture handler or were not coalesced")
+    table.remove(ticks)()
+    assert(view.body ~= body, "deferred page rebuild did not run")
+    view:onSwipe(nil, { direction = "east" })
+    view:onClose()
+    table.remove(ticks)() -- a rebuild queued before closing is dropped
+    manager.nextTick = next_tick
+end
+assert(live_buttons == 0)
 print("annotation_chapter_picker_spec: independent selection, editing, geometry and bounded widgets passed; peak=" .. max_buttons)
