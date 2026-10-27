@@ -178,4 +178,30 @@ host._thought_highlight_active = true
 host:_clearThoughtHighlight({ highlightXPointer = function() end })
 expect(dirty_targets[1] == host.ui, "clearing the thought highlight did not repaint ReaderUI")
 
+-- Teardown restores ReaderLink only where our wrapper is still installed.
+local class_link = {}
+function class_link:getLinkFromGes(ges) return link_at[ges.pos.x] end
+function class_link:onTap() return "class" end
+local instance = setmetatable({}, { __index = class_link })
+local filter_host = { ui = { link = instance }, settings = host.settings,
+    _unified_annotations_active = true }
+for name, method in pairs(Annotations) do filter_host[name] = method end
+filter_host:_installLinkFilter()
+filter_host:_removeLinkFilter()
+expect(rawget(instance, "getLinkFromGes") == nil and rawget(instance, "onTap") == nil,
+    "teardown left our wrappers on ReaderLink")
+filter_host:_installLinkFilter()
+local ours = instance.onTap
+local other_calls = 0
+instance.onTap = function(link_self, arg, ges) -- another plugin wraps after us
+    other_calls = other_calls + 1
+    return ours(link_self, arg, ges)
+end
+local theirs = instance.onTap
+filter_host:_removeLinkFilter()
+expect(instance.onTap == theirs, "teardown dropped a wrapper installed after ours")
+local tap_ok, tap_result = pcall(instance.onTap, instance, nil, thought_tap)
+expect(tap_ok and tap_result == "class" and other_calls == 1,
+    "our disabled wrapper broke the remaining chain or still filtered taps")
+
 print(("annotation_tap_cost_spec: %d checks"):format(checks))

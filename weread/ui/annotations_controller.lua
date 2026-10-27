@@ -180,18 +180,30 @@ end
 -- so the event continues to propagate to the page-turn zone (honoring the user's
 -- tap zones / RTL). Only own anchors are affected.
 function M:_installLinkFilter()
-    if not self.ui or not self.ui.link or self._orig_getLinkFromGes then
+    if not self.ui or not self.ui.link or self._link_filter then
         return
     end
 
     local plugin = self
+    local link_module = self.ui.link
+    -- Originals are captured here, not read back from the plugin: if another
+    -- plugin wraps ReaderLink on top of us, our wrappers stay in its chain
+    -- after teardown and must keep working as plain pass-throughs.
+    local filter = {
+        link = link_module,
+        active = true,
+        orig_get = link_module.getLinkFromGes,
+        orig_tap = link_module.onTap,
+        own_get = rawget(link_module, "getLinkFromGes") ~= nil,
+        own_tap = rawget(link_module, "onTap") ~= nil,
+    }
+    local orig_get, orig_tap = filter.orig_get, filter.orig_tap
 
     -- 1) Filter getLinkFromGes (covers the simple / no-larger-area path)
-    self._orig_getLinkFromGes = self.ui.link.getLinkFromGes
-    self.ui.link.getLinkFromGes = function(link_self, ges)
-        local link = plugin._orig_getLinkFromGes(link_self, ges)
-        if not link then
-            return nil
+    filter.get = function(link_self, ges)
+        local link = orig_get(link_self, ges)
+        if not link or not filter.active then
+            return link
         end
         local href = plugin:_linkHref(link)
         if not isThoughtHref(href) then
@@ -206,9 +218,8 @@ function M:_installLinkFilter()
     end
 
     -- 2) Also wrap onTap so the larger-area / onGoToPageLink path is skipped
-    if not self._orig_onTap then
-        self._orig_onTap = self.ui.link.onTap
-        self.ui.link.onTap = function(link_self, arg, ges)
+    filter.tap = function(link_self, arg, ges)
+        if filter.active then
             -- The tap_link zone overrides the page-turn zones, so this runs for
             -- every tap: keep it to cheap checks. When we want to ignore
             -- thoughts (annotations hidden, edge zone or unified overlay),
@@ -218,28 +229,36 @@ function M:_installLinkFilter()
             local ignore = plugin.settings:get("cache").show_annotations == false
                 or isPageTurnEdgeTap(plugin, ges)
             if ignore or plugin._unified_annotations_active ~= false then
-                local link = plugin._orig_getLinkFromGes(link_self, ges)
+                local link = orig_get(link_self, ges)
                 if link and isThoughtHref(plugin:_linkHref(link))
                     and (ignore or usesUnifiedAnnotations(plugin)) then
                     return false
                 end
             end
-            return plugin._orig_onTap(link_self, arg, ges)
         end
+        return orig_tap(link_self, arg, ges)
     end
+
+    link_module.getLinkFromGes = filter.get
+    link_module.onTap = filter.tap
+    self._link_filter = filter
 end
 
+-- Restore ReaderLink only where our wrapper is still the installed function.
+-- If something wrapped it after us, overwriting would drop that wrapper; ours
+-- is disabled instead and keeps forwarding to the captured original.
 function M:_removeLinkFilter()
-    if self.ui and self.ui.link then
-        if self._orig_getLinkFromGes then
-            self.ui.link.getLinkFromGes = self._orig_getLinkFromGes
-        end
-        if self._orig_onTap then
-            self.ui.link.onTap = self._orig_onTap
-        end
+    local filter = self._link_filter
+    if not filter then return end
+    filter.active = false
+    local link_module = filter.link
+    if rawget(link_module, "getLinkFromGes") == filter.get then
+        link_module.getLinkFromGes = filter.own_get and filter.orig_get or nil
     end
-    self._orig_getLinkFromGes = nil
-    self._orig_onTap = nil
+    if rawget(link_module, "onTap") == filter.tap then
+        link_module.onTap = filter.own_tap and filter.orig_tap or nil
+    end
+    self._link_filter = nil
 end
 
 function M:_teardownThoughtInterception()
