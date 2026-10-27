@@ -398,8 +398,30 @@ end
 -- The backup must survive installation so a failed activation can be rolled
 -- back. Reaching the end of the next plugin initialization confirms that the
 -- new copy can load, at which point the previous copy is no longer needed.
+-- Version declared by the _meta.lua currently on disk. After install_release
+-- this is the new version while the running process still executes the old
+-- code (modules already loaded) until KOReader restarts.
+function Updater:installed_version()
+    local meta = read_file(self.plugin_dir .. "/_meta.lua", 65536)
+    return meta and meta:match('version%s*=%s*"([^"]+)"') or nil
+end
+
+-- True when an update was installed in place but KOReader has not restarted
+-- yet. Any module required from now on would come from the new version, so
+-- callers should avoid starting work that lazily loads plugin modules.
+function Updater:restart_pending()
+    local installed = self:installed_version()
+    return installed ~= nil and installed ~= self.current_version
+end
+
 function Updater:cleanup_backup()
     local backup = self.plugin_dir .. ".backup"
+    if self:restart_pending() then
+        -- New plugin instances are created on every book open; keep the
+        -- previous version (still running in this process) until restart.
+        logger.info("update backup kept until restart")
+        return true
+    end
     local ok_lfs, lfs = pcall(require, "libs/libkoreader-lfs")
     if ok_lfs and lfs and not lfs.attributes(backup, "mode") then
         return true

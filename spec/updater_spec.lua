@@ -298,6 +298,23 @@ expect(not install_ok and install_err == "SHA-256 verification failed",
 package.loaded["ffi/sha2"] = nil
 package.loaded["ffi/archiver"] = nil
 
+-- After an in-place install the running process keeps the old code; the
+-- backup must survive new plugin instances until KOReader restarts.
+expect(install_updater:installed_version() == nil and not install_updater:restart_pending(),
+    "no _meta.lua means no pending restart")
+local meta_file = assert(io.open(install_root .. "/weread.koplugin/_meta.lua", "w"))
+meta_file:write('return { version = "0.7.0" }\n')
+meta_file:close()
+expect(install_updater:installed_version() == "0.7.0" and install_updater:restart_pending(),
+    "a newer _meta.lua on disk must report a pending restart")
+backup_exists, purged_path = true, nil
+package.loaded["libs/libkoreader-lfs"].attributes = function(path)
+    if path == install_updater.plugin_dir .. ".backup" and backup_exists then
+        return "directory"
+    end
+end
+expect(install_updater:cleanup_backup() == true and purged_path == nil,
+    "the update backup must be kept while a restart is pending")
 os.execute("rm -rf '" .. install_root .. "'")
 
 local updater_source = assert(io.open("weread/lib/updater.lua", "r")):read("*a")
