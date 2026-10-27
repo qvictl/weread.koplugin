@@ -10,6 +10,16 @@ ExternalAnnotations.MAX_SEARCH_HITS = 16
 ExternalAnnotations.CHAPTER_SEARCH_HITS = 1
 ExternalAnnotations.FALLBACK_QUOTE_BYTES = 90
 ExternalAnnotations.PERF_TAG = "external_annotation_perf"
+-- Foreground matching runs on the UI thread between yields. Yield after at
+-- most this much CPU time even inside a 16-record batch (the whole-book
+-- fallback can take hundreds of ms per record on an e-reader).
+ExternalAnnotations.YIELD_BUDGET_S = 0.2
+-- A checkpoint re-encodes every record matched so far in this chapter.
+-- After the first batch, write one at most this often (and at the end).
+ExternalAnnotations.CHECKPOINT_INTERVAL_S = 1.0
+-- Per-record perf lines are only logged when they are worth reading.
+ExternalAnnotations.SLOW_QUOTE_MS = 50
+ExternalAnnotations.clock = os.clock
 
 local PERF = ExternalAnnotations.PERF_TAG
 
@@ -153,8 +163,11 @@ end
 -- omit those generated labels, so they must not participate in matching.
 local function footnote_marker_len_at(text, i)
     if text:byte(i) ~= 0x5B then return 0 end -- "["
-    local start, stop = text:find("%[%d+%]", i)
-    return start == i and stop - i + 1 or 0
+    -- Anchored at i: an unanchored find would scan ahead to the next
+    -- "[digits]" (or the end of the chapter) for every "[" that is not a
+    -- marker, making a chapter full of "[注]" quadratic.
+    local _start, stop = text:find("^%[%d+%]", i)
+    return stop and stop - i + 1 or 0
 end
 
 local function ignored_footnote_bytes(text)
@@ -419,6 +432,8 @@ function ExternalAnnotations.locate(document, chapters, options)
     -- Whole-locate cursor for books without chapter ranges, so repeated
     -- quotes across chapters still resolve in document order.
     local global_cursor_xp = options.resume and options.resume.cursor_xp
+    local clock = ExternalAnnotations.clock
+    local last_yield, last_checkpoint = clock(), nil
 
     for _, chapter in ipairs(type(chapters) == "table" and chapters or {}) do
         local uid = tostring(chapter.chapter_uid or "")
@@ -573,20 +588,36 @@ function ExternalAnnotations.locate(document, chapters, options)
                 else
                     stats.unmatched = stats.unmatched + 1
                 end
-                perf("book_id=", book_id, "chapter_uid=", uid, "seq=", seq,
-                    "len=", tostring(#quote), "hash=", short_hash(quote),
-                    "mode=", mode, "hits=", tostring(hits),
-                    "found=", tostring(result ~= nil), "partial=", tostring(partial),
-                    "ms=", string.format("%.1f", elapsed_ms(quote_started)))
+                -- One synchronous log write per record adds up on e-readers;
+                -- the chapter summary below covers the fast path.
+                local quote_ms = elapsed_ms(quote_started)
+                if not result or mode ~= "chapter_text"
+                    or quote_ms >= ExternalAnnotations.SLOW_QUOTE_MS then
+                    perf("book_id=", book_id, "chapter_uid=", uid, "seq=", seq,
+                        "len=", tostring(#quote), "hash=", short_hash(quote),
+                        "mode=", mode, "hits=", tostring(hits),
+                        "found=", tostring(result ~= nil), "partial=", tostring(partial),
+                        "ms=", string.format("%.1f", quote_ms))
+                end
             end
             previous_range = range_start(underline)
-            if options.checkpoint and (seq % 16 == 0 or seq == #underlines) then
+            local now = clock()
+            local batch_end = seq % 16 == 0 or seq == #underlines
+            local yield_now = options.yield
+                and (batch_end or now - last_yield >= ExternalAnnotations.YIELD_BUDGET_S)
+            -- Checkpoint right before yielding (the pipeline may be cancelled
+            -- there), but not every batch: each one re-encodes all records.
+            if options.checkpoint and (seq == #underlines
+                or ((batch_end or yield_now) and (not last_checkpoint
+                    or now - last_checkpoint >= ExternalAnnotations.CHECKPOINT_INTERVAL_S))) then
                 options.checkpoint({ records = records, stats = stats,
                     next_index = seq + 1, cursor_xp = search_origin,
                     cursor_byte = cursor_byte, previous_range = previous_range })
+                last_checkpoint = now
             end
-            if options.yield and (seq % 16 == 0 or seq == #underlines) then
+            if yield_now then
                 options.yield(seq, #underlines, stats)
+                last_yield = clock()
             end
             ::continue::
         end

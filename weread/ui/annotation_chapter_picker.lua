@@ -237,13 +237,26 @@ function Picker:rebuild(focus_node, focus_column)
     UIManager:setDirty(self, "ui")
 end
 
+-- Page changes also come straight from swipe and key handlers. Rebuilding
+-- there would hand the rest of the current input batch (taps queued while the
+-- UI thread was busy) to rows that were never painted. Change the page now,
+-- rebuild once on the next tick.
+function Picker:_scheduleRebuild()
+    if self._rebuild_pending then return end
+    self._rebuild_pending = true
+    UIManager:nextTick(function()
+        self._rebuild_pending = nil
+        if not self._closed then self:rebuild() end
+    end)
+end
+
 function Picker:onNextPage()
-    if self.page < self.pages then self.page = self.page + 1; self:rebuild() end
+    if self.page < self.pages then self.page = self.page + 1; self:_scheduleRebuild() end
     return true
 end
 
 function Picker:onPrevPage()
-    if self.page > 1 then self.page = self.page - 1; self:rebuild() end
+    if self.page > 1 then self.page = self.page - 1; self:_scheduleRebuild() end
     return true
 end
 

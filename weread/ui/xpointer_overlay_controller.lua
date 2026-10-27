@@ -2,6 +2,7 @@
 local UIManager = require("ui/uimanager")
 
 local External = require("weread.lib.external_annotations")
+local logger = require("weread.lib.logger")
 local Overlay = require("weread.ui.xpointer_overlay")
 local PluginUtil = require("weread.lib.plugin_util")
 local ThoughtPopupConfig = require("weread.ui.thought_popup.popup_config")
@@ -117,8 +118,13 @@ function M:_onXPointerOverlayTap(ges)
     local items = record.items
     local context = self._annotation_context
     if context and not items then
-        items = context.store:get(context.book_id, "thought",
-            record.chapter_uid .. ":" .. record.range)
+        local ok, stored = pcall(context.store.get, context.store, context.book_id,
+            "thought", record.chapter_uid .. ":" .. record.range)
+        if ok then
+            items = stored
+        else
+            logger.warn("annotation thought read failed:", tostring(stored))
+        end
     end
     if type(items) ~= "table" or #items == 0 then
         items = {
@@ -129,6 +135,13 @@ function M:_onXPointerOverlayTap(ges)
                 likes_count = 0,
             },
         }
+    end
+    -- Never open the popup inside the gesture handler: KOReader dispatches
+    -- the rest of this input batch before the next paint, so a queued tap
+    -- would reach the not-yet-painted popup. The shared queue defers the show
+    -- to the next tick and swallows taps while a popup is pending or shown.
+    if self._queueThoughtPopup then
+        return self:_queueThoughtPopup(items)
     end
     require("weread.ui.thought_popup").show(ThoughtPopupConfig.build(self, items))
     return true
@@ -156,8 +169,13 @@ function M:bindExternalAnnotationsBook(touchmenu_instance)
             callback = function()
                 local keyword = dialog:getInputText()
                 UIManager:close(dialog)
-                self:runOnlineTask(_("Search"), function()
-                    local result = self.client:gateway("/store/search", { keyword = keyword, count = 20 })
+                local client = self.client
+                local function search()
+                    return client:gateway("/store/search", { keyword = keyword, count = 20 })
+                end
+                local function show_results(result)
+                    -- The reader may have moved to another book meanwhile.
+                    if current_file(self) ~= path then return end
                     local items = {}
                     for _index, book in ipairs(External.normalize_search(result)) do
                         items[#items + 1] = {
@@ -175,6 +193,9 @@ function M:bindExternalAnnotationsBook(touchmenu_instance)
                                 old.records = {}
                                 self._annotation_context = nil
                                 self._unified_annotations_active = nil
+                                if self._invalidateAnnotationBinding then
+                                    self:_invalidateAnnotationBinding()
+                                end
                                 local saved, save_err = self.external_annotations_db:saveDocument(path, old)
                                 if not saved then error(save_err) end
                                 local cleared, clear_err =
@@ -200,6 +221,14 @@ function M:bindExternalAnnotationsBook(touchmenu_instance)
                         }
                     end
                     self:showList(_("Select matching WeRead book"), items, _("No search results."))
+                end
+                self:runOnlineTask(_("Search"), function()
+                    -- Keep the HTTP request off the UI thread when possible.
+                    if self._runAnnotationRequest then
+                        return self:_runAnnotationRequest(_("Search WeRead"), _("Search"),
+                            search, show_results)
+                    end
+                    show_results(search())
                 end)
             end,
         } } },

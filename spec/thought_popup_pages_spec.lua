@@ -151,6 +151,8 @@ package.preload["cache"] = function()
         new = function(_self, opts)
             local store = {}
             local cache = {
+                -- Byte-capped caches (size mode) refuse items above half.
+                willAccept = opts.size and function(_c, size) return size * 4 < opts.size * 2 end or nil,
                 get = function(_c, key) return store[key] end,
                 insert = function(_c, key, item)
                     store[key] = item
@@ -410,6 +412,32 @@ test("freeContentCaches drops the layout", function()
     -- The renderer stays usable after the caches were freed.
     renderer:ensureLayout()
     ok(renderer.content_h > 0, "re-layout works after freeContentCaches")
+end)
+
+test("piece bitmaps are cached by bytes; oversized ones are freed after use", function()
+    local Paginator = require("weread.ui.thought_popup.paginator")
+    local render = Paginator.renderTextPiece
+    local freed, height = 0, 100
+    Paginator.renderTextPiece = function()
+        return { stride = 1000, getWidth = function() return 1000 end,
+            getHeight = function() return height end,
+            free = function() freed = freed + 1 end }
+    end
+    local renderer = new_renderer()
+    local small = {}
+    local bb, transient = renderer:_getPieceTextBB(small)
+    ok(bb and not transient, "a small piece bitmap is cached")
+    eq(renderer:_getPieceTextBB(small), bb, "a cached piece is reused")
+    height = 20000 -- 20 MB: a single paragraph must not pin that much
+    local huge = {}
+    local huge_bb, huge_transient = renderer:_getPieceTextBB(huge)
+    ok(huge_bb and huge_transient == true, "an oversized piece is reported as transient")
+    ok(renderer._piece_cache:get(huge) == nil, "an oversized piece is not cached")
+    eq(freed, 0, "nothing is freed before use")
+    renderer:ensureLayout()
+    renderer:renderPage(1, renderer:computePages(300))
+    ok(freed > 0, "a transient piece bitmap was not freed after the page blit")
+    Paginator.renderTextPiece = render
 end)
 
 print(string.format("thought_popup_pages_spec: %d checks, %d failure(s)", checks, failures))

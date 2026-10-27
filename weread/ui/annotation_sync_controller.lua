@@ -39,35 +39,90 @@ function M:_annotationStore()
     return self.annotation_store
 end
 
-function M:_annotationBinding()
-    local path = file(self)
-    if not path then return nil end
-    local entry = self.external_annotations_db:getDocument(path)
+-- One library entry. Newer settings expose per-book reads (and reject the
+-- whole-library "books" key); fall back to the table on older settings.
+local function library_book(plugin, book_id)
+    local settings = plugin.settings
+    if type(settings.get_book) == "function" then
+        return settings:get_book(tostring(book_id))
+            or (tonumber(book_id) and settings:get_book(tonumber(book_id))) or nil
+    end
+    local books = settings:get("books", {}) or {}
+    return books[tostring(book_id)] or books[tonumber(book_id)] or books[book_id]
+end
+
+local function resolve_binding(plugin, path)
+    local entry, read_err = plugin.external_annotations_db:getDocument(path)
     if entry and entry.binding then return entry.binding end
-    local book_id = self:detectWeReadBook()
+    if read_err then return nil, read_err end
+    local book_id = plugin:detectWeReadBook()
     if not book_id then return nil end
-    local book = self.settings:get_book(book_id)
+    local book = library_book(plugin, book_id)
     if not book then return nil end
     return { book_id = tostring(book_id), title = book.title, author = book.author,
         format = book.format, automatic = true }
 end
 
-function M:_usesUnifiedAnnotations()
-    if self._unified_annotations_active ~= nil then return self._unified_annotations_active end
-    local binding = self:_annotationBinding()
-    if not binding then return false end
-    if binding.automatic then
-        local book = self.settings:get_book(binding.book_id)
-        local descriptor = Chapters.descriptor(book, file(self))
-        if descriptor and descriptor.clean then return true end
-    end
-    local store = self:_annotationStore()
-    local key = store.documentKey(file(self))
-    return store:get(binding.book_id, "display", key) == true
-        or store:get(binding.book_id, "manual_only", key) == true
+-- Resolving the binding opens the per-file SQLite database and scans the
+-- whole library. It only changes when the user (re)binds this file, so it is
+-- resolved once per document; _invalidateAnnotationBinding() drops it. A
+-- failed database read is never cached.
+function M:_annotationBinding()
+    local path = file(self)
+    if not path then return nil end
+    local cached = self._annotation_binding_cache
+    if cached and cached.path == path then return cached.binding or nil end
+    local binding, err = resolve_binding(self, path)
+    if err then return nil, err end
+    self._annotation_binding_cache = { path = path, binding = binding or false }
+    return binding
 end
 
-function M:_prepareAnnotationContext(online, refresh_catalog)
+function M:_invalidateAnnotationBinding()
+    self._annotation_binding_cache = nil
+    self._annotation_document_key = nil
+    self._unified_annotations_active = nil
+end
+
+-- Document identity (path, size, mtime, engine) hashed with pure-Lua SHA-256.
+function M:_annotationDocumentKey(path)
+    path = path or file(self)
+    local cached = self._annotation_document_key
+    if cached and cached.path == path then return cached.key end
+    local key = self:_annotationStore().documentKey(path)
+    self._annotation_document_key = { path = path, key = key }
+    return key
+end
+
+-- Cached in _unified_annotations_active, including a negative answer: the
+-- ReaderLink tap wrapper consults this on every tap. Later activation
+-- (on_chapter, clearing, rebinding) updates or resets the cached value.
+function M:_usesUnifiedAnnotations()
+    if self._unified_annotations_active ~= nil then return self._unified_annotations_active end
+    local binding, err = self:_annotationBinding()
+    if err then error(err, 0) end
+    local active = false
+    if binding then
+        if binding.automatic then
+            local descriptor = Chapters.descriptor(library_book(self, binding.book_id), file(self))
+            active = descriptor ~= nil and descriptor.clean == true
+        end
+        if not active then
+            local store = self:_annotationStore()
+            local key = self:_annotationDocumentKey()
+            active = store:get(binding.book_id, "display", key) == true
+                or store:get(binding.book_id, "manual_only", key) == true
+        end
+    end
+    self._unified_annotations_active = active
+    return active
+end
+
+-- options.defer_network: return nil, remote instead of fetching the catalog
+-- on the UI thread (see _withAnnotationContext); options.catalog: a catalog
+-- fetched by that subprocess.
+function M:_prepareAnnotationContext(online, refresh_catalog, options)
+    options = options or {}
     local path = file(self)
     if not path or not self:_xpointerOverlayPrototypeAvailable() then return nil end
     local perf = PluginUtil.reader_open_perf
@@ -83,20 +138,25 @@ function M:_prepareAnnotationContext(online, refresh_catalog)
     end
     local store = self:_annotationStore()
     local book_id = tostring(binding.book_id)
-    local book = self.settings:get_book(book_id)
+    local book = library_book(self, book_id)
     local descriptor = binding.automatic and Chapters.descriptor(book, path)
     local catalog = store:get(book_id, "meta", "catalog") or book and book.chapters
-    if online and (not catalog or refresh_catalog) then
+    local fetched = options.catalog
+    if not fetched and online and (not catalog or refresh_catalog) then
         local remote = { bookId = book_id, book_id = book_id, title = binding.title,
             author = binding.author, format = binding.format }
+        if options.defer_network then return nil, remote end
         Content.ensure_reader_state(self.client, remote)
-        catalog = Content.fetch_catalog(self.client, remote)
+        fetched = Content.fetch_catalog(self.client, remote)
+    end
+    if fetched then
+        catalog = fetched
         assert(type(catalog) == "table" and #catalog > 0, _("No chapter catalog available."))
         store:put(book_id, "meta", "catalog", catalog)
         if refresh_catalog then store:put(book_id, "meta", "prune_catalog", catalog) end
     end
     catalog = catalog or descriptor and descriptor.chapters or {}
-    local document_key = store.documentKey(path)
+    local document_key = self:_annotationDocumentKey(path)
     local overrides = store:get(book_id, "chapter_mapping", document_key)
     started = perf("annotation_catalog", started, "chapters=", #catalog)
     local selected, ranges = Chapters.map(self.ui.document, catalog, descriptor, overrides)
@@ -250,19 +310,31 @@ function M:_refreshAnnotationOverlay()
     end
     local window = tostring(active) .. ":" .. tostring(last) .. ":" .. tostring(context.generation or 0)
     if overlay._annotation_window == window then return end
-    local records = {}
+    local records, ordered = {}, true
     for index = math.max(1, active - 1), math.min(#context.chapters, last + 1) do
         local uid = Chapters.uid(context.chapters[index])
         local key = context.store:projectionKey(context.document_key, uid)
-        local projection = context.store:get(context.book_id, "projection", key)
+        -- Runs on every page turn: a busy or broken database must not crash
+        -- the reader. Keep the current underlines and retry on the next turn.
+        local ok, projection = pcall(context.store.get, context.store,
+            context.book_id, "projection", key)
+        if not ok then
+            logger.warn("annotation projection read failed:", tostring(projection))
+            return
+        end
+        -- Records imported from the old per-file database carry no
+        -- ordering guarantee.
+        if projection and projection.legacy then ordered = false end
         for _, record in ipairs(projection and projection.records or {}) do
             records[#records + 1] = record
         end
     end
     -- locate() emits projections in document order.  Tell the overlay so it
     -- can use its ordered interval index instead of rescanning every record on
-    -- each page turn. Legacy records keep the conservative linear fallback.
-    overlay:setRecords(records, true)
+    -- each page turn. Legacy records keep the conservative linear fallback:
+    -- the ordered scan stops at the first record past the page, which would
+    -- skip an out-of-order underline further down the list.
+    overlay:setRecords(records, ordered)
     overlay._annotation_window = window
 end
 
@@ -455,7 +527,7 @@ function M:_runAnnotationJob(context, options)
             end
             context.generation = (context.generation or 0) + 1
             self:_refreshAnnotationOverlay()
-            UIManager:setDirty(self.dialog, "ui")
+            UIManager:setDirty(self.ui, "ui")
         end,
         fetch_source = function(chapter)
             local html, format = request.job:callNetwork(function()
@@ -485,7 +557,7 @@ function M:_runAnnotationJob(context, options)
                 end
                 self:_refreshAnnotationOverlay()
                 if activate then self:applyAnnotationVisibility() end
-                UIManager:setDirty(self.dialog, "ui")
+                UIManager:setDirty(self.ui, "ui")
             end
         end,
     }
@@ -583,14 +655,82 @@ function M:_runAnnotationJob(context, options)
     UIManager:scheduleIn(0.1, safe_step)
 end
 
+local function display_error(err)
+    if PluginUtil.display_error then return PluginUtil.display_error(err) end
+    return tostring(err):match("^[^\r\n]+") or tostring(err)
+end
+
+-- Short user-triggered requests (book search, chapter catalog) run in a
+-- dismissable subprocess, like chapter downloads: blocking HTTP on the UI
+-- thread freezes taps and repaints for the whole request. on_success runs in
+-- the parent with the task's result; failures are reported with error_label.
+-- Falls back to an in-process call where KOReader cannot fork.
+function M:_runAnnotationRequest(busy_text, error_label, task, on_success)
+    local function report(err)
+        logger.warn("annotation request failed:", tostring(error_label), tostring(err))
+        self:showInfo(T(_("%1 failed:\n%2"), error_label, display_error(err)))
+    end
+    local function deliver(value)
+        local ok, err = xpcall(on_success, debug.traceback, value)
+        if not ok then report(err) end
+    end
+    local ok_ffi, ffiutil = pcall(require, "ffi/util")
+    local ok_trapper, Trapper = pcall(require, "ui/trapper")
+    if not (ok_ffi and type(ffiutil) == "table" and type(ffiutil.runInSubProcess) == "function"
+        and ok_trapper and Trapper) then
+        local ok, value = xpcall(task, debug.traceback)
+        if not ok then return report(value) end
+        return deliver(value)
+    end
+    local ok_json, Json = pcall(require, "json")
+    if not ok_json then Json = require("rapidjson") end
+    local WorkerSettings = require("weread.lib.worker_settings")
+    Trapper:wrap(function()
+        local fingerprint = WorkerSettings.fingerprint(self.settings)
+        local completed, encoded = Trapper:dismissableRunInSubprocess(function()
+            local auth_result = WorkerSettings.capture(self.settings)
+            local ok, value = xpcall(task, debug.traceback)
+            return Json.encode({ ok = ok, value = value, auth = auth_result() })
+        end, busy_text, true)
+        if not completed then
+            -- Dismissed by the user (the child was killed), or fork failed.
+            if encoded ~= nil then report(encoded) end
+            return
+        end
+        local decoded, result = pcall(Json.decode, encoded or "")
+        if not decoded or type(result) ~= "table" then
+            return report("no result from the request subprocess")
+        end
+        if result.auth then WorkerSettings.merge(self.settings, fingerprint, result.auth) end
+        if not result.ok then return report(result.value) end
+        deliver(result.value)
+    end)
+end
+
+-- Prepare the annotation context; when the chapter catalog must be fetched,
+-- do it in a subprocess and continue in the parent once it arrives. Results
+-- for a document or reader session that is no longer open are dropped.
+function M:_withAnnotationContext(error_label, online, refresh_catalog, callback)
+    local context, remote = self:_prepareAnnotationContext(online, refresh_catalog,
+        { defer_network = true })
+    if not remote then return callback(context) end
+    local path, session, client = file(self), self._reader_session_gen, self.client
+    return self:_runAnnotationRequest(_("Loading WeRead chapter list…"), error_label, function()
+        Content.ensure_reader_state(client, remote)
+        return Content.fetch_catalog(client, remote)
+    end, function(catalog)
+        if session ~= self._reader_session_gen or file(self) ~= path then return end
+        callback(self:_prepareAnnotationContext(online, refresh_catalog, { catalog = catalog }))
+    end)
+end
+
 function M:startUnifiedAnnotationSync(options)
     options = options or {}
     if not self:_annotationBinding() then self:bindExternalAnnotationsBook(); return end
     if not self:_xpointerOverlayPrototypeAvailable() then
         self:showInfo(_("Annotation matching requires a reflowable document.")); return
     end
-    local function start()
-        local context = self:_prepareAnnotationContext(not options.offline, options.refresh)
+    local function run(context)
         if not context or #context.chapters == 0 then
             self:showInfo(_("No matching chapters found. Check the bound book and local chapter titles."))
             return
@@ -603,6 +743,10 @@ function M:startUnifiedAnnotationSync(options)
         self.settings:flush()
         if self._xpointer_overlay then self._xpointer_overlay:setEnabled(true) end
         self:_runAnnotationJob(context, options)
+    end
+    local function start()
+        return self:_withAnnotationContext(_("Sync underlines and thoughts"),
+            not options.offline, options.refresh, run)
     end
     if options.offline then return start() end
     if not self:requireLogin(true, true) then return end
@@ -653,12 +797,25 @@ function M:onUnifiedAnnotationsReady()
     started = perf("context_total", started, "ok=", ok, "available=", ok and context ~= nil)
     if not ok then logger.warn("annotation context:", context); return end
     if not context then return end
+    -- Runs unprotected from onReaderReady: a busy or broken annotation
+    -- database must leave the book readable instead of crashing its open.
+    local ready_ok, ready_err = xpcall(self._activateAnnotationContext, debug.traceback,
+        self, context, started)
+    if not ready_ok then logger.warn("annotation display state:", tostring(ready_err)) end
+end
+
+function M:_activateAnnotationContext(context, started)
+    local perf = PluginUtil.reader_open_perf
     -- Recover partial chapter selections created by older builds that wrote a
     -- projection but waited for the whole document before marking it usable.
-    if self:_annotationSummary(context).located > 0 then
+    -- Only write when the flag is missing: a write transaction per book open
+    -- is avoidable I/O on the UI thread.
+    local display = context.store:get(context.book_id, "display", context.document_key) == true
+    if not display and self:_annotationSummary(context).located > 0 then
         context.store:put(context.book_id, "display", context.document_key, true)
+        display = true
     end
-    self._unified_annotations_active = self:_usesUnifiedAnnotations()
+    self._unified_annotations_active = display or self:_usesUnifiedAnnotations()
     started = perf("annotation_display_state", started)
     self:_refreshAnnotationOverlay()
     started = perf("saved_annotation_overlay", started)
@@ -788,7 +945,7 @@ function M:_saveAnnotationChapterMatch(context, node, uid)
         self._xpointer_overlay:setRecords({})
     end
     self:_refreshAnnotationOverlay()
-    UIManager:setDirty(self.dialog, "ui")
+    UIManager:setDirty(self.ui, "ui")
     return updated
 end
 
@@ -826,8 +983,7 @@ end
 
 function M:chooseAnnotationChapters()
     if not self:_annotationBinding() then return self:bindExternalAnnotationsBook() end
-    local function show()
-        local context = self:_prepareAnnotationContext(self:isNetworkConnected())
+    local function show_picker(context)
         if not context or not context.catalog or #context.catalog == 0 then
             self:showInfo(_("No chapter catalog available.")); return
         end
@@ -845,6 +1001,10 @@ function M:chooseAnnotationChapters()
                 self:startUnifiedAnnotationSync({ chapters = chapters, clear_existing = true })
             end,
         }
+    end
+    local function show()
+        return self:_withAnnotationContext(_("Loading chapter list..."),
+            self:isNetworkConnected(), false, show_picker)
     end
     local context = self:_prepareAnnotationContext(false)
     if context and context.catalog and #context.catalog > 0 then return show() end

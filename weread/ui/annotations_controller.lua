@@ -28,6 +28,19 @@ local ANNOTATION_HIDE_CSS =
     ".wr-underline{border-bottom:0 !important;padding-bottom:0 !important;} "
     .. ".wr-thought-link{pointer-events:none !important;text-decoration:none !important;color:inherit !important;}"
 
+-- The unified-annotation state is cached after its first evaluation, but that
+-- evaluation reads SQLite. Reader-open and tap paths must never raise: a busy
+-- database only means "not known to be unified" for this call (not cached).
+local function usesUnifiedAnnotations(plugin)
+    if not plugin._usesUnifiedAnnotations then return false end
+    local ok, active = pcall(plugin._usesUnifiedAnnotations, plugin)
+    if not ok then
+        logger.warn("annotation display state unavailable:", tostring(active))
+        return false
+    end
+    return active == true
+end
+
 -- Apply the initial hidden state before KOReader renders the document. Doing
 -- this from onReaderReady starts partial rerendering; its seamless reload then
 -- creates a new plugin instance and repeats the same rerender forever.
@@ -36,7 +49,7 @@ function M:onReadSettings()
         return
     end
     if self.settings:get("cache").show_annotations ~= false
-        and not (self._usesUnifiedAnnotations and self:_usesUnifiedAnnotations()) then
+        and not usesUnifiedAnnotations(self) then
         return
     end
     local typeset = self.ui.typeset
@@ -68,7 +81,7 @@ function M:applyAnnotationVisibility()
     if self._xpointer_overlay then
         self._xpointer_overlay:setEnabled(show)
         if show and self._refreshAnnotationOverlay then self:_refreshAnnotationOverlay() end
-        UIManager:setDirty(self.dialog, "ui")
+        UIManager:setDirty(self.ui, "ui")
     end
     if not self:detectWeReadBook() then
         return
@@ -83,7 +96,7 @@ function M:applyAnnotationVisibility()
     if styletweak and type(styletweak.getCssText) == "function" then
         tweaks = styletweak:getCssText() or ""
     end
-    if not show or (self._usesUnifiedAnnotations and self:_usesUnifiedAnnotations()) then
+    if not show or usesUnifiedAnnotations(self) then
         tweaks = tweaks .. "\n" .. ANNOTATION_HIDE_CSS
     end
     local ok, err = pcall(function()
@@ -167,65 +180,85 @@ end
 -- so the event continues to propagate to the page-turn zone (honoring the user's
 -- tap zones / RTL). Only own anchors are affected.
 function M:_installLinkFilter()
-    if not self.ui or not self.ui.link or self._orig_getLinkFromGes then
+    if not self.ui or not self.ui.link or self._link_filter then
         return
     end
 
     local plugin = self
+    local link_module = self.ui.link
+    -- Originals are captured here, not read back from the plugin: if another
+    -- plugin wraps ReaderLink on top of us, our wrappers stay in its chain
+    -- after teardown and must keep working as plain pass-throughs.
+    local filter = {
+        link = link_module,
+        active = true,
+        orig_get = link_module.getLinkFromGes,
+        orig_tap = link_module.onTap,
+        own_get = rawget(link_module, "getLinkFromGes") ~= nil,
+        own_tap = rawget(link_module, "onTap") ~= nil,
+    }
+    local orig_get, orig_tap = filter.orig_get, filter.orig_tap
 
     -- 1) Filter getLinkFromGes (covers the simple / no-larger-area path)
-    self._orig_getLinkFromGes = self.ui.link.getLinkFromGes
-    self.ui.link.getLinkFromGes = function(link_self, ges)
-        local link = plugin._orig_getLinkFromGes(link_self, ges)
-        if not link then
-            return nil
+    filter.get = function(link_self, ges)
+        local link = orig_get(link_self, ges)
+        if not link or not filter.active then
+            return link
         end
         local href = plugin:_linkHref(link)
         if not isThoughtHref(href) then
             return link
         end
-        if (plugin._usesUnifiedAnnotations and plugin:_usesUnifiedAnnotations())
-            or plugin.settings:get("cache").show_annotations == false
-            or isPageTurnEdgeTap(plugin, ges) then
+        if plugin.settings:get("cache").show_annotations == false
+            or isPageTurnEdgeTap(plugin, ges)
+            or usesUnifiedAnnotations(plugin) then
             return nil
         end
         return link
     end
 
     -- 2) Also wrap onTap so the larger-area / onGoToPageLink path is skipped
-    if not self._orig_onTap then
-        self._orig_onTap = self.ui.link.onTap
-        self.ui.link.onTap = function(link_self, arg, ges)
-            -- When we want to ignore thoughts (edge zone or annotations hidden),
+    filter.tap = function(link_self, arg, ges)
+        if filter.active then
+            -- The tap_link zone overrides the page-turn zones, so this runs for
+            -- every tap: keep it to cheap checks. When we want to ignore
+            -- thoughts (annotations hidden, edge zone or unified overlay),
             -- detect the link with the *original* getter and suppress only our
-            -- current or legacy thought anchors.
-            if (plugin._usesUnifiedAnnotations and plugin:_usesUnifiedAnnotations())
-            or plugin.settings:get("cache").show_annotations == false
-                or isPageTurnEdgeTap(plugin, ges) then
-                local link = plugin._orig_getLinkFromGes(link_self, ges)
-                if link then
-                    local href = plugin:_linkHref(link)
-                    if isThoughtHref(href) then
-                        return false
-                    end
+            -- current or legacy thought anchors. An unknown unified state is
+            -- only resolved once the tap is known to hit a thought anchor.
+            local ignore = plugin.settings:get("cache").show_annotations == false
+                or isPageTurnEdgeTap(plugin, ges)
+            if ignore or plugin._unified_annotations_active ~= false then
+                local link = orig_get(link_self, ges)
+                if link and isThoughtHref(plugin:_linkHref(link))
+                    and (ignore or usesUnifiedAnnotations(plugin)) then
+                    return false
                 end
             end
-            return plugin._orig_onTap(link_self, arg, ges)
         end
+        return orig_tap(link_self, arg, ges)
     end
+
+    link_module.getLinkFromGes = filter.get
+    link_module.onTap = filter.tap
+    self._link_filter = filter
 end
 
+-- Restore ReaderLink only where our wrapper is still the installed function.
+-- If something wrapped it after us, overwriting would drop that wrapper; ours
+-- is disabled instead and keeps forwarding to the captured original.
 function M:_removeLinkFilter()
-    if self.ui and self.ui.link then
-        if self._orig_getLinkFromGes then
-            self.ui.link.getLinkFromGes = self._orig_getLinkFromGes
-        end
-        if self._orig_onTap then
-            self.ui.link.onTap = self._orig_onTap
-        end
+    local filter = self._link_filter
+    if not filter then return end
+    filter.active = false
+    local link_module = filter.link
+    if rawget(link_module, "getLinkFromGes") == filter.get then
+        link_module.getLinkFromGes = filter.own_get and filter.orig_get or nil
     end
-    self._orig_getLinkFromGes = nil
-    self._orig_onTap = nil
+    if rawget(link_module, "onTap") == filter.tap then
+        link_module.onTap = filter.own_tap and filter.orig_tap or nil
+    end
+    self._link_filter = nil
 end
 
 function M:_teardownThoughtInterception()
@@ -254,6 +287,7 @@ function M:_teardownThoughtInterception()
         self._thought_db_book_id = nil
     end
     self._thought_popup_open = nil
+    self._thought_popup_pending = nil
     self._current_thought_popup = nil
     self._thought_page_cache = nil
     self._thought_page_cache_n = nil
@@ -293,7 +327,7 @@ function M:_clearThoughtHighlight(document)
         document:highlightXPointer()
     end)
     self._thought_highlight_active = nil
-    UIManager:setDirty(self.dialog, "ui")
+    UIManager:setDirty(self.ui, "ui")
 end
 
 function M:_showThoughtPopup(pages, link, session_gen, tap_started)
@@ -317,7 +351,7 @@ function M:_showThoughtPopup(pages, link, session_gen, tap_started)
         thought_perf("highlight", highlight_started, "ok=", tostring(ok))
         if ok then
             self._thought_highlight_active = true
-            UIManager:setDirty(self.dialog, "partial")
+            UIManager:setDirty(self.ui, "partial")
         end
     end
 
@@ -330,7 +364,7 @@ function M:_showThoughtPopup(pages, link, session_gen, tap_started)
                 if self._thought_highlight_active then
                     self._thought_highlight_active = nil
                     document:highlightXPointer()
-                    UIManager:setDirty(self.dialog, "ui")
+                    UIManager:setDirty(self.ui, "ui")
                 end
             end,
         }))
@@ -433,7 +467,12 @@ function M:_ensureThoughtDB(book_id)
         return self._thought_db
     end
 
-    local book = self.settings:get_book(book_id)
+    local book
+    if type(self.settings.get_book) == "function" then
+        book = self.settings:get_book(book_id)
+    else
+        book = (self.settings:get("books", {}) or {})[book_id]
+    end
     if not book then
         return nil
     end
@@ -484,6 +523,12 @@ function M:_queueThoughtPopup(pages, link, tap_started)
         return true
     end
 
+    -- A popup is already queued for the next tick: further taps from the same
+    -- input batch (queued while the UI thread was busy) must not queue another
+    -- one or reach a popup that has not been painted yet.
+    if self._thought_popup_pending then
+        return true
+    end
     -- Guard against a stale flag: if we believe a popup is open but it is not
     -- actually on screen, reset instead of swallowing every tap forever.
     if self._thought_popup_open then
@@ -494,9 +539,11 @@ function M:_queueThoughtPopup(pages, link, tap_started)
     end
 
     self._thought_popup_open = true
+    self._thought_popup_pending = true
     local session_gen = self._reader_session_gen or 0
     local scheduled_at = time.now()
     UIManager:nextTick(function()
+        self._thought_popup_pending = nil
         thought_perf("next_tick_delay", scheduled_at)
         if session_gen ~= self._reader_session_gen then
             self._thought_popup_open = nil
@@ -506,7 +553,7 @@ function M:_queueThoughtPopup(pages, link, tap_started)
             self._thought_popup_open = nil
             return
         end
-        self:_showThoughtPopup(pages, link, session_gen, tap_started)
+        self:_showThoughtPopup(pages, link or {}, session_gen, tap_started)
     end)
     return true
 end
@@ -559,8 +606,8 @@ function M:_onThoughtTap(ges)
     -- Annotations hidden: _installLinkFilter already made getLinkFromGes return nil
     -- for our anchors, so we normally return above before reaching here. Kept as a
     -- defensive fall-through in case the filter is not active.
-    if (self._usesUnifiedAnnotations and self:_usesUnifiedAnnotations())
-        or self.settings:get("cache").show_annotations == false then
+    if self.settings:get("cache").show_annotations == false
+        or usesUnifiedAnnotations(self) then
         return false
     end
 

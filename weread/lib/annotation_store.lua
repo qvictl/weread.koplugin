@@ -1,6 +1,7 @@
 -- One database per WeRead book. Source data and download progress are shared;
 -- document-specific XPointers are disposable projections in the same database.
 local LegacyDB = require("weread.lib.external_annotations_db")
+local logger = require("weread.lib.logger")
 local Crypto = require("weread.lib.crypto")
 local ok_json, json = pcall(require, "json")
 if not ok_json then json = require("rapidjson") end
@@ -154,6 +155,19 @@ function Store:clearKinds(book_id, kinds)
     end)
     if stmt then pcall(function() stmt:close() end) end
     if not ok then pcall(function() db:exec("ROLLBACK") end) end
+    if ok then
+        -- DELETE only moves pages to SQLite's freelist; the file keeps its
+        -- size until it is rebuilt. Reclaim the space so clearing annotations
+        -- actually frees storage on small devices. Best effort: the rows are
+        -- already gone, so a failed VACUUM must not fail the cleanup.
+        local compacted, compact_err = pcall(function()
+            db:exec("VACUUM")
+            db:exec("PRAGMA wal_checkpoint(TRUNCATE)")
+        end)
+        if not compacted then
+            logger.warn("annotation database compaction failed:", tostring(compact_err))
+        end
+    end
     db:close()
     if not ok then error(err) end
     return true
@@ -171,6 +185,28 @@ function Store:list(book_id, kind)
         local row = stmt:reset():bind(kind):step()
         while row do
             result[row[1]] = json.decode(row[2])
+            row = stmt:step()
+        end
+    end)
+    if stmt then stmt:close() end
+    db:close()
+    if not ok then error(read_err) end
+    return result
+end
+
+-- Entry keys of one kind, without decoding (possibly large) payloads.
+function Store:keys(book_id, kind)
+    local db, err = self:open(book_id, false)
+    if not db then
+        if err then error(err) end
+        return {}
+    end
+    local stmt, result = nil, {}
+    local ok, read_err = pcall(function()
+        stmt = db:prepare("SELECT entry_key FROM annotation_data WHERE kind=?")
+        local row = stmt:reset():bind(kind):step()
+        while row do
+            result[row[1]] = true
             row = stmt:step()
         end
     end)
@@ -245,31 +281,40 @@ end
 
 -- Legacy databases remain intact until migration is verified. A migration is
 -- idempotent and never overwrites newer shared chapter data from another file.
+-- Everything, including the marker, is committed in one transaction: this
+-- runs on the UI thread while a book opens.
 function Store:importLegacy(book_id, path, document_key)
     local marker = Crypto.sha256_hex(path)
     if self:get(book_id, "migration", marker) then return end
-    local entry = self.legacy:getDocument(path)
+    local entry, entry_err = self.legacy:getDocument(path)
+    -- A transient read failure must not mark the file as migrated.
+    if entry_err then error(entry_err) end
     local checkpoint = self.legacy:getSyncCheckpoint(path)
     if entry and entry.binding and tostring(entry.binding.book_id) ~= tostring(book_id) then return end
+    local changes = {}
     if checkpoint and tostring(checkpoint.book_id) == tostring(book_id) then
+        local sources, downloads = self:keys(book_id, "source"), self:keys(book_id, "download")
         for _, chapter in ipairs(checkpoint.chapters or {}) do
             local uid = tostring(chapter.chapter_uid)
-            if not self:get(book_id, "source", uid) and not self:get(book_id, "download", uid) then
+            if not sources[uid] and not downloads[uid] then
                 if chapter.complete then
                     chapter.revision = "legacy-" .. tostring(checkpoint.started_at or 0)
-                    self:put(book_id, "source", uid, chapter, uid)
-                    self:put(book_id, "source_status", uid,
-                        { revision = chapter.revision, total = #(chapter.underlines or {}) }, uid)
+                    changes[#changes + 1] = { kind = "source", key = uid, uid = uid, value = chapter }
+                    changes[#changes + 1] = { kind = "source_status", key = uid, uid = uid,
+                        value = { revision = chapter.revision, total = #(chapter.underlines or {}) } }
+                    sources[uid] = true
                 else
                     local batches = chapter.review_batches or {}
                     chapter.next_batch = 1
                     for _, batch in ipairs(batches) do
                         if batch.batch_index ~= chapter.next_batch then break end
-                        self:put(book_id, "batch", uid .. ":" .. batch.batch_index, batch.reviews, uid)
+                        changes[#changes + 1] = { kind = "batch", key = uid .. ":" .. batch.batch_index,
+                            uid = uid, value = batch.reviews }
                         chapter.next_batch = chapter.next_batch + 1
                     end
                     chapter.review_batches = nil
-                    self:put(book_id, "download", uid, chapter, uid)
+                    changes[#changes + 1] = { kind = "download", key = uid, uid = uid, value = chapter }
+                    downloads[uid] = true
                 end
             end
         end
@@ -283,14 +328,19 @@ function Store:importLegacy(book_id, path, document_key)
             grouped[uid][#grouped[uid] + 1] = record
         end
     end
-    for uid, records in pairs(grouped) do
-        local key = self:projectionKey(document_key, uid)
-        if not self:get(book_id, "projection", key) then
-            self:put(book_id, "projection", key, { records = records,
-                legacy = true, stats = { total = #records, located = #records } }, uid)
+    if next(grouped) then
+        local projections = self:keys(book_id, "projection")
+        for uid, records in pairs(grouped) do
+            local key = self:projectionKey(document_key, uid)
+            if not projections[key] then
+                changes[#changes + 1] = { kind = "projection", key = key, uid = uid, value = {
+                    records = records, legacy = true,
+                    stats = { total = #records, located = #records } } }
+            end
         end
     end
-    self:put(book_id, "migration", marker, { imported = true })
+    changes[#changes + 1] = { kind = "migration", key = marker, value = { imported = true } }
+    self:write(book_id, changes)
 end
 
 return Store

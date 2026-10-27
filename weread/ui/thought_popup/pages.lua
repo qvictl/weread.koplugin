@@ -29,7 +29,11 @@ local Screen = Device.screen
 local logger = require("weread.lib.logger")
 
 local PAGE_BB_CACHE_MAX = 8
-local PIECE_CACHE_MAX = 200
+-- Piece bitmaps span a whole paragraph, so their size is unbounded per item.
+-- Cap the cache in bytes (the slot count only follows from the average
+-- size); a piece too large to cache is rendered for one page and freed.
+local PIECE_CACHE_BYTES = 8 * 1024 * 1024
+local PIECE_AVG_BYTES = 64 * 1024
 local LAYOUT_CACHE_MAX = 6
 
 local PieceItem = CacheItem:extend{}
@@ -48,7 +52,14 @@ function LayoutItem:onFree()
 end
 
 local function newPieceCache()
-    return Cache:new{ slots = PIECE_CACHE_MAX, enable_eviction_cb = true }
+    return Cache:new{ size = PIECE_CACHE_BYTES, avg_itemsize = PIECE_AVG_BYTES,
+        enable_eviction_cb = true }
+end
+
+local function bitmapBytes(bb)
+    local ok, bytes = pcall(function() return tonumber(bb.stride) * bb:getHeight() end)
+    if ok and bytes then return bytes end
+    return bb:getWidth() * bb:getHeight()
 end
 
 local function newPageCache()
@@ -284,13 +295,20 @@ function PageRenderer:computePages(viewport_h)
     return Paginator.computePages(self.boundaries, viewport_h, self.content_h)
 end
 
+--- Returns the piece bitmap and true when it was not cached (the caller
+--- must free it after use).
 function PageRenderer:_getPieceTextBB(piece)
     self._piece_cache = self._piece_cache or newPieceCache()
-    local cached = self._piece_cache:get(piece)
+    local cache = self._piece_cache
+    local cached = cache:get(piece)
     if cached then return cached.bb end
     local bb = Paginator.renderTextPiece(piece)
     if not bb then return nil end
-    self._piece_cache:insert(piece, PieceItem:new{ bb = bb })
+    local size = bitmapBytes(bb)
+    if type(cache.willAccept) == "function" and not cache:willAccept(size) then
+        return bb, true
+    end
+    cache:insert(piece, PieceItem:new{ bb = bb, size = size })
     return bb
 end
 
@@ -353,9 +371,10 @@ function PageRenderer:renderPage(page_idx, page_starts)
             local r = Paginator.pieceVisibleRange(piece, p0, p1)
             if r then
                 has_text = true
-                local text_bb = self:_getPieceTextBB(piece)
+                local text_bb, transient = self:_getPieceTextBB(piece)
                 if text_bb then
                     bb:blitFrom(text_bb, piece.x, r.dest_y, 0, r.src_y, piece.width, r.src_h)
+                    if transient and text_bb.free then text_bb:free() end
                 else
                     logger.warn("thought popup text render failed:",
                         "y=", piece.y, "n_lines=", piece.n_lines,
