@@ -204,8 +204,8 @@ expect(settings:update_auth({ wr_ticket = "rotated" }) == true
     "a changed credential must be stored and flushed once")
 -- Cookie.merge_set_cookie mutates the live stored table before update_auth
 -- runs; the rotation must still be detected and flushed.
-expect(settings:merge_set_cookie("wr_skey=rotated-skey; Path=/") == true
-    and values.cookies.wr_skey == "rotated-skey"
+expect(settings:merge_set_cookie("wr_skey=XXX-rotated; Path=/") == true
+    and values.cookies.wr_skey == "XXX-rotated"
     and flush_count == flushes_before_noop + 2,
     "an in-place cookie rotation was not flushed")
 expect(settings:update_auth({ wr_ticket = "pending" }, { flush = false }) == true

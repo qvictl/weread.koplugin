@@ -1,0 +1,198 @@
+name: PR policy
+
+# tests-policy (required check for main):
+# 1. Lua code changes need test changes; a feat/fix PR must add or update an
+#    emulator scenario (scripts/check_test_policy.py). Maintainer label
+#    `no-tests-needed` (docs, comments, log wording only) waives it;
+#    `upstream-sync` PRs are exempt.
+# 2. Coverage gates from .ci/coverage-policy.json (scripts/coverage_tools.py
+#    gate): changed executable Lua lines >= 80% covered by unit specs and
+#    >= 90% by unit specs + emulator scenarios; overall coverage must not drop
+#    below main's baseline (coverage branch); dated whole-plugin targets.
+# The emulator line counts come from this PR's Integration run (artifacts
+# coverage-emulator-shard-*), so this job waits for it. The report goes to
+# the job summary and a sticky PR comment.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited, labeled, unlabeled, ready_for_review]
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: Pull request number (used by the upstream-sync workflow)
+        required: true
+
+permissions:
+  contents: read
+  pull-requests: write
+  actions: read
+
+concurrency:
+  group: pr-policy-${{ github.event.pull_request.number || inputs.pr }}
+  cancel-in-progress: true
+
+env:
+  LUACOV_VERSION: v0.16.0
+
+jobs:
+  tests-policy:
+    name: tests-policy
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    steps:
+      - name: Resolve pull request
+        id: pr
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number || inputs.pr }}
+        run: |
+          set -euo pipefail
+          data="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER")"
+          {
+            echo "number=$PR_NUMBER"
+            echo "base_ref=$(jq -r .base.ref <<<"$data")"
+            echo "head_sha=$(jq -r .head.sha <<<"$data")"
+            echo "same_repo=$(jq -r '.head.repo.full_name == .base.repo.full_name' <<<"$data")"
+            echo "labels=$(jq -r '[.labels[].name] | join(",")' <<<"$data")"
+          } >> "$GITHUB_OUTPUT"
+          jq -r .title <<<"$data" > "$RUNNER_TEMP/title.txt"
+
+      - name: Checkout pull request head
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ steps.pr.outputs.head_sha }}
+          fetch-depth: 0
+
+      - name: Fetch base branch and coverage baseline
+        run: |
+          git fetch --no-tags origin "${{ steps.pr.outputs.base_ref }}:refs/remotes/origin/${{ steps.pr.outputs.base_ref }}"
+          mkdir -p "$RUNNER_TEMP/baseline"
+          if git fetch --no-tags --depth 1 origin coverage:refs/remotes/origin/coverage 2>/dev/null; then
+            git show origin/coverage:baseline.json > "$RUNNER_TEMP/baseline/baseline.json" || true
+            git show origin/coverage:history.jsonl > "$RUNNER_TEMP/baseline/history.jsonl" || true
+          fi
+          ls -la "$RUNNER_TEMP/baseline"
+
+      - name: Tests accompany code changes
+        id: policy
+        continue-on-error: true
+        env:
+          LABELS: ${{ steps.pr.outputs.labels }}
+        run: |
+          python3 scripts/check_test_policy.py \
+            --base "origin/${{ steps.pr.outputs.base_ref }}" \
+            --head HEAD \
+            --labels "$LABELS" \
+            --title "$(cat "$RUNNER_TEMP/title.txt")" \
+            --summary "$RUNNER_TEMP/policy.md"
+
+      - name: Install LuaJIT and LuaCov
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y luajit libsqlite3-0
+          git clone --quiet --depth 1 --branch "$LUACOV_VERSION" \
+            https://github.com/lunarmodules/luacov.git "$RUNNER_TEMP/luacov"
+          echo "LUA_PATH=$RUNNER_TEMP/luacov/src/?.lua;;" >> "$GITHUB_ENV"
+
+      - name: Unit specs under LuaCov
+        run: bash scripts/run_lua_coverage.sh
+
+      - name: Wait for this commit's Integration run
+        id: integration
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
+        run: |
+          set -euo pipefail
+          deadline=$((SECONDS + 60 * 60))
+          run_id=""
+          while (( SECONDS < deadline )); do
+            run_json="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/integration.yml/runs?head_sha=$HEAD_SHA&per_page=20" \
+              --jq '[.workflow_runs[] | select(.event == "pull_request" or .event == "workflow_dispatch")] | sort_by(.created_at) | last // empty')"
+            if [[ -n "$run_json" ]]; then
+              run_id="$(jq -r .id <<<"$run_json")"
+              status="$(jq -r .status <<<"$run_json")"
+              echo "Integration run $run_id: $status"
+              [[ "$status" == "completed" ]] && break
+            else
+              echo "No Integration run for $HEAD_SHA yet"
+            fi
+            sleep 30
+          done
+          echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
+
+      - name: Download emulator coverage
+        if: steps.integration.outputs.run_id != ''
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ steps.integration.outputs.run_id }}
+        run: |
+          gh run download "$RUN_ID" --repo "$GITHUB_REPOSITORY" -p 'coverage-emulator-shard-*' -D "$RUNNER_TEMP/emulator-coverage"
+          find "$RUNNER_TEMP/emulator-coverage" -type f
+
+      - name: Coverage gates
+        id: coverage
+        continue-on-error: true
+        env:
+          LABELS: ${{ steps.pr.outputs.labels }}
+        run: |
+          set -euo pipefail
+          combined_args=()
+          if find "$RUNNER_TEMP/emulator-coverage" -name emulator.stats.out 2>/dev/null | grep -q .; then
+            python3 scripts/coverage_tools.py merge --all-files --out coverage/combined.stats.out \
+              coverage/unit.stats.out "$RUNNER_TEMP/emulator-coverage"
+            python3 scripts/coverage_tools.py report coverage/combined.stats.out coverage/combined.report.out
+            combined_args=(--combined coverage/combined.report.out)
+          fi
+          python3 scripts/coverage_tools.py gate \
+            --unit coverage/unit.report.out "${combined_args[@]}" \
+            --base "origin/${{ steps.pr.outputs.base_ref }}" --head HEAD \
+            --labels "$LABELS" \
+            --baseline "$RUNNER_TEMP/baseline/baseline.json" \
+            --history "$RUNNER_TEMP/baseline/history.jsonl" \
+            --summary "$RUNNER_TEMP/coverage.md" --json "$RUNNER_TEMP/coverage.json"
+
+      - name: Compose summary
+        if: always()
+        run: |
+          {
+            echo "<!-- weread-tests-policy -->"
+            cat "$RUNNER_TEMP/policy.md" 2>/dev/null || echo "Test policy did not run."
+            echo
+            cat "$RUNNER_TEMP/coverage.md" 2>/dev/null || echo "Coverage gates did not run."
+            echo
+            echo "_Policy: \`.ci/coverage-policy.json\` · labels: \`no-tests-needed\` (maintainers; docs, comments or log wording only) waives the test rule and the diff-coverage gates, \`upstream-sync\` marks automated upstream merges._"
+          } > "$RUNNER_TEMP/comment.md"
+          cat "$RUNNER_TEMP/comment.md" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Post sticky PR comment
+        if: always() && steps.pr.outputs.same_repo == 'true'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
+        run: |
+          set -euo pipefail
+          existing="$(gh api "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" --paginate \
+            --jq '.[] | select(.body | startswith("<!-- weread-tests-policy -->")) | .id' | head -n 1)"
+          if [[ -n "$existing" ]]; then
+            gh api -X PATCH "repos/$GITHUB_REPOSITORY/issues/comments/$existing" -F body=@"$RUNNER_TEMP/comment.md" >/dev/null
+          else
+            gh api -X POST "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" -F body=@"$RUNNER_TEMP/comment.md" >/dev/null
+          fi
+
+      - name: Enforce policy
+        env:
+          POLICY: ${{ steps.policy.outcome }}
+          COVERAGE: ${{ steps.coverage.outcome }}
+        run: |
+          echo "test policy: $POLICY, coverage gates: $COVERAGE"
+          if [[ "$POLICY" != "success" ]]; then
+            echo "::error::Test policy failed (see summary)."
+            exit 1
+          fi
+          if [[ "$COVERAGE" != "success" ]]; then
+            echo "::error::A blocking coverage gate failed (see summary)."
+            exit 1
+          fi

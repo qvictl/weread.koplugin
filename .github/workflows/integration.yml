@@ -1,0 +1,160 @@
+name: Integration
+
+# Runs the plugin inside real KOReader:
+# - emulator: headless KOReader app (reader.lua, SDL dummy video) with the
+#   candidate package, driven through spec/emulator/scenarios against the
+#   local mock WeRead service (scripts/run_emulator_scenarios.py). Uses the
+#   qvictl/koreader fork's rolling emulator build when it is published,
+#   otherwise the official KOReader linux release (see
+#   scripts/fetch_koreader_emulator.sh). Scenarios run under LuaCov (except
+#   `@no_coverage` timing budgets); the per-shard line counts are uploaded as
+#   coverage-emulator-shard-* for the tests-policy gate and the Coverage
+#   workflow.
+# - plugin-loader: KOReader's own Busted environment and PluginLoader at the
+#   pinned upstream commit (scripts/run_koreader_integration.sh).
+# Release.yml publishes after this workflow succeeds on main.
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  schedule:
+    # Weekly, so a new fork emulator build or KOReader drift shows up even
+    # without plugin changes.
+    - cron: "23 18 * * 1"
+  workflow_dispatch:
+    inputs:
+      emulator_source:
+        description: KOReader build for the emulator scenarios
+        type: choice
+        options: [auto, fork, official]
+        default: auto
+
+permissions:
+  contents: read
+
+env:
+  LUACOV_VERSION: v0.16.0
+
+concurrency:
+  group: integration-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  emulator:
+    name: Emulator scenarios (shard ${{ matrix.shard }}/3)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
+    steps:
+      - name: Checkout plugin
+        uses: actions/checkout@v6
+
+      - name: Install runtime dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb libsdl2-2.0-0 zip unzip
+          git clone --quiet --depth 1 --branch "$LUACOV_VERSION" \
+            https://github.com/lunarmodules/luacov.git "$RUNNER_TEMP/luacov"
+
+      - name: Fetch KOReader emulator
+        id: koreader
+        env:
+          GH_TOKEN: ${{ github.token }}
+          KOREADER_EMULATOR_SOURCE: ${{ inputs.emulator_source || 'auto' }}
+        run: bash scripts/fetch_koreader_emulator.sh "$RUNNER_TEMP/koreader"
+
+      - name: Run emulator scenarios
+        env:
+          RUNTIME: ${{ steps.koreader.outputs.runtime }}
+          LABEL: ${{ steps.koreader.outputs.label }}
+        run: |
+          python3 scripts/run_emulator_scenarios.py \
+            --koreader "$RUNTIME" \
+            --label "$LABEL" \
+            --shard "${{ matrix.shard }}/3" \
+            --coverage --luacov-src "$RUNNER_TEMP/luacov/src" \
+            --out "$RUNNER_TEMP/emulator"
+
+      - name: Scenario summary
+        if: always()
+        run: |
+          if [[ -f "$RUNNER_TEMP/emulator/summary.md" ]]; then
+            cat "$RUNNER_TEMP/emulator/summary.md" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "No scenario summary was produced." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload emulator coverage
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: coverage-emulator-shard-${{ matrix.shard }}
+          path: ${{ runner.temp }}/emulator/coverage/emulator.stats.out
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Upload scenario evidence
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: emulator-evidence-shard-${{ matrix.shard }}
+          path: |
+            ${{ runner.temp }}/emulator/*/evidence
+            ${{ runner.temp }}/emulator/summary.*
+          if-no-files-found: warn
+          retention-days: 14
+
+  plugin-loader:
+    name: PluginLoader (pinned KOReader)
+    runs-on: ubuntu-latest
+    container:
+      image: koreader/kobase:1.0.0-22.04
+    timeout-minutes: 60
+    env:
+      KOREADER_COMMIT: 1e2fa5f1239028ab4b37acae833cdc86a71e5258
+      EMULATE_READER: "1"
+      MAKEFLAGS: OUTPUT_DIR=build PARALLEL_JOBS=3 INSTALL_DIR=install
+
+    steps:
+      - name: Checkout plugin
+        uses: actions/checkout@v6
+
+      - name: Checkout pinned KOReader
+        uses: actions/checkout@v6
+        with:
+          repository: koreader/koreader
+          ref: ${{ env.KOREADER_COMMIT }}
+          path: .koreader-integration
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Restore KOReader build cache
+        uses: actions/cache@v5
+        with:
+          path: .koreader-integration/build
+          key: koreader-linux-${{ env.KOREADER_COMMIT }}-v1
+
+      - name: Run real PluginLoader integration spec
+        env:
+          KOREADER_DIR: ${{ github.workspace }}/.koreader-integration
+          KOREADER_SKIP_FETCH: "1"
+        run: bash scripts/run_koreader_integration.sh
+
+  integration:
+    # Required status check for main.
+    name: integration
+    if: always()
+    needs: [emulator, plugin-loader]
+    runs-on: ubuntu-latest
+    steps:
+      - name: All integration jobs passed
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          echo "$RESULTS" | jq -r 'to_entries[] | "\(.key): \(.value.result)"'
+          echo "$RESULTS" | jq -e 'to_entries | all(.value.result == "success")' > /dev/null

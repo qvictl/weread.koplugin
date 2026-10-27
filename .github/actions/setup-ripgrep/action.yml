@@ -1,0 +1,32 @@
+name: Set up ripgrep (PCRE2)
+description: >
+  Installs the official ripgrep release binary, which is built with PCRE2.
+  Distribution packages may lack PCRE2, which used to make rg --pcre2/-P
+  checks fail open (rg exits 2 and the check silently "passes").
+inputs:
+  version:
+    description: ripgrep release
+    default: "15.2.0"
+  sha256:
+    description: SHA-256 of ripgrep-<version>-x86_64-unknown-linux-musl.tar.gz
+    default: "33e15bcf1624b25cdd2a55813a47a2f95dbe126268203e76aa6a585d1e7b149c"
+runs:
+  using: composite
+  steps:
+    - name: Install ripgrep ${{ inputs.version }}
+      shell: bash
+      env:
+        RG_VERSION: ${{ inputs.version }}
+        RG_SHA256: ${{ inputs.sha256 }}
+      run: |
+        set -euo pipefail
+        name="ripgrep-${RG_VERSION}-x86_64-unknown-linux-musl"
+        curl -fsSL --retry 3 -o "$RUNNER_TEMP/$name.tar.gz" \
+          "https://github.com/BurntSushi/ripgrep/releases/download/${RG_VERSION}/$name.tar.gz"
+        echo "$RG_SHA256  $RUNNER_TEMP/$name.tar.gz" | sha256sum -c -
+        tar -xzf "$RUNNER_TEMP/$name.tar.gz" -C "$RUNNER_TEMP"
+        mkdir -p "$RUNNER_TEMP/rg-bin"
+        cp "$RUNNER_TEMP/$name/rg" "$RUNNER_TEMP/rg-bin/rg"
+        echo "$RUNNER_TEMP/rg-bin" >> "$GITHUB_PATH"
+        "$RUNNER_TEMP/rg-bin/rg" --version
+        "$RUNNER_TEMP/rg-bin/rg" --pcre2-version

@@ -27,9 +27,13 @@ describe("WeRead plugin integration", function()
     end)
 
     it("loads project modules only through the weread namespace", function()
-        assert.is_table(package.loaded["weread.lib.client"])
-        assert.is_table(package.loaded["weread.lib.settings"])
+        -- main.lua loads these eagerly. Settings and the HTTP client are
+        -- process singletons created on first plugin init
+        -- (weread/lib/runtime.lua), so loading the plugin must not need them.
+        assert.is_table(package.loaded["weread.lib.runtime"])
+        assert.is_table(package.loaded["weread.lib.qr_login"])
         assert.is_table(package.loaded["weread.ui.menu"])
+        assert.is_nil(package.loaded["lib.runtime"])
         assert.is_nil(package.loaded["lib.client"])
         assert.is_nil(package.loaded["lib.settings"])
         assert.is_nil(package.loaded["ui.menu"])

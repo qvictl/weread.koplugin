@@ -56,13 +56,21 @@ To publish a release:
 2. Add a non-empty `## [X.Y.Z]` section to `CHANGELOG.md`. Write only the
    curated content below that heading; the workflow adds the
    `## 新功能与改进` heading automatically.
-3. Complete the pre-release validation above, then commit and push the change
-   to `main`.
-4. The normal `CI` and pinned KOReader integration workflows run.
-5. After the KOReader integration succeeds, the `Release` workflow confirms
-   that normal CI also passed for the same commit.
+3. Complete the pre-release validation above, then merge the change into
+   `main` through a pull request (`main` is protected).
+4. The `CI` and `Integration` (emulator scenarios + pinned PluginLoader)
+   workflows run on the merge commit.
+5. After `Integration` succeeds, the `Release` workflow confirms that `CI` and
+   `Integration` both passed for the same commit.
 6. If `vX.Y.Z` does not already exist, it creates the package, checksum, tag,
-   and GitHub Release.
+   and GitHub Release on `qvictl/weread.koplugin`, marks it latest, and
+   re-downloads the assets to verify the checksum. The asset names
+   `weread.koplugin-vX.Y.Z.zip` and `weread.koplugin-vX.Y.Z.zip.sha256` are
+   the ones the in-app updater (`weread/lib/updater.lua`) looks for.
+
+If an automatic run was missed, **Actions → Release → Run workflow** on `main`
+with `publish` checked publishes the current version when its tag does not
+exist yet (same checks as the automatic path).
 
 Pushes that keep an existing version do not publish anything. Reusing an
 existing release tag fails deliberately; bump to a new version instead.

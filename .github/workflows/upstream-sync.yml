@@ -1,0 +1,220 @@
+name: Upstream sync
+
+# Weekly: fast-forward the `upstream` mirror branch to finlater/main, then
+# merge it into a `sync/upstream-<date>` branch off `main` and open (or
+# update) a PR to main that runs the full CI. On a merge conflict, open or
+# update the "Upstream sync conflict" issue listing the conflicting files.
+# Our own PRs merged upstream come back through the same PR.
+#
+# Token: GITHUB_TOKEN cannot push commits that touch .github/workflows and
+# its PRs do not trigger pull_request workflows. Store a fine-grained PAT
+# (contents, pull requests, issues, workflows: read/write on this repo) as
+# the SYNC_TOKEN secret to lift both limits. Without it, CI is dispatched on
+# the sync branch explicitly and workflow-file updates are reported in an
+# issue for a manual push.
+
+on:
+  schedule:
+    - cron: "17 2 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+  actions: write
+
+concurrency:
+  group: upstream-sync
+  cancel-in-progress: false
+
+env:
+  UPSTREAM_REPO: finlater/weread.koplugin
+  UPSTREAM_BRANCH: main
+  CONFLICT_ISSUE_TITLE: Upstream sync conflict
+  BLOCKED_ISSUE_TITLE: Upstream sync blocked
+
+jobs:
+  sync:
+    name: Sync upstream
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      GH_TOKEN: ${{ secrets.SYNC_TOKEN || github.token }}
+      USING_PAT: ${{ secrets.SYNC_TOKEN != '' }}
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v6
+        with:
+          ref: main
+          fetch-depth: 0
+          token: ${{ secrets.SYNC_TOKEN || github.token }}
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          gh label create upstream-sync --color 0E8A16 \
+            --description "Automated merge of finlater/main" 2>/dev/null || true
+
+      - name: Fetch upstream
+        id: fetch
+        run: |
+          set -euo pipefail
+          git fetch --no-tags "https://github.com/$UPSTREAM_REPO.git" \
+            "+refs/heads/$UPSTREAM_BRANCH:refs/remotes/finlater/$UPSTREAM_BRANCH"
+          up="$(git rev-parse "refs/remotes/finlater/$UPSTREAM_BRANCH")"
+          echo "upstream_sha=$up" >> "$GITHUB_OUTPUT"
+          echo "upstream_short=${up:0:8}" >> "$GITHUB_OUTPUT"
+          echo "finlater/$UPSTREAM_BRANCH is at $up"
+
+      - name: Fast-forward the upstream mirror branch
+        id: mirror
+        env:
+          UP: ${{ steps.fetch.outputs.upstream_sha }}
+        run: |
+          set -euo pipefail
+          current="$(git ls-remote origin refs/heads/upstream | cut -f1)"
+          if [[ "$current" == "$UP" ]]; then
+            echo "upstream mirror already at $UP"
+            exit 0
+          fi
+          if [[ -n "$current" ]] && ! git merge-base --is-ancestor "$current" "$UP"; then
+            echo "::error::finlater/$UPSTREAM_BRANCH is not a fast-forward of our upstream mirror ($current); not rewriting it."
+            echo "rewritten=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if ! git push origin "$UP:refs/heads/upstream" 2>"$RUNNER_TEMP/mirror.err"; then
+            cat "$RUNNER_TEMP/mirror.err"
+            echo "blocked=true" >> "$GITHUB_OUTPUT"
+            echo "::warning::Could not update the upstream mirror branch (see log)."
+          fi
+
+      - name: Merge upstream into a sync branch
+        id: merge
+        env:
+          UP: ${{ steps.fetch.outputs.upstream_sha }}
+          UP_SHORT: ${{ steps.fetch.outputs.upstream_short }}
+        run: |
+          set -euo pipefail
+          if git merge-base --is-ancestor "$UP" origin/main; then
+            echo "main already contains finlater/$UPSTREAM_BRANCH ($UP_SHORT); nothing to sync."
+            echo "status=up-to-date" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # Reuse the open sync PR's branch so there is one PR per backlog.
+          existing="$(gh pr list --state open --label upstream-sync --base main \
+            --json headRefName --jq '[.[] | select(.headRefName | startswith("sync/upstream-"))][0].headRefName // ""')"
+          # The branch is bot-owned: rebuild it from the current main each
+          # run (force-pushed below) so it never carries stale merges.
+          branch="${existing:-sync/upstream-$(date -u +%Y%m%d)}"
+          git checkout -B "$branch" origin/main
+          echo "branch=$branch" >> "$GITHUB_OUTPUT"
+          if git merge --no-ff --no-edit -m "Merge finlater/$UPSTREAM_BRANCH ($UP_SHORT) into main" "$UP"; then
+            echo "status=merged" >> "$GITHUB_OUTPUT"
+          else
+            git diff --name-only --diff-filter=U > "$RUNNER_TEMP/conflicts.txt"
+            git merge --abort
+            echo "status=conflict" >> "$GITHUB_OUTPUT"
+            echo "Conflicting files:"
+            cat "$RUNNER_TEMP/conflicts.txt"
+          fi
+
+      - name: Report merge conflict
+        if: steps.merge.outputs.status == 'conflict'
+        env:
+          UP: ${{ steps.fetch.outputs.upstream_sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          {
+            echo "The weekly merge of \`$UPSTREAM_REPO@$UPSTREAM_BRANCH\` (\`$UP\`) into \`main\` has conflicts."
+            echo
+            echo "Conflicting files:"
+            echo
+            sed 's/^/- `/; s/$/`/' "$RUNNER_TEMP/conflicts.txt"
+            echo
+            echo "Resolve manually:"
+            echo
+            echo '```bash'
+            echo "git fetch origin && git fetch https://github.com/$UPSTREAM_REPO.git $UPSTREAM_BRANCH"
+            echo "git switch -c sync/upstream-manual origin/main"
+            echo "git merge FETCH_HEAD   # resolve, run the local checks, commit"
+            echo "git push origin sync/upstream-manual   # then open a PR to main with the upstream-sync label"
+            echo '```'
+            echo
+            echo "Workflow run: $RUN_URL"
+          } > "$RUNNER_TEMP/issue.md"
+          number="$(gh issue list --state open --search "\"$CONFLICT_ISSUE_TITLE\" in:title" \
+            --json number,title --jq "[.[] | select(.title == \"$CONFLICT_ISSUE_TITLE\")][0].number // \"\"")"
+          if [[ -n "$number" ]]; then
+            gh issue edit "$number" --body-file "$RUNNER_TEMP/issue.md"
+            gh issue comment "$number" --body "Still conflicting with \`$UP\` ($RUN_URL)."
+          else
+            gh issue create --title "$CONFLICT_ISSUE_TITLE" --label upstream-sync --body-file "$RUNNER_TEMP/issue.md"
+          fi
+          echo "::warning::Upstream merge conflicts; see the \"$CONFLICT_ISSUE_TITLE\" issue."
+
+      - name: Push sync branch and open PR
+        id: pr
+        if: steps.merge.outputs.status == 'merged'
+        env:
+          BRANCH: ${{ steps.merge.outputs.branch }}
+          UP: ${{ steps.fetch.outputs.upstream_sha }}
+          UP_SHORT: ${{ steps.fetch.outputs.upstream_short }}
+        run: |
+          set -euo pipefail
+          if ! git push --force origin "$BRANCH" 2>"$RUNNER_TEMP/push.err"; then
+            cat "$RUNNER_TEMP/push.err"
+            if grep -qi "workflow" "$RUNNER_TEMP/push.err"; then
+              {
+                echo "The upstream merge (\`$UP\`) changes files under \`.github/workflows/\`, which GITHUB_TOKEN may not push."
+                echo
+                echo "Either add a \`SYNC_TOKEN\` secret (fine-grained PAT with contents, pull requests, issues and workflows write access to this repository) and re-run the *Upstream sync* workflow, or merge locally and open the PR yourself."
+              } > "$RUNNER_TEMP/blocked.md"
+              number="$(gh issue list --state open --search "\"$BLOCKED_ISSUE_TITLE\" in:title" \
+                --json number,title --jq "[.[] | select(.title == \"$BLOCKED_ISSUE_TITLE\")][0].number // \"\"")"
+              if [[ -n "$number" ]]; then
+                gh issue edit "$number" --body-file "$RUNNER_TEMP/blocked.md"
+              else
+                gh issue create --title "$BLOCKED_ISSUE_TITLE" --label upstream-sync --body-file "$RUNNER_TEMP/blocked.md"
+              fi
+            fi
+            exit 1
+          fi
+          number="$(gh pr list --state open --head "$BRANCH" --json number --jq '.[0].number // ""')"
+          {
+            echo "Automated merge of [\`$UPSTREAM_REPO@$UPSTREAM_BRANCH\`](https://github.com/$UPSTREAM_REPO/commits/$UPSTREAM_BRANCH) (\`$UP_SHORT\`) into \`main\`."
+            echo
+            echo "Upstream commits not yet in main:"
+            echo
+            git log --no-merges --format='- %h %s (%an)' "origin/main..$UP" | head -n 100
+            echo
+            echo "Review the upstream changes against the fork's stability fixes, then merge with a merge commit (not squash) so upstream history stays shared. Full CI (ci, integration, tests-policy) must pass; the \`upstream-sync\` label exempts upstream code from the tests-policy rule."
+          } > "$RUNNER_TEMP/pr.md"
+          if [[ -n "$number" ]]; then
+            gh pr edit "$number" --body-file "$RUNNER_TEMP/pr.md"
+          else
+            gh pr create --base main --head "$BRANCH" --label upstream-sync \
+              --title "Sync upstream finlater/main ($(date -u +%Y-%m-%d))" --body-file "$RUNNER_TEMP/pr.md"
+            number="$(gh pr list --state open --head "$BRANCH" --json number --jq '.[0].number')"
+          fi
+          echo "number=$number" >> "$GITHUB_OUTPUT"
+          # A clean merge resolves an earlier conflict report.
+          conflict="$(gh issue list --state open --search "\"$CONFLICT_ISSUE_TITLE\" in:title" \
+            --json number,title --jq "[.[] | select(.title == \"$CONFLICT_ISSUE_TITLE\")][0].number // \"\"")"
+          if [[ -n "$conflict" ]]; then
+            gh issue close "$conflict" --comment "Resolved: upstream \`$UP_SHORT\` merged cleanly in #$number."
+          fi
+
+      - name: Run CI on the sync branch
+        # Events created with GITHUB_TOKEN do not start workflows; dispatch
+        # them explicitly so the PR gets ci / integration / tests-policy.
+        if: steps.pr.outputs.number != '' && env.USING_PAT != 'true'
+        env:
+          BRANCH: ${{ steps.merge.outputs.branch }}
+          NUMBER: ${{ steps.pr.outputs.number }}
+        run: |
+          gh workflow run ci.yml --ref "$BRANCH"
+          gh workflow run integration.yml --ref "$BRANCH"
+          gh workflow run pr-policy.yml --ref "$BRANCH" -f pr="$NUMBER"

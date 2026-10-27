@@ -8,7 +8,8 @@ from urllib.error import HTTPError
 from urllib.request import ProxyHandler, Request, build_opener
 
 from fetch_weread_epub import decode_content_shards, decode_style_shard, weread_e
-from mock_weread import BOOK_ID, CHAPTERS, MockServer, annotation, chapter_html, shards
+from mock_weread import (BIG_BOOK_ID, BIG_CHAPTER_COUNT, BOOK_ID, CHAPTERS, MockServer, annotation,
+                         chapter_html, shards)
 
 
 class MockTests(unittest.TestCase):
@@ -44,7 +45,8 @@ class MockTests(unittest.TestCase):
 
     def setUp(self):
         self.request("/__control", dict(delay=0, match="", status=503, times=0,
-                                        empty_shelf=False, empty_annotations=False))
+                                        empty_shelf=False, empty_annotations=False,
+                                        qr_mode="succeed", qr_delay=0))
 
     def test_contract_and_real_reference_decoder(self):
         status, shelf = self.gateway("/shelf/sync")
@@ -89,6 +91,45 @@ class MockTests(unittest.TestCase):
         self.request("/__control", dict(empty_shelf=True, empty_annotations=True))
         self.assertEqual(self.gateway("/shelf/sync")[1]["books"], [])
         self.assertEqual(self.gateway("/book/underlines", bookId=BOOK_ID, chapterUid=1)[1]["underlines"], [])
+
+    def test_qr_login_modes(self):
+        status, page = self.request("/__proxy?url=https%3A%2F%2Fweread.qq.com%2Fr%2Fweread-skills")
+        self.assertEqual(status, 200)
+        _, uid = self.request("/api/auth/getLoginUid")
+        info = "/api/auth/getLoginInfo?uid=" + uid["uid"] + "&otp="
+        self.assertTrue(self.request(info)[1]["succeed"])
+        self.request("/__control", dict(qr_mode="otp"))
+        self.assertEqual(self.request(info)[1]["logicCode"], "NEED_OTP")
+        self.assertEqual(self.request(info + "0000")[1]["logicCode"], "OTP_NOT_MATCH")
+        self.assertTrue(self.request(info + "1234")[1]["succeed"])
+        self.request("/__control", dict(qr_mode="expire"))
+        self.assertEqual(self.request(info)[1]["logicCode"], "LOGIN_TIMEOUT")
+        self.assertEqual(self.request("/api/skills/apikeyGet?only_show=1")[1]["apikey"], "mock-qr-api-key")
+        self.assertEqual(self.request("/__control", dict(qr_mode="bogus"))[0], 400)
+
+    def test_big_book_progress_control_and_github_release(self):
+        _, catalog = self.request("/web/book/chapterInfos", dict(bookIds=[BIG_BOOK_ID]))
+        self.assertEqual(len(catalog["data"][0]["updated"]), BIG_CHAPTER_COUNT)
+        params = dict(b=weread_e(BIG_BOOK_ID), c=weread_e(BIG_CHAPTER_COUNT))
+        parts = [self.request("/web/book/chapter/" + part, params)[1].decode() for part in ("e_0", "e_1", "e_3")]
+        self.assertIn(f"第{BIG_CHAPTER_COUNT}章", decode_content_shards(*parts))
+        self.assertEqual(len(self.gateway("/shelf/sync")[1]["books"]), 26)
+        self.request("/__progress", dict(bookId=BOOK_ID, chapterUid=3, chapterOffset=50, progress=40))
+        _, progress = self.gateway("/book/getprogress", bookId=BOOK_ID)
+        self.assertEqual(progress["book"]["chapterUid"], 3)
+        _, state = self.request("/__state")
+        self.assertEqual(state["progress_history"][-1]["source"], "control")
+        self.assertEqual(self.request("/github/api/releases/latest")[0], 404)
+        self.server.github_release = dict(version="9999.9.1", files={"weread.koplugin-v9999.9.1.zip": b"PK"})
+        _, release = self.request("/github/api/releases/latest")
+        self.assertEqual(release["tag_name"], "v9999.9.1")
+        url = release["assets"][0]["browser_download_url"]
+        self.assertEqual(self.request(url[len(self.base):])[1], b"PK")
+        self.assertEqual(self.request("/github/download/v9999.9.1/weread.koplugin-v9999.9.1.zip.sha256.corrupt")[0], 404)
+        self.server.github_release["files"]["weread.koplugin-v9999.9.1.zip.sha256"] = b"ab  x.zip\n"
+        status, corrupt = self.request("/github/download/v9999.9.1/weread.koplugin-v9999.9.1.zip.sha256.corrupt")
+        self.assertEqual((status, corrupt), (200, b"0" * 64 + b"  weread.koplugin-v9999.9.1.zip\n"))
+        self.server.github_release = None
 
     def test_unknown_routes_and_malformed_control_fail(self):
         with self.assertRaises(ValueError):

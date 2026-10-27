@@ -4,6 +4,79 @@ Thanks for your interest in WeRead KOReader Plugin.
 
 感谢你愿意参与 WeRead KOReader Plugin。为了让 issue 和 PR 更容易被处理，请遵循下面的规则。
 
+## This fork / 关于本分支
+
+`qvictl/weread.koplugin` is a maintained fork of
+[finlater/weread.koplugin](https://github.com/finlater/weread.koplugin) with
+stability fixes for memory-constrained devices. Branches:
+
+- `main` - this fork's release line (default branch, protected). Releases and
+  the in-app updater come from here.
+- `upstream` - a read-only mirror of `finlater/main`, fast-forwarded weekly by
+  the *Upstream sync* workflow, which also opens a `sync/upstream-<date>` PR
+  into `main` (or an "Upstream sync conflict" issue).
+
+Pull requests are welcome whether written by people or by AI. We gate on
+tests, not on who wrote the code. A PR can be merged only when all required
+checks pass:
+
+- `ci` - Lua lint (luacheck), namespace policy, unit/component specs, Python
+  scripts, mock-service contract, package and changelog checks, secret scan;
+- `integration` - the plugin running inside a real headless KOReader
+  emulator against the local mock WeRead service
+  (`spec/emulator/scenarios/`), plus the pinned KOReader PluginLoader test;
+- `tests-policy` - the test rule and the coverage gates below.
+
+Test rule: Lua code changes under `main.lua`, `weread/` or `integrations/`
+must come with changes under `spec/`, and every user-visible feature or fix
+(PR title `feat...` / `fix...`) must add or update at least one emulator
+scenario in `spec/emulator/scenarios/` (name it in the PR description). Bug
+fixes need a regression test that fails without the fix. Only a maintainer
+can waive this with the `no-tests-needed` label, and only for docs, comments
+or log wording.
+
+### Coverage policy / 覆盖率策略
+
+Configured in [`.ci/coverage-policy.json`](.ci/coverage-policy.json) and
+enforced by `tests-policy` on every PR to `main`. Scope: the whole plugin
+(`main.lua`, `weread/`, `integrations/`; never `spec/`, `scripts/` or
+fixtures). Plugin files no test loads count as 0%.
+
+| Gate | Rule | Blocking |
+| --- | --- | --- |
+| Diff, unit | changed executable Lua lines covered by unit specs ≥ 80% | yes (waived by `no-tests-needed`) |
+| Diff, combined | changed lines covered by unit specs + emulator scenarios ≥ 90% | yes (waived by `no-tests-needed`) |
+| Ratchet | overall unit and overall combined coverage must not drop below `main`'s latest value (0.05 pp tolerance for run-to-run noise) | yes |
+| Target 4 weeks | overall combined ≥ max(75%, day-one baseline 80.78%) from 2026-11-24 | report-only before the date, then yes |
+| Target 8 weeks | overall combined ≥ 85% from 2026-12-22 | report-only before the date, then yes |
+
+Emulator coverage is measured with LuaCov inside the real KOReader app while
+the scenarios run (forked download/login workers included). Every PR gets
+the full table (diff unit, diff combined, overall, ratchet, targets, trend)
+in the job summary and as a sticky comment. After each green `Integration`
+run on `main`, the *Coverage* workflow publishes `baseline.json`,
+`history.jsonl` and the README badge on the
+[`coverage` branch](https://github.com/qvictl/weread.koplugin/tree/coverage).
+Day-one baseline (2026-10-27): unit 73.80%, unit + emulator 80.78%.
+
+覆盖率策略见 `.ci/coverage-policy.json`，由 `tests-policy` 在每个合入 `main` 的 PR
+上强制执行：改动的可执行 Lua 行单元测试覆盖率 ≥ 80%，单元测试 + 模拟器场景合计 ≥ 90%；
+整体覆盖率（单元、合计）不得低于 `main` 当前值；合计整体覆盖率在 2026-11-24 起
+≥ max(75%, 首日基线 80.78%)，2026-12-22 起 ≥ 85%，到期前仅报告。每个 PR 的摘要和评论
+都会列出各项结果，`main` 的历史趋势与徽章发布在 `coverage` 分支。
+
+See [docs/testing.md](docs/testing.md).
+
+本仓库是 finlater/weread.koplugin 的维护分支：`main` 为本分支发布线（默认、受保护），
+`upstream` 为上游 `finlater/main` 的只读镜像，每周自动同步并向 `main` 发起合并 PR。
+
+欢迎任何 PR，无论由人还是由 AI 编写；我们以测试而非作者身份把关。合并前必须通过
+`ci`、`integration`（真实 KOReader 模拟器 + 本地 mock 服务的集成场景，以及固定版本
+PluginLoader 测试）和 `tests-policy`（修改 Lua 代码必须同时修改 `spec/` 下的测试，`feat`/`fix`
+类 PR 必须新增或更新至少一个模拟器场景，并满足下面的覆盖率门禁；仅维护者可用
+`no-tests-needed` 标签豁免，且仅限文档、注释或日志措辞改动）。Bug 修复需附带修复前会失败的
+回归测试。
+
 ## Issues / 提交 Issue
 
 Before opening an issue, please search existing issues and read the README first.
@@ -156,22 +229,34 @@ Before submitting a PR, run the relevant checks if possible:
 
 ```bash
 bash scripts/run_lua_specs.sh
-bash scripts/check_lua_namespace.sh
-luacheck main.lua _meta.lua weread spec
+bash scripts/check_lua_namespace.sh        # needs a PCRE2-enabled ripgrep
+luacheck main.lua _meta.lua weread integrations spec
 python3 -m py_compile scripts/*.py
+python3 scripts/test_mock_weread.py
 bash scripts/package_release.sh /tmp/weread.koplugin-release-test.zip
-rg -n -P "wrk-(?!x{8,})[A-Za-z0-9_-]{12,}|(wr_skey|wr_rt|wr_vid|ptcz)=((?!XXX)[^;[:space:]'\''\"]{8,})|x-wrpa-[0-9]+:\s*((?!\.\.\.)[A-Za-z0-9+/=_-]{12,})|thirdwx[=:]\s*[A-Za-z0-9_-]{8,}" . --glob '!cache/**' --glob '!*.epub'
+bash scripts/check_secrets.sh              # needs a PCRE2-enabled ripgrep
+# Linux x86_64: the emulator scenarios CI runs as the `integration` check
+bash scripts/fetch_koreader_emulator.sh /tmp/koreader
+python3 scripts/run_emulator_scenarios.py --koreader /tmp/koreader --out /tmp/weread-emulator
+# unit diff coverage (LuaCov), the first gate of `tests-policy`
+bash scripts/run_lua_coverage.sh && python3 scripts/coverage_tools.py diff coverage/unit.report.out --base origin/main
 ```
 
 提交 PR 前，如果可以，请运行相关检查：
 
 ```bash
 bash scripts/run_lua_specs.sh
-bash scripts/check_lua_namespace.sh
-luacheck main.lua _meta.lua weread spec
+bash scripts/check_lua_namespace.sh        # needs a PCRE2-enabled ripgrep
+luacheck main.lua _meta.lua weread integrations spec
 python3 -m py_compile scripts/*.py
+python3 scripts/test_mock_weread.py
 bash scripts/package_release.sh /tmp/weread.koplugin-release-test.zip
-rg -n -P "wrk-(?!x{8,})[A-Za-z0-9_-]{12,}|(wr_skey|wr_rt|wr_vid|ptcz)=((?!XXX)[^;[:space:]'\''\"]{8,})|x-wrpa-[0-9]+:\s*((?!\.\.\.)[A-Za-z0-9+/=_-]{12,})|thirdwx[=:]\s*[A-Za-z0-9_-]{8,}" . --glob '!cache/**' --glob '!*.epub'
+bash scripts/check_secrets.sh              # needs a PCRE2-enabled ripgrep
+# Linux x86_64: the emulator scenarios CI runs as the `integration` check
+bash scripts/fetch_koreader_emulator.sh /tmp/koreader
+python3 scripts/run_emulator_scenarios.py --koreader /tmp/koreader --out /tmp/weread-emulator
+# unit diff coverage (LuaCov), the first gate of `tests-policy`
+bash scripts/run_lua_coverage.sh && python3 scripts/coverage_tools.py diff coverage/unit.report.out --base origin/main
 ```
 
 See [docs/testing.md](docs/testing.md) for the test layers, required regression

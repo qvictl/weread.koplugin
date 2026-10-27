@@ -39,10 +39,31 @@ BOOKS = [dict(bookId=str(900001 + i), title=("山谷来信 · 离线测试" if i
               totalChapter=6, type=0, updateTime=1700000000 + i) for i in range(26)]
 CHAPTERS = [dict(chapterUid=i, chapterIdx=i, title=f"第{i}章 {title}", level=1,
                  wordCount=1800) for i, title in enumerate(TITLES, 1)]
+# Not on the shelf (keeps the 26-book contract): only the emulator stress
+# scenarios ask for it by id. 200 short chapters for memory/latency budgets.
+BIG_BOOK_ID = "900100"
+BIG_CHAPTER_COUNT = 200
+BIG_BOOK = dict(bookId=BIG_BOOK_ID, title="长篇压力测试 · 二百章", author="测试作者",
+                cover="https://weread.qq.com/mock/cover.png", category="文学",
+                intro="自写合成内容，用于内存与耗时预算。", wordCount=BIG_CHAPTER_COUNT * 1800,
+                totalChapter=BIG_CHAPTER_COUNT, type=0, updateTime=1700000500)
+BIG_CHAPTERS = [dict(chapterUid=i, chapterIdx=i, title=f"第{i}章 长路", level=1, wordCount=1800)
+                for i in range(1, BIG_CHAPTER_COUNT + 1)]
+ALL_BOOKS = BOOKS + [BIG_BOOK]
+QR_UID = "mock-login-uid"
+QR_VID = "900000"
 
 
-def chapter_html(uid):
-    heading = CHAPTERS[uid - 1]["title"]
+def find_book(book_id):
+    return next((b for b in ALL_BOOKS if b["bookId"] == str(book_id)), None)
+
+
+def chapters_for(book_id):
+    return BIG_CHAPTERS if str(book_id) == BIG_BOOK_ID else CHAPTERS
+
+
+def chapter_html(uid, book_id=BOOK_ID):
+    heading = chapters_for(book_id)[uid - 1]["title"]
     paragraphs = [f"<p>{QUOTE}这是第{uid}章的第{i}段。我们沿着小路慢慢前行，"
                   "记下沿途的灯光、溪水和陌生人的问候。每一次翻页，都能看见新的文字。</p>"
                   for i in range(1, 19)]
@@ -55,8 +76,8 @@ def chapter_html(uid):
               '</body></html>')
 
 
-def annotation(uid):
-    source = chapter_html(uid)
+def annotation(uid, book_id=BOOK_ID):
+    source = chapter_html(uid, book_id)
     start = source.index(QUOTE)
     return dict(range=f"{start}-{start + len(QUOTE)}", markText=QUOTE, count=12, metadata=None)
 
@@ -103,7 +124,11 @@ class MockServer(ThreadingHTTPServer):
         self.events = deque(maxlen=500)
         self.progress = {}
         self.control = dict(delay=0, match="", status=503, times=0,
-                            empty_shelf=False, empty_annotations=False)
+                            empty_shelf=False, empty_annotations=False,
+                            qr_mode="succeed", qr_delay=1)
+        self.progress_history = []
+        self.github_release = None  # dict(version=..., files={name: bytes}, body=...)
+        self.qr_otp_seen = False
 
     def record(self, event):
         with self.lock:
@@ -131,9 +156,11 @@ class MockServer(ThreadingHTTPServer):
             return control["status"], dict(errcode=-1, errmsg="Injected mock failure")
 
         book_id = str(data.get("bookId") or query.get("bookId", [BOOK_ID])[0])
+        if path.startswith(("/r/weread-skills", "/api/auth/", "/api/userInfo", "/api/skills/")):
+            return self.qr_route(method, path, query, control)
         if path == "/api/agent/gateway" and method == "POST":
             if api in {"/book/info", "/book/getprogress", "/review/list", "/book/underlines", "/book/readreviews"}:
-                if "bookId" not in data or not any(b["bookId"] == book_id for b in BOOKS):
+                if "bookId" not in data or not find_book(book_id):
                     raise ValueError("missing or unknown bookId")
             if api == "/shelf/sync":
                 return 200, dict(books=[] if control["empty_shelf"] else BOOKS, archive=[
@@ -141,7 +168,7 @@ class MockServer(ThreadingHTTPServer):
                     dict(archiveId=2, name="待读", bookIds=[b["bookId"] for b in BOOKS[15:]]),
                     dict(archiveId=3, name="空分组", bookIds=[])])
             if api == "/book/info":
-                return 200, next(b for b in BOOKS if b["bookId"] == book_id)
+                return 200, find_book(book_id)
             if api == "/store/search":
                 keyword = data.get("keyword", "")
                 return 200, dict(results=[dict(books=[dict(bookInfo=b) for b in BOOKS
@@ -152,9 +179,9 @@ class MockServer(ThreadingHTTPServer):
                 return 200, dict(reviewsCnt=1, reviewsHasMore=0, reviews=[dict(review=review())])
             if api in {"/book/underlines", "/book/readreviews"}:
                 uid = int(data["chapterUid"])
-                if not 1 <= uid <= len(CHAPTERS):
+                if not 1 <= uid <= len(chapters_for(book_id)):
                     raise ValueError("unknown chapterUid")
-                mark = annotation(uid)
+                mark = annotation(uid, book_id)
                 if api == "/book/underlines":
                     return 200, dict(chapterUid=uid, underlines=[] if control["empty_annotations"] else [mark])
                 return 200, dict(reviews=[] if control["empty_annotations"] else [
@@ -162,26 +189,28 @@ class MockServer(ThreadingHTTPServer):
                     for item in data.get("reviews", []) if item["range"] == mark["range"]])
         if path.startswith("/web/reader/") and method == "GET":
             encoded = path.rsplit("/", 1)[1].split("k")
-            book = next(b for b in BOOKS if weread_e(b["bookId"]) == encoded[0])
-            chapter = next((c for c in CHAPTERS if len(encoded) > 1 and weread_e(c["chapterUid"]) == encoded[1]), CHAPTERS[0])
+            book = next(b for b in ALL_BOOKS if weread_e(b["bookId"]) == encoded[0])
+            book_chapters = chapters_for(book["bookId"])
+            chapter = next((c for c in book_chapters if len(encoded) > 1 and weread_e(c["chapterUid"]) == encoded[1]), book_chapters[0])
             state = dict(reader=dict(bookInfo=book, psvts="mock-session", pclts="mock-clock",
                                      currentChapter=chapter, progress=self.get_progress(book["bookId"])))
             return 200, "<script>window.__INITIAL_STATE__=" + json.dumps(state, ensure_ascii=False) + ";(function(){})();</script>"
         if path == "/web/book/chapterInfos" and method == "POST":
             if not isinstance(data.get("bookIds"), list) or not data["bookIds"] or any(
-                not any(b["bookId"] == str(book_id) for b in BOOKS) for book_id in data["bookIds"]
+                not find_book(book_id) for book_id in data["bookIds"]
             ):
                 raise ValueError("missing or unknown bookIds")
-            return 200, dict(data=[dict(bookId=str(b), updated=CHAPTERS) for b in data["bookIds"]])
+            return 200, dict(data=[dict(bookId=str(b), updated=chapters_for(b)) for b in data["bookIds"]])
         if path.startswith("/web/book/chapter/") and method == "POST":
-            if not any(weread_e(b["bookId"]) == data.get("b") for b in BOOKS):
+            book = next((b for b in ALL_BOOKS if weread_e(b["bookId"]) == data.get("b")), None)
+            if not book:
                 raise ValueError("unknown encoded book")
-            uid = next(c["chapterUid"] for c in CHAPTERS if weread_e(c["chapterUid"]) == data["c"])
+            uid = next(c["chapterUid"] for c in chapters_for(book["bookId"]) if weread_e(c["chapterUid"]) == data["c"])
             part = path.rsplit("/", 1)[1]
             if part == "e_2":
                 return 200, shards("p { line-height: 1.5; } img { max-width: 100%; }", 1)[0]
             if part in {"e_0", "e_1", "e_3"}:
-                return 200, shards(chapter_html(uid))[["e_0", "e_1", "e_3"].index(part)]
+                return 200, shards(chapter_html(uid, book["bookId"]))[["e_0", "e_1", "e_3"].index(part)]
         if path == "/web/review/single" and method == "GET":
             return 200, dict(review=review(), comments=[
                 dict(commentId=f"mock-comment-{i}", content=f"合成回复 {i}", author={"nick": "测试读者"}, createTime=1700000000)
@@ -189,15 +218,84 @@ class MockServer(ThreadingHTTPServer):
         if path == "/web/book/getProgress" and method == "GET":
             return 200, self.get_progress(book_id)
         if path == "/web/book/read" and method == "POST":
-            book_id = next(b["bookId"] for b in BOOKS if weread_e(b["bookId"]) == data["b"])
-            uid = next(c["chapterUid"] for c in CHAPTERS if weread_e(c["chapterUid"]) == data["c"])
+            book_id = next(b["bookId"] for b in ALL_BOOKS if weread_e(b["bookId"]) == data["b"])
+            uid = next(c["chapterUid"] for c in chapters_for(book_id) if weread_e(c["chapterUid"]) == data["c"])
             with self.lock:
                 self.progress[book_id] = dict(chapterUid=uid, chapterIdx=data["ci"],
-                                              chapterOffset=data["co"], progress=data["pr"], summary=data.get("sm", ""))
+                                              chapterOffset=data["co"], progress=data["pr"], summary=data.get("sm", ""),
+                                              updateTime=int(time.time()))
+                self.progress_history.append(dict(bookId=book_id, source="upload", time=time.time(),
+                                                  **{k: v for k, v in self.progress[book_id].items() if k != "summary"}))
             return 200, dict(succ=1)
         if path in {"/mock/cover.png", "/mock/illustration.png"} and method == "GET":
             return 200, png()
         raise LookupError("route is not implemented")
+
+    def qr_route(self, method, path, query, control):
+        """Synthetic QR login: no WeChat, no real account; see verify_qr_login.py for the protocol."""
+        if path == "/r/weread-skills" and method == "GET":
+            return 200, "<html><body>mock skills page</body></html>", {"Set-Cookie": "wr_gid=mock-gid; Path=/"}
+        if path == "/api/auth/getLoginUid" and method == "GET":
+            with self.lock:
+                self.qr_otp_seen = False
+            return 200, dict(uid=QR_UID)
+        if path == "/api/auth/getLoginInfo" and method == "GET":
+            if query.get("uid", [""])[0] != QR_UID:
+                raise ValueError("unknown login uid")
+            otp = query.get("otp", [""])[0]
+            mode = control["qr_mode"]
+            if not otp:
+                time.sleep(control["qr_delay"])  # long poll: "user scans after a moment"
+            success = dict(succeed=True, webLoginVid=QR_VID, accessToken="mock-access-token",
+                           refreshToken="mock-refresh-token")
+            if mode == "succeed":
+                return 200, success
+            if mode == "expire":
+                return 200, dict(succeed=False, logicCode="LOGIN_TIMEOUT")
+            if mode == "otp":
+                if not otp:
+                    return 200, dict(succeed=False, logicCode="NEED_OTP")
+                return 200, success if otp == "1234" else dict(succeed=False, logicCode="OTP_NOT_MATCH")
+            raise ValueError("unknown qr_mode")
+        if path == "/api/userInfo" and method == "GET":
+            return 200, dict(userVid=int(QR_VID), name="合成扫码用户")
+        if path == "/api/skills/apikeyGet" and method == "GET":
+            return 200, dict(apikey="mock-qr-api-key")
+        raise LookupError("route is not implemented")
+
+    def github_route(self, path, base_url):
+        """Synthetic GitHub Releases API for the in-app updater (no github.com)."""
+        release = self.github_release
+        if not release:
+            return 404, dict(message="Not Found")
+        tag = "v" + release["version"]
+        if path == "/github/api/releases/latest":
+            return 200, dict(tag_name=tag, name="Version " + release["version"], draft=False, prerelease=False,
+                             body=release.get("body", ""), html_url=base_url + "/github/release/" + tag,
+                             assets=[dict(name=name, size=len(data),
+                                          browser_download_url=f"{base_url}/github/download/{tag}/{name}")
+                                     for name, data in release["files"].items()])
+        prefix = f"/github/download/{tag}/"
+        if path.startswith(prefix) and path[len(prefix):] in release["files"]:
+            return 200, release["files"][path[len(prefix):]]
+        # Test-only: "<asset>.sha256.corrupt" is a well-formed checksum file
+        # with a wrong digest (updater SHA-256 enforcement). Not an asset.
+        name = path[len(prefix):-len(".corrupt")] if path.endswith(".sha256.corrupt") else ""
+        if path.startswith(prefix) and name in release["files"]:
+            return 200, "0" * 64 + "  " + name[:-len(".sha256")] + "\n"
+        return 404, dict(message="Not Found")
+
+    def set_progress(self, data):
+        book_id = str(data.get("bookId", ""))
+        if not find_book(book_id):
+            raise ValueError("unknown bookId")
+        entry = dict(chapterUid=int(data["chapterUid"]), chapterIdx=int(data.get("chapterIdx", data["chapterUid"])),
+                     chapterOffset=int(data.get("chapterOffset", 0)), progress=int(data.get("progress", 0)),
+                     summary=str(data.get("summary", "")), updateTime=int(data.get("updateTime", time.time())))
+        with self.lock:
+            self.progress[book_id] = entry
+            self.progress_history.append(dict(bookId=book_id, source="control", time=time.time(),
+                                              **{k: v for k, v in entry.items() if k != "summary"}))
 
     def get_progress(self, book_id):
         with self.lock:
@@ -218,6 +316,7 @@ class Handler(BaseHTTPRequestHandler):
     def handle_request(self):
         target = self.path
         data = {}
+        extra_headers = {}
         try:
             size = int(self.headers.get("Content-Length", 0))
             if not 0 <= size <= 1024 * 1024:
@@ -231,7 +330,15 @@ class Handler(BaseHTTPRequestHandler):
                 status, result = 200, dict(service="weread-mock", fixture_version=1)
             elif path.path == "/__state" and self.command == "GET":
                 with self.server.lock:
-                    status, result = 200, dict(control=self.server.control.copy(), requests=list(self.server.events), progress=self.server.progress.copy())
+                    status, result = 200, dict(control=self.server.control.copy(), requests=list(self.server.events),
+                                               progress=self.server.progress.copy(),
+                                               progress_history=list(self.server.progress_history))
+            elif path.path == "/__progress" and self.command == "POST":
+                self.server.set_progress(data)
+                status, result = 200, dict(ok=True)
+            elif path.path.startswith("/github/") and self.command == "GET":
+                host = self.headers.get("Host") or f"127.0.0.1:{self.server.server_port}"
+                status, result = self.server.github_route(path.path, "http://" + host)
             elif path.path == "/__control" and self.command == "POST":
                 self.set_control(data)
                 status, result = 200, dict(ok=True)
@@ -240,7 +347,8 @@ class Handler(BaseHTTPRequestHandler):
                     target = parse_qs(path.query)["url"][0]
                 else:
                     target = "https://weread.qq.com" + self.path
-                status, result = self.server.route(self.command, target, data)
+                status, result, *extra = self.server.route(self.command, target, data)
+                extra_headers = extra[0] if extra else {}
         except (ValueError, KeyError, TypeError, StopIteration) as exc:
             status, result = 400, dict(errcode=-1, errmsg="Invalid mock request: " + str(exc))
         except LookupError as exc:
@@ -261,6 +369,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
+        for key, value in extra_headers.items():
+            self.send_header(key, value)
         self.end_headers()
         try:
             self.wfile.write(body)
@@ -283,6 +393,10 @@ class Handler(BaseHTTPRequestHandler):
             for key in ("empty_shelf", "empty_annotations"):
                 if type(candidate[key]) is not bool:
                     raise ValueError(key + " must be boolean")
+            if candidate["qr_mode"] not in ("succeed", "otp", "expire"):
+                raise ValueError("qr_mode must be succeed, otp or expire")
+            if type(candidate["qr_delay"]) not in (float, int) or not 0 <= candidate["qr_delay"] <= 10:
+                raise ValueError("qr_delay must be 0..10 seconds")
             self.server.control = candidate
 
 
