@@ -14,7 +14,9 @@ stability fixes for memory-constrained devices. Branches:
   the in-app updater come from here.
 - `upstream` - a read-only mirror of `finlater/main`, fast-forwarded weekly by
   the *Upstream sync* workflow, which also opens a `sync/upstream-<date>` PR
-  into `main` (or an "Upstream sync conflict" issue).
+  into `main` (or an "Upstream sync conflict" issue). Run it manually with
+  `upstream_ref` to merge up to a specific upstream commit, e.g. the part
+  before a conflict.
 
 Pull requests are welcome whether written by people or by AI. We gate on
 tests, not on who wrote the code. A PR can be merged only when all required

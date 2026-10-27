@@ -17,6 +17,10 @@ on:
   schedule:
     - cron: "17 2 * * 1"
   workflow_dispatch:
+    inputs:
+      upstream_ref:
+        description: Merge this finlater commit instead of the tip (catch up in steps past a conflict, or test)
+        required: false
 
 permissions:
   contents: write
@@ -59,11 +63,20 @@ jobs:
 
       - name: Fetch upstream
         id: fetch
+        env:
+          UPSTREAM_REF: ${{ inputs.upstream_ref }}
         run: |
           set -euo pipefail
           git fetch --no-tags "https://github.com/$UPSTREAM_REPO.git" \
             "+refs/heads/$UPSTREAM_BRANCH:refs/remotes/finlater/$UPSTREAM_BRANCH"
-          up="$(git rev-parse "refs/remotes/finlater/$UPSTREAM_BRANCH")"
+          tip="$(git rev-parse "refs/remotes/finlater/$UPSTREAM_BRANCH")"
+          echo "tip_sha=$tip" >> "$GITHUB_OUTPUT"
+          up="$tip"
+          if [[ -n "$UPSTREAM_REF" ]]; then
+            up="$(git rev-parse --verify "$UPSTREAM_REF^{commit}")"
+            git merge-base --is-ancestor "$up" "$tip" || { echo "::error::$UPSTREAM_REF is not on finlater/$UPSTREAM_BRANCH"; exit 1; }
+            echo "Merging $up (requested) instead of the tip $tip"
+          fi
           echo "upstream_sha=$up" >> "$GITHUB_OUTPUT"
           echo "upstream_short=${up:0:8}" >> "$GITHUB_OUTPUT"
           echo "finlater/$UPSTREAM_BRANCH is at $up"
@@ -71,7 +84,8 @@ jobs:
       - name: Fast-forward the upstream mirror branch
         id: mirror
         env:
-          UP: ${{ steps.fetch.outputs.upstream_sha }}
+          # The mirror always tracks the tip, whatever is merged below.
+          UP: ${{ steps.fetch.outputs.tip_sha }}
         run: |
           set -euo pipefail
           current="$(git ls-remote origin refs/heads/upstream | cut -f1)"
