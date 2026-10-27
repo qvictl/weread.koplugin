@@ -15,6 +15,7 @@ local Size = require("ui/size")
 local TextWidget = require("ui/widget/textwidget")
 local TitleBar = require("ui/widget/titlebar")
 local UIManager = require("ui/uimanager")
+local WindowRegistry = require("weread.ui.window_registry")
 local VerticalGroup = require("ui/widget/verticalgroup")
 local VerticalSpan = require("ui/widget/verticalspan")
 local Screen = Device.screen
@@ -230,7 +231,7 @@ function M.show(data, callbacks)
         on_select = callbacks.on_select,
     }
     UIManager:show(view)
-    return view
+    return WindowRegistry.track(view)
 end
 
 return M

@@ -11,6 +11,7 @@ local ProgressbarDialog = require("ui/widget/progressbardialog")
 local TextViewer = require("ui/widget/textviewer")
 local UIManager = require("ui/uimanager")
 local WeRead = require("weread.lib.protocol")
+local WindowRegistry = require("weread.ui.window_registry")
 
 local PluginUtil = require("weread.lib.plugin_util")
 local _ = PluginUtil.tr
@@ -132,21 +133,30 @@ function M:showBookshelf()
 end
 
 function M:closeWeReadUI()
-    -- Close from the topmost view down so no full-screen WeRead widget remains
-    -- in UIManager's window stack after a document is opened.
+    -- Close from the topmost view down so no WeRead window remains in
+    -- UIManager's window stack after a document is opened. Besides the
+    -- views referenced here this covers list menus, reviews, statistics
+    -- and views opened by other plugin instances.
     local seen = {}
     for _, field in ipairs({
         "_chapter_list_view",
         "_book_detail_view",
         "shelf_view",
+        "cache_menu",
     }) do
         local view = self[field]
         self[field] = nil
         if view and not seen[view] then
             seen[view] = true
-            UIManager:close(view)
+            if UIManager:isWidgetShown(view) then UIManager:close(view) end
         end
     end
+    WindowRegistry.closeAll()
+end
+
+-- showList() wrapper for WeRead list menus, so closeWeReadUI() finds them.
+function M:showTrackedList(...)
+    return WindowRegistry.track(self:showList(...))
 end
 
 function M:onWeReadAccountChanged()
@@ -989,12 +999,14 @@ function M:showBookReviewDetail(book, review, mode)
     text[#text + 1] = ""
     text[#text + 1] = review.content ~= "" and review.content or _("No review content.")
 
-    UIManager:show(TextViewer:new{
+    local viewer = TextViewer:new{
         title = mode == "latest" and _("Latest review") or _("Recommended review"),
         text = table.concat(text, "\n"),
         text_type = "general",
         auto_para_direction = true,
-    })
+    }
+    UIManager:show(viewer)
+    WindowRegistry.track(viewer)
 end
 
 function M:showBookReviews(book)
@@ -1218,7 +1230,7 @@ function M:showMPArticleList(book, articles)
             self:fetchMPArticles(book)
         end),
     })
-    self:showList(book.title or _("Public Account"), items, _("No articles."))
+    self:showTrackedList(book.title or _("Public Account"), items, _("No articles."))
 end
 
 function M:downloadMPArticleAndRead(book, article)
@@ -1542,7 +1554,7 @@ function M:showChapterDownloadSelection(book, chapters, on_downloaded)
             }
         end
     end
-    menu = self:showList(_("Select chapters to download"), items,
+    menu = self:showTrackedList(_("Select chapters to download"), items,
         _("No chapters."), { items_per_page = perpage })
 end
 
@@ -1806,7 +1818,7 @@ function M:searchWithUI(keyword)
                 })
             end
         end
-        self:showList(T(_("Search: %1"), keyword), items, _("No search results."))
+        self:showTrackedList(T(_("Search: %1"), keyword), items, _("No search results."))
     end)
 end
 
