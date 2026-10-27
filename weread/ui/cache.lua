@@ -710,7 +710,7 @@ end
 -- or network the scan is silently skipped; it can be run later from Cache
 -- management.
 function M:offerScanNewDir(new_dir, base_message)
-    if not self.settings:is_api_configured() or not self:isNetworkOnline() then
+    if not self.settings:is_api_configured() or not self:isNetworkConnected() then
         self:showInfo(base_message)
         return
     end
