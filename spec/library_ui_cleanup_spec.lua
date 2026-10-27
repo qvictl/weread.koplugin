@@ -9,9 +9,14 @@ local function expect(condition, message)
 end
 
 local closed = {}
+local closed_set = {}
 package.preload["ui/uimanager"] = function()
     return {
-        close = function(_self, view) closed[#closed + 1] = view end,
+        close = function(_self, view)
+            closed[#closed + 1] = view
+            closed_set[view] = true
+        end,
+        isWidgetShown = function(_self, view) return not closed_set[view] end,
         scheduleIn = function(_self, _delay, callback) callback() end,
     }
 end
@@ -94,19 +99,31 @@ expect(host._chapter_list_view == chapter_view,
 
 local shelf_view = { id = "shelf" }
 host.shelf_view = shelf_view
+-- Windows without a plugin field (list menus, reviews, statistics) are
+-- registered when shown and closed as well, newest first.
+local WindowRegistry = require("weread.ui.window_registry")
+local search_menu = { id = "search" }
+host.showList = function() return search_menu end
+expect(host:showTrackedList("Search", { {} }) == search_menu, "tracked list did not return its menu")
+local reviews_view = WindowRegistry.track({ id = "reviews" })
+local user_closed = WindowRegistry.track({ id = "closed by user" })
+closed_set[user_closed] = true
 host:openFile("/cache/book.epub")
 expect(opened == "/cache/book.epub", "document was not opened")
-expect(#closed == 3
+expect(#closed == 5
         and closed[1] == chapter_view
         and closed[2] == detail_view
-        and closed[3] == shelf_view,
-    "WeRead views were not closed from topmost to bottommost")
+        and closed[3] == shelf_view
+        and closed[4] == reviews_view
+        and closed[5] == search_menu,
+    "WeRead views were not all closed from topmost to bottommost")
 expect(host._chapter_list_view == nil
         and host._book_detail_view == nil
         and host.shelf_view == nil,
     "closed WeRead view references were retained")
 
 closed = {}
+closed_set = {}
 host.shelf_view = shelf_view
 host:openFile(nil)
 expect(#closed == 0 and host.shelf_view == shelf_view,

@@ -621,7 +621,7 @@ function M:showCacheManagement()
         })
     end
 
-    self.cache_menu = self:showList(_("Cache management"), items, _("No cached items"))
+    self.cache_menu = self:showTrackedList(_("Cache management"), items, _("No cached items"))
 end
 
 function M:refreshCacheManagement(message)
