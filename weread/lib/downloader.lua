@@ -151,6 +151,33 @@ local function prepare_worker_child()
     MemoryGate.defer_child_gc()
 end
 
+-- Per-book persistence. Newer settings expose get_book/put_book and refuse
+-- the whole-map "books" key; older ones only have the map.
+local function load_book_record(settings, book_id, numeric_fallback)
+    if settings.get_book then
+        local record = settings:get_book(book_id)
+        if not record and numeric_fallback and tonumber(book_id) then
+            record = settings:get_book(tonumber(book_id))
+        end
+        return record
+    end
+    local books = settings:get("books", {}) or {}
+    local record = books[book_id]
+    if not record and numeric_fallback then record = books[tonumber(book_id)] end
+    return record, books
+end
+
+local function save_book_record(settings, book_id, record, books)
+    if settings.put_book then
+        settings:put_book(book_id, record)
+    else
+        books = books or settings:get("books", {}) or {}
+        books[book_id] = record
+        settings:set("books", books)
+    end
+    if settings.flush then settings:flush() end
+end
+
 -- MemAvailable and this process' VmRSS for the per-chapter log line.
 function Downloader:_memorySnapshot()
     local read_meminfo = self.read_meminfo or MemoryGate.read_meminfo
@@ -470,8 +497,8 @@ function Downloader:_applyPrefetchResult(dl, result)
     local chapter = dl.chapters[1] or {}
     local uid = tostring(value.chapter_uid or chapter.chapterUid
         or chapter.chapterId or "1")
-    local books = self.settings:get("books", {})
-    local record = books[book_id] or books[tonumber(book_id)] or {}
+    local record, books = load_book_record(self.settings, book_id, true)
+    record = record or {}
     local function apply(target)
         target.cached_chapters = target.cached_chapters or {}
         target.cached_chapters[uid] = value.path
@@ -485,9 +512,7 @@ function Downloader:_applyPrefetchResult(dl, result)
     apply(dl.book)
     if record ~= dl.book then apply(record) end
     record.book_id = record.book_id or dl.book.book_id or dl.book.bookId
-    books[book_id] = record
-    self.settings:set("books", books)
-    self.settings:flush()
+    save_book_record(self.settings, book_id, record, books)
     self.refresh_shelf()
     logger.info("prefetch worker completed:", "book_id=", book_id,
         "chapter_uid=", uid, "path=", value.path)
@@ -644,13 +669,22 @@ end
 
 -- Schedule any download step behind xpcall so an uncaught error always releases
 -- the standby guard, closes the progress dialog, and reports the failure.
+-- Errors are never swallowed: even when the guard is already released (e.g. a
+-- throw while persisting the result), a job that is still active or has not
+-- reported completion is finished, so _active_job cannot stay stuck (F6).
 function Downloader:_scheduleGuarded(dl, step_fn, delay)
     UIManager:scheduleIn(delay or 0.1, function()
         local function run()
             local ok, err = xpcall(step_fn, debug.traceback)
-            if not ok and dl.standby_guard then
-                logger.err("download step failed:", log_error(err))
-                if dl.resumable then
+            if ok then return end
+            logger.err("download step failed:", log_error(err))
+            if self._active_job ~= dl and dl.completion_notified then return end
+            local handled, handle_err = pcall(function()
+                if is_low_memory_error(err) then
+                    self:_stopForLowMemory(dl, err)
+                    return
+                end
+                if dl.resumable and dl.workspace then
                     self:_preserveWorkspace(dl, err)
                 else
                     self:_releaseStandby(dl)
@@ -665,6 +699,16 @@ function Downloader:_scheduleGuarded(dl, step_fn, delay)
                 if not dl.prefetch then
                     self.show_info(T(_("Download failed:\n%1"), display_error(err)))
                 end
+            end)
+            if not handled then
+                logger.err("download failure cleanup failed:", log_error(handle_err))
+                self:_releaseStandby(dl)
+                if dl.progress_dialog then
+                    pcall(dl.progress_dialog.close, dl.progress_dialog)
+                    dl.progress_dialog = nil
+                end
+                self:_notifyCompletion(dl, false, err)
+                self:_finishJob(dl)
             end
         end
         if dl.trapper then dl.trapper:wrap(run) else run() end
@@ -1287,6 +1331,52 @@ function Downloader:_finishChapter(dl)
     self:_scheduleGuarded(dl, function() self:_step(dl) end)
 end
 
+-- Record the downloaded EPUB(s) on the book. Runs under pcall in _step.
+function Downloader:_persistDownloadResult(dl, ok, path, chapter_paths)
+    local book_id = dl.book.book_id or dl.book.bookId
+    if not book_id then return end
+    local record, books = load_book_record(self.settings, book_id, false)
+    if not record then
+        record = {}
+        for key, value in pairs(dl.book) do record[key] = value end
+    end
+    local function apply_cache_result(target)
+        target.annotation_documents = dl.book.annotation_documents or target.annotation_documents
+        target.cached_chapters = target.cached_chapters or {}
+        if not ok then return end
+        if dl.single_chapter then
+            local chapter = dl.selected[1]
+            target.cached_chapters[tostring(chapter.chapterUid or 1)] = path
+        elseif dl.separate_chapters then
+            for chapter_index, chapter in ipairs(dl.selected) do
+                local uid = tostring(chapter.chapterUid or chapter_index)
+                target.cached_chapters[uid] = chapter_paths[uid]
+            end
+        else
+            local previous_full = target.cached_full_book
+                or target.cached_file
+            for uid, cached_path in pairs(target.cached_chapters) do
+                if cached_path == previous_full or cached_path == path then
+                    target.cached_chapters[uid] = nil
+                end
+            end
+            target.cached_full_book = path
+            -- Keep cached_file as a compatibility alias for existing
+            -- installs and cache-management code. Single/partial
+            -- downloads must never overwrite it.
+            target.cached_file = path
+        end
+    end
+
+    apply_cache_result(dl.book)
+    if record ~= dl.book then apply_cache_result(record) end
+    record.cache_dir = dl.book.cache_dir or record.cache_dir
+    record.reader_url = record.reader_url
+        or dl.book.reader_url or WeRead.reader_url(book_id)
+    dl.book.reader_url = dl.book.reader_url or record.reader_url
+    save_book_record(self.settings, book_id, record, books)
+end
+
 function Downloader:_step(dl)
     if dl.cancelled then
         self:_stopCancelled(dl)
@@ -1431,54 +1521,19 @@ function Downloader:_step(dl)
             dl.progress_dialog:close()
             dl.progress_dialog = nil
         end
-        self:_releaseStandby(dl)
-        local books = self.settings:get("books", {})
-        local book_id = dl.book.book_id or dl.book.bookId
-        if book_id then
-            local record = books[book_id]
-            if not record then
-                record = {}
-                for key, value in pairs(dl.book) do record[key] = value end
-            end
-            local function apply_cache_result(target)
-                target.annotation_documents = dl.book.annotation_documents or target.annotation_documents
-                target.cached_chapters = target.cached_chapters or {}
-                if not ok then return end
-                if dl.single_chapter then
-                    local chapter = dl.selected[1]
-                    target.cached_chapters[tostring(chapter.chapterUid or 1)] = path
-                elseif dl.separate_chapters then
-                    for chapter_index, chapter in ipairs(dl.selected) do
-                        local uid = tostring(chapter.chapterUid or chapter_index)
-                        target.cached_chapters[uid] = chapter_paths[uid]
-                    end
-                else
-                    local previous_full = target.cached_full_book
-                        or target.cached_file
-                    for uid, cached_path in pairs(target.cached_chapters) do
-                        if cached_path == previous_full or cached_path == path then
-                            target.cached_chapters[uid] = nil
-                        end
-                    end
-                    target.cached_full_book = path
-                    -- Keep cached_file as a compatibility alias for existing
-                    -- installs and cache-management code. Single/partial
-                    -- downloads must never overwrite it.
-                    target.cached_file = path
-                end
-            end
-
-            apply_cache_result(dl.book)
-            if record ~= dl.book then apply_cache_result(record) end
-            record.cache_dir = dl.book.cache_dir or record.cache_dir
-            record.reader_url = record.reader_url
-                or dl.book.reader_url or WeRead.reader_url(book_id)
-            dl.book.reader_url = dl.book.reader_url or record.reader_url
-            books[book_id] = record
-            self.settings:set("books", books)
-            self.settings:flush()
+        -- Persist first and release the standby guard afterwards. A throw
+        -- while saving the book record or refreshing the shelf must not stop
+        -- the job from reporting completion (_active_job would stay set).
+        local persisted, persist_err = pcall(self._persistDownloadResult,
+            self, dl, ok, path, chapter_paths)
+        if not persisted then
+            logger.err("download result persistence failed:", log_error(persist_err))
         end
-        self.refresh_shelf()
+        local refreshed, refresh_err = pcall(self.refresh_shelf)
+        if not refreshed then
+            logger.warn("shelf refresh after download failed:", log_error(refresh_err))
+        end
+        self:_releaseStandby(dl)
         if not ok then
             logger.err("save downloaded book failed:", log_error(path))
             self:_notifyCompletion(dl, false, path)

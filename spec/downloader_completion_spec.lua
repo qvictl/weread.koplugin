@@ -5,6 +5,7 @@
 package.path = "./?.lua;" .. package.path
 
 local shown = {}
+local scheduled = {}
 package.preload["ui/widget/confirmbox"] = function()
     return { new = function(_self, options) return options end }
 end
@@ -19,6 +20,7 @@ package.preload["pluginshare"] = function() return {} end
 package.preload["ui/uimanager"] = function()
     return {
         show = function(_self, widget) shown[#shown + 1] = widget end,
+        scheduleIn = function(_self, _delay, callback) scheduled[#scheduled + 1] = callback end,
         preventStandby = function() end,
         allowStandby = function() end,
     }
@@ -256,6 +258,89 @@ for _, url in ipairs({
     "https://example.com/twelve_Example.jpg",
 }) do
     eq(Protocol.normalize_cover_url(url), url, "unrelated URL preserved: " .. url)
+end
+
+-- F6: a throw while persisting the result or refreshing the shelf must not
+-- leave the job active or skip the completion callback.
+do
+    local function finished_job(on_complete)
+        return {
+            book = { book_id = "book", title = "Book" },
+            chapters = { chapter }, selected = { chapter },
+            bodies = { ["22"] = "<p>body</p>" }, assets = {}, state = { css = "" },
+            suffix = "chapter", index = 2, total = 1, failed = {},
+            annotation_failed_batches = 0, single_chapter = true,
+            silent_completion = true, started_at = 999, standby_guard = true,
+            on_complete = on_complete,
+        }
+    end
+    local results = {}
+    downloader.refresh_shelf = function() error("shelf widget gone") end
+    local job = finished_job(function(ok, value) results[#results + 1] = { ok, value } end)
+    downloader._active_job = job
+    downloader:_beginStandby()
+    downloader:_step(job)
+    eq(#results, 1, "completion reported when the shelf refresh throws")
+    eq(results[1] and results[1][1], true, "download still succeeded")
+    eq(downloader._active_job, nil, "shelf refresh failure left the job active")
+    eq(downloader._standby_ref, 0, "shelf refresh failure leaked the standby guard")
+    downloader.refresh_shelf = function() end
+
+    local original_set = settings.set
+    settings.set = function() error("Could not save book data") end
+    results = {}
+    job = finished_job(function(ok, value) results[#results + 1] = { ok, value } end)
+    downloader._active_job = job
+    downloader:_beginStandby()
+    downloader:_step(job)
+    settings.set = original_set
+    eq(#results, 1, "completion reported when saving the book record throws")
+    eq(downloader._active_job, nil, "book record failure left the job active")
+    eq(downloader._standby_ref, 0, "book record failure leaked the standby guard")
+
+    -- Newer settings: per-book API instead of the "books" map.
+    local put = {}
+    local per_book = {
+        get = function(_self, key)
+            if key == "books" then error("books map is gone") end
+        end,
+        set = function(_self, key)
+            if key == "books" then error("books map is gone") end
+        end,
+        get_book = function(_self, id) return put[id] end,
+        put_book = function(_self, id, record) put[id] = record end,
+        flush = function() end,
+    }
+    local per_book_downloader = Downloader:new{
+        settings = per_book, client = {}, refresh_shelf = function() end,
+        show_info = function() end, show_transient = function() end,
+    }
+    results = {}
+    job = finished_job(function(ok, value) results[#results + 1] = { ok, value } end)
+    per_book_downloader._active_job = job
+    per_book_downloader:_step(job)
+    eq(put.book and put.book.cached_chapters["22"], "/cache/book/chapter-22.epub",
+        "per-book settings API was not used for the download result")
+    eq(results[1] and results[1][1], true, "per-book download did not complete")
+
+    -- A step that throws after the standby guard was released is no longer
+    -- swallowed: the active job is finished and notified.
+    results = {}
+    job = finished_job(function(ok, value) results[#results + 1] = { ok, value } end)
+    job.standby_guard = nil
+    downloader._active_job = job
+    downloader:_scheduleGuarded(job, function() error("late failure") end)
+    table.remove(scheduled)()
+    eq(#results, 1, "late step failure was swallowed")
+    eq(results[1] and results[1][1], false, "late step failure reported success")
+    eq(downloader._active_job, nil, "late step failure left the job active")
+
+    -- Already finished jobs are only logged.
+    local before = #info_messages
+    downloader:_scheduleGuarded(job, function() error("after completion") end)
+    table.remove(scheduled)()
+    eq(#results, 1, "finished job was notified twice")
+    eq(#info_messages, before, "finished job failure was shown again")
 end
 
 print(string.format(
