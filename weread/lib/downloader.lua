@@ -103,6 +103,26 @@ function Downloader:new(o)
     return o
 end
 
+-- Every forked child starts with the parent's PRNG state; without a reseed
+-- each worker draws the same "random" request parameters (F12).
+local function reseed_child_random()
+    local pid = 0
+    pcall(function()
+        local ffi = require("ffi")
+        pcall(ffi.cdef, "int getpid(void);")
+        pid = tonumber(ffi.C.getpid()) or 0
+    end)
+    local now = tonumber(time.now()) or 0
+    math.randomseed(os.time() + pid * 7919 + now % 1000003)
+    return pid
+end
+
+-- Runs first in every download worker child (see _runInterruptible).
+local function prepare_worker_child()
+    reseed_child_random()
+    MemoryGate.defer_child_gc()
+end
+
 -- MemAvailable and this process' VmRSS for the per-chapter log line.
 function Downloader:_memorySnapshot()
     local read_meminfo = self.read_meminfo or MemoryGate.read_meminfo
@@ -574,7 +594,9 @@ function Downloader:_runInterruptible(dl, task)
     if dl.cancelled then return nil end
     local dialog = dl.progress_dialog
     local fingerprint = WorkerSettings.fingerprint(self.settings)
+    local prepare_child = self.prepare_worker_child or prepare_worker_child
     local completed, result = dl.trapper:dismissableRunInSubprocess(function()
+        pcall(prepare_child)
         local auth_result = WorkerSettings.capture(self.settings)
         local ok, value = xpcall(task, debug.traceback)
         return { ok = ok, value = value, auth = auth_result() }

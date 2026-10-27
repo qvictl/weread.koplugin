@@ -493,4 +493,34 @@ do
     expect(avail == 123 and rss == 456, "memory snapshot did not use injected readers")
 end
 
+-- The worker child reseeds its PRNG and postpones its first GC cycle before
+-- running the task (F1 copy-on-write, F12 identical random parameters).
+do
+    local order = {}
+    local inline_trapper = {
+        dismissableRunInSubprocess = function(_self, task) return true, task() end,
+    }
+    local child_dl = { book = {}, total = 1, trapper = inline_trapper }
+    downloader.prepare_worker_child = function() order[#order + 1] = "prepare" end
+    local value = downloader:_runInterruptible(child_dl, function()
+        order[#order + 1] = "task"
+        return "value"
+    end)
+    expect(value == "value" and order[1] == "prepare" and order[2] == "task",
+        "child preparation did not run before the task")
+    downloader.prepare_worker_child = nil
+
+    math.randomseed(42)
+    local parent_draw = math.random(0, 1000000)
+    math.randomseed(42)
+    local child_draw = downloader:_runInterruptible(child_dl, function()
+        return math.random(0, 1000000)
+    end)
+    expect(child_draw ~= parent_draw, "worker child inherited the parent PRNG sequence")
+    local child_pause = collectgarbage("setpause", 200)
+    collectgarbage("restart")
+    expect(child_pause >= 200 and child_pause <= 1000 and child_pause ~= 200,
+        "worker child did not postpone its first GC cycle: " .. tostring(child_pause))
+end
+
 print(("downloader_lifecycle_spec: %d checks"):format(checks))
