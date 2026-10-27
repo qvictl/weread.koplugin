@@ -15,6 +15,10 @@ local BUSY_RETRY_SECONDS = 2
 local RESUME_UPLOAD_DELAY_SECONDS = 5
 local RESUME_UPLOAD_MAX_ATTEMPTS = 6
 local BUSY_RETRY_LIMIT = 10
+-- Background upload jobs are polled this often, up to this many times
+-- (the job itself is killed after 45 s).
+local UPLOAD_POLL_SECONDS = 1
+local UPLOAD_POLL_LIMIT = 60
 -- Automatic pulls resolve differences up to this (whole-book percent) by
 -- direction, without a dialog. See ProgressSync:_resolve.
 local SILENT_BAND_PERCENT = 2
@@ -368,6 +372,7 @@ function ProgressSync:_upload_snapshot(position, reason, show_result)
     self.uploading = true
     self.state = "uploading"
     local attempts = 0
+    local polls = 0
     local attempt
     attempt = function()
         attempts = attempts + 1
@@ -377,6 +382,15 @@ function ProgressSync:_upload_snapshot(position, reason, show_result)
             copy(position),
             0
         )
+        -- The upload runs in a background job; poll for its result.
+        if ok and not accepted and type(outcome) == "table"
+            and outcome.error_kind == "pending"
+            and polls < UPLOAD_POLL_LIMIT then
+            polls = polls + 1
+            attempts = attempts - 1
+            self.scheduler:scheduleIn(UPLOAD_POLL_SECONDS, attempt)
+            return
+        end
         if ok and not accepted and type(outcome) == "table"
             and outcome.error_kind == "busy"
             and attempts < BUSY_RETRY_LIMIT then

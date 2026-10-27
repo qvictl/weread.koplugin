@@ -16,6 +16,13 @@ local RENEWAL_COOLDOWN_SECONDS = 10 * 60
 local JOB_POLL_INITIAL_SECONDS = 0.25
 local JOB_POLL_MAX_SECONDS = 2
 local JOB_TIMEOUT_SECONDS = 180
+-- Progress uploads run in their own short-lived job; past this the child is
+-- killed and the upload counts as failed (the caller keeps it pending).
+local UPLOAD_JOB_TIMEOUT_SECONDS = 45
+-- An upload result is handed to a polling caller only while this fresh.
+local UPLOAD_RESULT_TTL_SECONDS = 120
+-- Accrued seconds below this are not worth a separate credit (see #202).
+local MIN_CREDIT_SECONDS = 15
 local JOB_COLLECT_INTERVAL_SECONDS = 2
 
 -- Context fields that the subprocess sends back for the parent to persist.
@@ -67,11 +74,38 @@ local function make_subprocess_runner()
     }
 end
 
-local function book_record(books, book_id)
+-- Per-book settings API (upstream #207: get_book/put_book) with a fallback
+-- to the legacy whole-table "books" key, which #207 turns into an error.
+local function get_book(settings, book_id)
+    if type(settings.get_book) == "function" then
+        return settings:get_book(book_id)
+    end
+    local books = settings:get("books", {})
     if type(books) ~= "table" then
         return nil
     end
     return books[tostring(book_id)] or books[book_id]
+end
+
+local function put_book(settings, book_id, book)
+    if type(settings.put_book) == "function" then
+        return settings:put_book(book_id, book)
+    end
+    local books = settings:get("books", {}) or {}
+    books[book_id] = book
+    settings:set("books", books)
+end
+
+-- Identifies one progress upload so a later call with the same snapshot can
+-- poll the background job instead of starting another one.
+local function upload_key(book_id, position)
+    position = type(position) == "table" and position or {}
+    return table.concat({
+        tostring(book_id),
+        tostring(position.chapter_uid),
+        tostring(position.chapter_offset),
+        tostring(position.percent),
+    }, "|")
 end
 
 local function response_body(result)
@@ -231,7 +265,7 @@ function ReadReport:_target_title(book_id)
         and tostring(self.current_book_title or "") ~= "" then
         return self.current_book_title
     end
-    local book = book_record(self.settings:get("books", {}), book_id)
+    local book = get_book(self.settings, book_id)
     if type(book) == "table" and tostring(book.title or "") ~= "" then
         return book.title
     end
@@ -276,6 +310,7 @@ function ReadReport:_persist_session()
         cfg.session_book_id = self.server_session_book_id
         cfg.session_started_at = self.server_session_ready_at
         cfg.last_credit_at = self.last_credit_at
+        cfg.credit_paused_at = self.credit_paused_at
     end
     self.settings:set("read_report", cfg)
     self.settings:flush()
@@ -294,6 +329,12 @@ function ReadReport:_restore_session(book_id)
     self.server_session_ready = true
     self.server_session_ready_at = started
     self.last_credit_at = tonumber(cfg.last_credit_at) or started
+    -- The previous reader paused the clock on close: skip the closed gap.
+    local paused = tonumber(cfg.credit_paused_at)
+    if paused and paused >= self.last_credit_at and self.now() > paused then
+        self.last_credit_at = self.last_credit_at + (self.now() - paused)
+    end
+    self.credit_paused_at = nil
 end
 
 function ReadReport:_reading_credit(book_id)
@@ -319,6 +360,7 @@ function ReadReport:_remember_session(book_id, outcome)
         self.server_session_ready = true
         self.server_session_ready_at = self.now()
         self.last_credit_at = self.now()
+        self.credit_paused_at = nil
         self:_persist_session()
         return
     end
@@ -486,42 +528,48 @@ function ReadReport:on_page_update()
     end
 end
 
-function ReadReport:_flush_accrued(reason)
-    if self.suspended or self.job then return false end
-    local proceed, book_id, position = self:_precheck()
-    if not proceed then return false end
-    local elapsed, session_open = self:_reading_credit(book_id)
-    if not session_open or elapsed < 15 then return false end
-    local outcome = self:_run_pipeline(book_id, {
-        allow_renewal = false,
-        position = position,
-        elapsed_seconds = elapsed,
-        session_open = true,
-    })
-    local accepted = self:_apply_outcome(outcome, book_id)
-    if accepted then
-        log("info", "read report flushed:",
-            "reason=", reason or "unspecified",
-            "seconds=", elapsed)
+-- Reading time accrued in the open server session is not flushed with a
+-- network request on suspend or close: those handlers must stay O(1)
+-- (F3). The credit clock is paused instead and resumed when reading
+-- continues, so the next regular report credits the time read before the
+-- pause without counting the time spent asleep or closed.
+function ReadReport:_pause_credit(persist)
+    if not self.server_session_ready then return end
+    self.credit_paused_at = self.credit_paused_at or self.now()
+    if persist then
+        local ok, err = pcall(function() self:_persist_session() end)
+        if not ok then log("warn", "persist paused report session failed:", tostring(err)) end
     end
-    return accepted
+end
+
+function ReadReport:_resume_credit()
+    local paused = self.credit_paused_at
+    self.credit_paused_at = nil
+    if not paused or not self.last_credit_at then return end
+    local gap = self.now() - paused
+    if gap > 0 then
+        self.last_credit_at = self.last_credit_at + gap
+    end
 end
 
 function ReadReport:on_suspend()
-    self:_flush_accrued("suspend")
+    self:_pause_credit(false)
     self.suspended = true
     self:stop("suspend")
 end
 
 function ReadReport:on_resume()
+    self:_resume_credit()
     self.suspended = false
     return self:maybe_start("resume")
 end
 
 function ReadReport:on_close_document()
-    self:_flush_accrued("document_closed")
     local config = self:_config()
     if config.report_on_open ~= false or config.mode == "auto" then
+        -- The next ReaderUI restores the session from settings and resumes
+        -- the credit clock from here.
+        self:_pause_credit(true)
         self:stop("document_closed")
         self.current_book_id = nil
         self.current_book_title = nil
@@ -674,7 +722,7 @@ function ReadReport:_auth_fingerprint()
 end
 
 function ReadReport:_context_fingerprint(book_id)
-    local book = book_record(self.settings:get("books", {}), book_id) or {}
+    local book = get_book(self.settings, book_id) or {}
     local parts = {}
     for _i, field in ipairs(CONTEXT_FIELDS) do
         parts[#parts + 1] = field .. "=" .. tostring(book[field])
@@ -686,7 +734,11 @@ end
 -- Subprocess job management (parent side)
 -- ------------------------------------------------------------------
 
-function ReadReport:_start_job(book_id, allow_renewal, generation, task, position, credit)
+-- Forks one report or upload attempt. spec: { kind = "report"|"upload",
+-- key, book_id, allow_renewal, position, credit, timeout }. on_done(job,
+-- outcome, timed_out) runs on the UI loop once the child finishes or is
+-- killed. Returns true; or false, error, unsupported.
+function ReadReport:_spawn_job(spec, on_done)
     local runner = self.subprocess
     if not runner then
         return false, "no subprocess support", true
@@ -695,9 +747,9 @@ function ReadReport:_start_job(book_id, allow_renewal, generation, task, positio
     if not memory_ok then
         return false, "low memory (" .. tostring(available_kb) .. " kB available)"
     end
-    credit = credit or {}
     local pid, read_fd = runner.run(function(_pid, child_write_fd)
-        local outcome = self:_child_report(book_id, allow_renewal, position, credit)
+        local outcome = self:_child_report(spec.book_id, spec.allow_renewal,
+            spec.position, spec.credit, spec)
         local ok, encoded = pcall(function()
             return self.client:json_encode(outcome)
         end)
@@ -712,23 +764,44 @@ function ReadReport:_start_job(book_id, allow_renewal, generation, task, positio
     end
 
     local job = {
+        kind = spec.kind or "report",
+        key = spec.key,
         pid = pid,
         read_fd = read_fd,
-        book_id = book_id,
+        book_id = spec.book_id,
         started_at = self.now(),
+        timeout = spec.timeout or JOB_TIMEOUT_SECONDS,
         poll_interval = JOB_POLL_INITIAL_SECONDS,
         auth_fingerprint = self:_auth_fingerprint(),
-        context_fingerprint = self:_context_fingerprint(book_id),
+        context_fingerprint = self:_context_fingerprint(spec.book_id),
+        on_done = on_done,
     }
     job.poll = function()
-        self:_poll_job(job, generation, task)
+        self:_poll_job(job)
     end
     self.job = job
     self.scheduler:scheduleIn(job.poll_interval, job.poll)
     return true
 end
 
-function ReadReport:_poll_job(job, generation, task)
+function ReadReport:_start_job(book_id, allow_renewal, generation, task, position, credit)
+    return self:_spawn_job({
+        kind = "report",
+        book_id = book_id,
+        allow_renewal = allow_renewal,
+        position = position,
+        credit = credit or {},
+    }, function(job, outcome, timed_out)
+        if timed_out then
+            self:_set_error("report job timed out", "transport", "read report job failed:")
+        else
+            self:_apply_job_outcome(job, outcome)
+        end
+        self:_schedule_next(generation, task)
+    end)
+end
+
+function ReadReport:_poll_job(job)
     if self.job ~= job then
         return
     end
@@ -747,15 +820,14 @@ function ReadReport:_poll_job(job, generation, task)
             -- the background so it does not linger as a zombie.
             self:_collect_pid(job.pid)
         end
-        self:_apply_job_outcome(job, self:_decode_outcome(payload))
-        self:_schedule_next(generation, task)
+        job.on_done(job, self:_decode_outcome(payload), false)
         return
     end
-    if self.now() - job.started_at > JOB_TIMEOUT_SECONDS then
-        log("warn", "read report job timed out, terminating:", "pid=", job.pid)
+    if self.now() - job.started_at > job.timeout then
+        log("warn", "read report job timed out, terminating:",
+            "kind=", job.kind, "pid=", job.pid)
         self:_abandon_job(job)
-        self:_set_error("report job timed out", "transport", "read report job failed:")
-        self:_schedule_next(generation, task)
+        job.on_done(job, nil, true)
         return
     end
     job.poll_interval = math.min(job.poll_interval * 2, JOB_POLL_MAX_SECONDS)
@@ -825,6 +897,13 @@ end
 -- ------------------------------------------------------------------
 
 function ReadReport:_apply_job_outcome(job, outcome)
+    self:_write_back(job, outcome)
+    return self:_apply_outcome(outcome, job.book_id)
+end
+
+-- Persists renewed auth and the refreshed reader context a child sent
+-- back, unless the parent's copy changed while the job ran.
+function ReadReport:_write_back(job, outcome)
     local book_id = job.book_id
     if type(outcome) == "table" then
         if type(outcome.auth) == "table" then
@@ -856,7 +935,6 @@ function ReadReport:_apply_job_outcome(job, outcome)
             end
         end
     end
-    return self:_apply_outcome(outcome, book_id)
 end
 
 function ReadReport:_apply_outcome(outcome, book_id)
@@ -887,8 +965,7 @@ function ReadReport:_context_snapshot(book)
 end
 
 function ReadReport:_persist_context(book_id, snapshot)
-    local books = self.settings:get("books", {})
-    local book = book_record(books, book_id) or { book_id = book_id }
+    local book = get_book(self.settings, book_id) or { book_id = book_id }
     local changed = false
     -- Replace semantics, not merge: a refreshed context may legitimately
     -- clear session fields (notably pclts), and the old wholesale record
@@ -905,8 +982,7 @@ function ReadReport:_persist_context(book_id, snapshot)
         return
     end
     book.book_id = book.book_id or book_id
-    books[book_id] = book
-    self.settings:set("books", books)
+    put_book(self.settings, book_id, book)
     self.settings:flush()
 end
 
@@ -917,12 +993,19 @@ end
 -- Child entry point. Neuters settings persistence inside the fork and
 -- captures auth changes (Set-Cookie merges, cookie renewal) so the parent
 -- can persist them from the outcome.
-function ReadReport:_child_report(book_id, allow_renewal, position, credit)
+function ReadReport:_child_report(book_id, allow_renewal, position, credit, spec)
+    spec = spec or {}
+    -- Neuter persistence for the duration of the pipeline only, so this
+    -- object stays usable if it is ever run outside a forked child.
+    local settings = self.settings
+    local saved_flush = rawget(settings, "flush")
+    local saved_update_auth = rawget(settings, "update_auth")
+    local saved_no_persist = self._no_persist
     self._no_persist = true
-    self.settings.flush = function() end
+    settings.flush = function() end
     local auth_changed = false
-    local original_update_auth = self.settings.update_auth
-    self.settings.update_auth = function(settings_obj, credentials, options)
+    local original_update_auth = settings.update_auth
+    settings.update_auth = function(settings_obj, credentials, options)
         auth_changed = true
         options = options or {}
         options.flush = false
@@ -936,6 +1019,7 @@ function ReadReport:_child_report(book_id, allow_renewal, position, credit)
             position = position,
             elapsed_seconds = credit.elapsed_seconds,
             session_open = credit.session_open,
+            progress_only = spec.kind == "upload",
         })
     end)
     if not ok then
@@ -948,11 +1032,14 @@ function ReadReport:_child_report(book_id, allow_renewal, position, credit)
     end
     if auth_changed then
         outcome.auth = {
-            cookies = self.settings:get("cookies", {}),
-            wr_ticket = self.settings:get("wr_ticket", ""),
-            wr_wrpa = self.settings:get("wr_wrpa", ""),
+            cookies = settings:get("cookies", {}),
+            wr_ticket = settings:get("wr_ticket", ""),
+            wr_wrpa = settings:get("wr_wrpa", ""),
         }
     end
+    settings.flush = saved_flush
+    settings.update_auth = saved_update_auth
+    self._no_persist = saved_no_persist
     return outcome
 end
 
@@ -1210,8 +1297,7 @@ function ReadReport:ensure_context(book_id, force, opts)
         error("cookie not configured")
     end
 
-    local books = self.settings:get("books", {})
-    local book = book_record(books, book_id) or {
+    local book = get_book(self.settings, book_id) or {
         book_id = book_id,
         title = self.current_book_title or book_id,
     }
@@ -1220,8 +1306,7 @@ function ReadReport:ensure_context(book_id, force, opts)
         -- Forked child: the parent persists the context from the outcome.
         return book
     end
-    books[book_id] = book
-    self.settings:set("books", books)
+    put_book(self.settings, book_id, book)
     self.settings:flush()
     return book
 end
@@ -1323,39 +1408,113 @@ function ReadReport:_send(book_id, book, position, elapsed_seconds, opts)
     return result, http_code, entered, elapsed
 end
 
-function ReadReport:upload_position(book_id, position, elapsed_seconds)
-    if self.job then
-        return false, { error = "read_report_busy", error_kind = "busy" }
-    end
-    local _elapsed, session_open = self:_reading_credit(tostring(book_id))
-    local outcome = self:_run_pipeline(tostring(book_id), {
-        allow_renewal = self:_renewal_allowed(),
-        position = position,
-        elapsed_seconds = elapsed_seconds or 0,
-        session_open = session_open,
-        progress_only = true,
-    })
+-- Records the result of an upload: renewal bookkeeping and the server
+-- session clock (a progress POST also resets WeChat's heartbeat clock).
+function ReadReport:_finish_upload(book_id, outcome)
     if outcome.renew_attempted then
         self.last_renew_attempt = self.now()
     end
     if outcome.accepted == true then
-        self:_remember_session(tostring(book_id), outcome)
-        -- A progress POST also resets the server heartbeat clock. Future
-        -- duration reports must start after this accepted request.
-        if self.server_session_book_id == tostring(book_id) then
+        self:_remember_session(book_id, outcome)
+        if self.server_session_book_id == book_id then
             self.last_credit_at = self.now()
             self:_persist_session()
         end
     end
-    if type(outcome.book) == "table" then
-        local ok, err = pcall(function()
-            self:_persist_context(tostring(book_id), outcome.book)
-        end)
-        if not ok then
-            log("warn", "persist progress upload context failed:", tostring(err))
+end
+
+-- Uploads one progress snapshot. Submit-or-poll: the first call starts a
+-- background job and returns false, { error_kind = "pending" }; calling
+-- again with the same snapshot keeps returning "pending" while the job
+-- runs, then returns its final accepted, outcome once. Another job in
+-- flight (a report tick) returns { error_kind = "busy" }. Nothing here
+-- blocks the UI loop unless the platform cannot fork at all.
+function ReadReport:upload_position(book_id, position, elapsed_seconds)
+    book_id = tostring(book_id)
+    local key = upload_key(book_id, position)
+    local result = self.upload_result
+    if result and result.key == key then
+        self.upload_result = nil
+        if self.now() - result.at <= UPLOAD_RESULT_TTL_SECONDS then
+            return result.accepted, result.outcome
         end
     end
-    return outcome.accepted == true, outcome
+    local job = self.job
+    if job and job.kind == "upload" and job.key == key then
+        return false, { error = "upload_pending", error_kind = "pending" }
+    end
+    if job then
+        return false, { error = "read_report_busy", error_kind = "busy" }
+    end
+    -- Credit the time read in this server session together with the
+    -- upload: its rt=0 post would otherwise reset WeChat's clock and drop it.
+    local elapsed, session_open = self:_reading_credit(book_id)
+    local credit = {
+        elapsed_seconds = session_open and elapsed >= MIN_CREDIT_SECONDS
+            and elapsed or (tonumber(elapsed_seconds) or 0),
+        session_open = session_open,
+    }
+    if not self.subprocess then
+        -- No fork support on this platform (and in specs): run inline.
+        local outcome = self:_run_pipeline(book_id, {
+            allow_renewal = self:_renewal_allowed(),
+            position = position,
+            elapsed_seconds = credit.elapsed_seconds,
+            session_open = credit.session_open,
+            progress_only = true,
+        })
+        self:_finish_upload(book_id, outcome)
+        if type(outcome.book) == "table" then
+            local ok, err = pcall(function()
+                self:_persist_context(book_id, outcome.book)
+            end)
+            if not ok then
+                log("warn", "persist progress upload context failed:", tostring(err))
+            end
+        end
+        return outcome.accepted == true, outcome
+    end
+    local spawned, spawn_err = self:_spawn_job({
+        kind = "upload",
+        key = key,
+        book_id = book_id,
+        allow_renewal = self:_renewal_allowed(),
+        position = position,
+        credit = credit,
+        timeout = UPLOAD_JOB_TIMEOUT_SECONDS,
+    }, function(done_job, outcome, timed_out)
+        if timed_out or type(outcome) ~= "table" then
+            outcome = {
+                accepted = false,
+                error = timed_out and "progress upload timed out"
+                    or "progress upload returned no result",
+                error_kind = timed_out and "transport" or "job",
+            }
+        else
+            self:_write_back(done_job, outcome)
+        end
+        self:_finish_upload(book_id, outcome)
+        self.upload_result = {
+            key = key,
+            at = self.now(),
+            accepted = outcome.accepted == true,
+            outcome = outcome,
+        }
+    end)
+    if not spawned then
+        -- Low memory or a failed fork: never fall back to the blocking
+        -- pipeline on the UI loop. The caller retries later.
+        return false, { error = tostring(spawn_err), error_kind = "busy" }
+    end
+    return false, { error = "upload_pending", error_kind = "pending" }
+end
+
+-- Cancels every timer and background job owned by this object. For the
+-- host's teardown (onCloseWidget); the object must not be used afterwards.
+function ReadReport:teardown(reason)
+    self.suspended = true
+    self:stop(reason or "teardown")
+    self.upload_result = nil
 end
 
 return ReadReport

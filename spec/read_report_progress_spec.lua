@@ -386,6 +386,158 @@ test("failed fork does not fall back to an inline report", function()
     eq(inline, 0, "no inline network pipeline on the UI loop")
 end)
 
+test("suspend pauses the credit clock without reporting inline", function()
+    local report, records = fixture()
+    local now = 1000
+    report.now = function() return now end
+    report.server_session_ready = true
+    report.server_session_book_id = "book"
+    report.server_session_ready_at = 900
+    report.last_credit_at = 980
+    report.task = function() end
+    report:on_suspend()
+    eq(#records, 0, "suspend sends nothing")
+    now = 1600
+    report:on_resume()
+    local elapsed = report:_reading_credit("book")
+    eq(elapsed, 20, "credit keeps the 20 s read before sleeping, not the sleep")
+end)
+
+test("close pauses the credit clock for the next reader instance", function()
+    local stored = {
+        enabled = true, mode = "auto", interval_seconds = 30,
+    }
+    local report, records = fixture()
+    local now = 1000
+    report.now = function() return now end
+    report.settings = {
+        get = function() return stored end,
+        set = function(_self, _key, value) stored = value end,
+        flush = function() end,
+        is_cookie_configured = function() return true end,
+    }
+    report.server_session_ready = true
+    report.server_session_book_id = "book"
+    report.server_session_ready_at = 900
+    report.last_credit_at = 975
+    report:on_close_document()
+    eq(#records, 0, "close sends nothing")
+    eq(stored.credit_paused_at, 1000, "pause persisted for the next reader")
+
+    local next_report = fixture()
+    next_report.settings = report.settings
+    next_report.now = function() return 1300 end
+    local elapsed, session_open = next_report:_reading_credit("book")
+    eq(session_open, true, "session restored")
+    eq(elapsed, 25, "the closed gap is not credited")
+end)
+
+local function fake_runner()
+    local runner = { forks = 0, done = false }
+    function runner.run(child)
+        runner.forks = runner.forks + 1
+        runner.child = child
+        return 42, 7
+    end
+    function runner.write_all(_fd, data) runner.written = data end
+    function runner.is_done() return runner.done end
+    function runner.read_size() return runner.written and #runner.written or 0 end
+    function runner.read_all()
+        local data = runner.written
+        runner.written = nil
+        return data
+    end
+    function runner.terminate() runner.terminated = true end
+    return runner
+end
+
+local function json_stub(client)
+    local stash = {}
+    client.json_encode = function(_self, value)
+        stash[#stash + 1] = value
+        return "#" .. #stash
+    end
+    client.json_decode = function(_self, text)
+        return stash[tonumber(text:sub(2))]
+    end
+end
+
+test("progress upload runs in a background job and is polled", function()
+    local runner = fake_runner()
+    local report, records = fixture(nil, {
+        subprocess = runner,
+        memory_gate = function() return true, 200000 end,
+    })
+    json_stub(report.client)
+    local scheduled = {}
+    report.scheduler = {
+        scheduleIn = function(_self, _delay, fn) scheduled[#scheduled + 1] = fn end,
+        unschedule = function() end,
+    }
+    local book = { book_id = "book", chapter_uid = 5, psvts = "ps", pclts = "pc",
+        read_session_id = report.session_id, read_session_entered_at = 80 }
+    report.ensure_context = function() return book end
+    report._persist_context = function() end
+    local original_flush = report.settings.flush
+    local position = { chapter_uid = 6, chapter_idx = 6, chapter_offset = 25880, percent = 4 }
+
+    local accepted, outcome = report:upload_position("book", position, 0)
+    eq(accepted, false, "upload not finished yet")
+    eq(outcome.error_kind, "pending", "upload is pending")
+    eq(runner.forks, 1, "one background job")
+    eq(#records, 0, "nothing sent on the UI loop")
+    accepted, outcome = report:upload_position("book", position, 0)
+    eq(outcome.error_kind, "pending", "same snapshot polls the running job")
+    eq(runner.forks, 1, "polling does not fork again")
+    local _a, other = report:upload_position("book", { chapter_uid = 7, percent = 5 }, 0)
+    eq(other.error_kind, "busy", "a different snapshot waits")
+
+    runner.child(42, 7)
+    eq(#records, 1, "the child sent the position")
+    eq(records[1].chapter_offset, 25880, "uploaded offset")
+    eq(rawget(report.settings, "flush"), original_flush, "child restores settings.flush")
+    runner.done = true
+    for _i, fn in ipairs(scheduled) do fn() end
+    accepted = report:upload_position("book", position, 0)
+    eq(accepted, true, "final result is returned once")
+    _a, outcome = report:upload_position("book", position, 0)
+    eq(outcome.error_kind, "pending", "a new call starts a new upload")
+end)
+
+test("progress upload never runs inline when the fork is refused", function()
+    local report, records = fixture(nil, {
+        subprocess = { run = function() return false, "fork failed" end },
+        memory_gate = function() return true, 200000 end,
+    })
+    local inline = 0
+    report._run_pipeline = function() inline = inline + 1 end
+    local accepted, outcome = report:upload_position("book", { chapter_uid = 6, percent = 4 }, 0)
+    eq(accepted, false, "not accepted")
+    eq(outcome.error_kind, "busy", "caller retries later")
+    eq(inline, 0, "no inline pipeline")
+    eq(#records, 0, "nothing sent")
+end)
+
+test("teardown cancels the tick and kills a running job", function()
+    local runner = fake_runner()
+    local report = fixture(nil, {
+        subprocess = runner,
+        memory_gate = function() return true, 200000 end,
+    })
+    json_stub(report.client)
+    local unscheduled = 0
+    report.scheduler = {
+        scheduleIn = function() end,
+        unschedule = function() unscheduled = unscheduled + 1 end,
+    }
+    report:upload_position("book", { chapter_uid = 6, percent = 4 }, 0)
+    report.task = function() end
+    report:teardown("close_widget")
+    eq(report.task, nil, "tick cancelled")
+    eq(report.job, nil, "job dropped")
+    eq(runner.terminated, true, "child killed")
+end)
+
 print(string.format(
     "read_report_progress_spec: %d checks, %d failure(s)", checks, failures))
 os.exit(failures == 0 and 0 or 1)

@@ -179,12 +179,9 @@ function M:onPosUpdate()
 end
 
 function M:onCloseDocument()
-    -- Credit accrued reading time before the rt=0 progress upload. That upload
-    -- refreshes WeChat's clock and would clamp this duration to zero.
-    if self.read_report then self.read_report:_flush_accrued("document_closed") end
-    -- Capture the immutable local position while the document is still alive.
-    -- The network upload is scheduled; stopping ReadReport below also frees any
-    -- in-flight report slot before that scheduled upload begins.
+    -- Nothing here may touch the network (F3): ProgressSync only records the
+    -- final position for a later upload and ReadReport pauses its credit
+    -- clock, so the order of the two calls below does not matter.
     self.progress_sync:on_close_document()
     self._reader_session_gen = (self._reader_session_gen or 0) + 1
     self.downloader:cancelPrefetch("document_closed")
@@ -333,7 +330,7 @@ end
 function M:onSuspend()
     if self._cancelUnifiedAnnotationSync then self:_cancelUnifiedAnnotationSync() end
     self._annotation_pending_prefetch = nil
-    if self.read_report then self.read_report:_flush_accrued("suspend") end
+    -- O(1) and network-free: the device and its Wi-Fi are going to sleep.
     self.progress_sync:on_suspend()
     self.read_report:on_suspend()
 end
