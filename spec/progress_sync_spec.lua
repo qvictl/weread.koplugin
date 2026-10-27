@@ -883,6 +883,86 @@ test("a pull that throws does not block later pulls", function()
     eq(f.sync:status().verified, true, "next manual pull verifies")
 end)
 
+test("dismissing the conflict dialog uploads nothing and asks again later", function()
+    local f = fixture({
+        bookId = "book",
+        progress = 50,
+        chapterUid = 33,
+        chapterIdx = 3,
+        chapterOffset = 100,
+        updateTime = 10,
+    })
+    f.sync:on_reader_ready()
+    f.drain()
+    eq(#f.choices, 1, "conflict dialog requested")
+    eq(f.choices[1].local_behind_remote, true, "dialog knows keep-local moves cloud back")
+    f.choices[1].dismiss()
+    eq(#f.uploads, 0, "dismissal uploads nothing")
+    eq(f.sync:status().verified, false, "dismissal does not verify")
+    eq(f.sync:status().state, "unverified", "dismissal leaves the session unverified")
+    f.choices[1].keep_local()
+    eq(#f.uploads, 0, "a dismissed dialog cannot upload afterwards")
+    f.sync:sync_now()
+    eq(#f.choices, 2, "the choice is offered again")
+end)
+
+test("a second conflict while a dialog is open does not stack", function()
+    local f = fixture({
+        bookId = "book",
+        progress = 50,
+        chapterUid = 33,
+        chapterIdx = 3,
+        chapterOffset = 100,
+        updateTime = 10,
+    })
+    f.sync:on_reader_ready()
+    f.drain()
+    eq(f.sync:sync_now(), false, "pull skipped while a choice is open")
+    eq(#f.choices, 1, "one dialog only")
+end)
+
+test("closing the document closes an unanswered choice", function()
+    local f = fixture({
+        bookId = "book",
+        progress = 50,
+        chapterUid = 33,
+        chapterIdx = 3,
+        chapterOffset = 100,
+        updateTime = 10,
+    })
+    f.sync:on_reader_ready()
+    f.drain()
+    local closed = 0
+    f.choices[1].close = function() closed = closed + 1 end
+    f.sync:on_close_document()
+    eq(closed, 1, "dialog closed with the document")
+    f.choices[1].keep_local()
+    f.choices[1].use_remote()
+    eq(#f.uploads, 0, "stale dialog cannot upload")
+    eq(#f.jumps, 0, "stale dialog cannot jump")
+end)
+
+test("suspend closes an unanswered choice and resume asks again", function()
+    local f = fixture({
+        bookId = "book",
+        progress = 50,
+        chapterUid = 33,
+        chapterIdx = 3,
+        chapterOffset = 100,
+        updateTime = 10,
+    })
+    f.sync:on_reader_ready()
+    f.drain()
+    local closed = 0
+    f.choices[1].close = function() closed = closed + 1 end
+    f.sync:on_suspend()
+    eq(closed, 1, "dialog closed on suspend")
+    eq(#f.uploads, 0, "nothing uploaded on suspend")
+    f.sync:on_resume()
+    f.drain()
+    eq(#f.choices, 2, "fresh choice after resume")
+end)
+
 print(string.format(
     "progress_sync_spec: %d checks, %d failure(s)", checks, failures))
 os.exit(failures == 0 and 0 or 1)

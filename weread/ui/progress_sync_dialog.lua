@@ -43,14 +43,76 @@ function ProgressSyncDialog.show_choice(context)
     end
     message = message .. "\n\n" .. _("Choose which position to keep.")
 
-    UIManager:show(ConfirmBox:new{
-        title = _("Reading progress sync"),
-        text = message,
-        ok_text = _("Use WeRead progress"),
-        cancel_text = _("Keep KOReader progress"),
-        ok_callback = context.use_remote,
-        cancel_callback = context.keep_local,
-    })
+    -- Only an explicit button press may change anything. Tapping outside the
+    -- box or pressing Back used to run cancel_callback, i.e. "Keep KOReader
+    -- progress", which uploaded an older local position over newer cloud
+    -- progress. Dismissal now calls context.dismiss: nothing is uploaded and
+    -- the choice is offered again later.
+    local current
+    local function show(widget)
+        current = widget
+        UIManager:show(widget)
+    end
+    local function dismissible(widget)
+        widget.onClose = function(self_)
+            if current == self_ then current = nil end
+            UIManager:close(self_)
+            if context.dismiss then context.dismiss() end
+            return true
+        end
+        return widget
+    end
+    -- Lets the sync state machine close a stale dialog (document closed,
+    -- device suspended) without treating it as a choice.
+    context.close = function()
+        local widget = current
+        current = nil
+        if widget then UIManager:close(widget) end
+    end
+
+    local show_choice_box
+    local function confirm_move_back()
+        show(dismissible(ConfirmBox:new{
+            title = _("Move WeRead progress back?"),
+            text = T(_("WeRead is further ahead than KOReader.\n\nWeRead: %1\nKOReader: %2\n\nKeeping the KOReader position moves your WeRead progress back."),
+                percent(context.remote_position), percent(context.local_position)),
+            ok_text = _("Move back"),
+            cancel_text = _("Back"),
+            flush_events_on_show = true,
+            ok_callback = function()
+                current = nil
+                context.keep_local()
+            end,
+            cancel_callback = function()
+                current = nil
+                show_choice_box()
+            end,
+        }))
+    end
+    show_choice_box = function()
+        show(dismissible(ConfirmBox:new{
+            title = _("Reading progress sync"),
+            text = message,
+            ok_text = _("Use WeRead progress"),
+            cancel_text = _("Keep KOReader progress"),
+            -- The dialog appears shortly after a book opens, while the reader
+            -- may already be tapping to turn pages: drop queued taps.
+            flush_events_on_show = true,
+            ok_callback = function()
+                current = nil
+                context.use_remote()
+            end,
+            cancel_callback = function()
+                current = nil
+                if context.local_behind_remote then
+                    confirm_move_back()
+                else
+                    context.keep_local()
+                end
+            end,
+        }))
+    end
+    show_choice_box()
 end
 
 function ProgressSyncDialog.notify(code, data)
