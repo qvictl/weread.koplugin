@@ -1,4 +1,5 @@
 -- Bookshelf, book, chapter, public-account, and search UI flows.
+local BookRecords = require("weread.lib.book_records")
 local BookReviews = require("weread.lib.book_reviews")
 local BookReviewsView = require("weread.ui.book_reviews_view")
 local ConfirmBox = require("ui/widget/confirmbox")
@@ -58,6 +59,27 @@ local function has_book_details(book)
         if book[key] ~= nil and book[key] ~= "" then return true end
     end
     return false
+end
+
+-- Fields that are never persisted with the book record; changing them alone
+-- does not justify rewriting the record.
+local transient_record_fields = {
+    chapters = true,
+    _cached = true,
+}
+
+local function same_value(left, right, depth)
+    if left == right then return true end
+    if type(left) ~= "table" or type(right) ~= "table" then return false end
+    depth = (depth or 0) + 1
+    if depth > 4 then return false end
+    for key, value in pairs(left) do
+        if not same_value(value, right[key], depth) then return false end
+    end
+    for key in pairs(right) do
+        if left[key] == nil then return false end
+    end
+    return true
 end
 
 local function list_items_per_page()
@@ -374,7 +396,7 @@ function M:showShelfView(mode, keyword, old_view, options)
     self.shelf_view_mode = mode
     self.shelf_search_keyword = keyword
     self.shelf_view_pages = self.shelf_view_pages or { books = 1, public_account = 1 }
-    local saved_books = self.settings:get("books", {})
+    local saved_books = BookRecords.all(self.settings)
     local downloaded_cache = {}
     local function filtered(source, with_download_state)
         local result = {}
@@ -603,7 +625,7 @@ function M:showShelfPage()
     buildItems = function()
         local items = self:shelfToolbarItems(true, refresh)
         local sorted = sortBooks(books, self.settings:get("shelf").sort_order)
-        local saved_books = self.settings:get("books", {})
+        local saved_books = BookRecords.all(self.settings)
         local downloaded_cache = {}
         self._shelf_saved_books = saved_books
         for _i, book in ipairs(sorted) do
@@ -645,7 +667,7 @@ function M:showShelfPage()
 end
 
 function M:refreshShelfCacheIndicators()
-    self._shelf_saved_books = self.settings:get("books", {})
+    self._shelf_saved_books = BookRecords.all(self.settings)
     if self.shelf_menu and self._shelf_refresh then
         local ok, err = pcall(self._shelf_refresh)
         if not ok then
@@ -655,7 +677,6 @@ function M:refreshShelfCacheIndicators()
 end
 
 function M:showBookRecord(book)
-    local books = self.settings:get("books", {})
     local book_id = book.book_id or book.bookId
     if WeRead.is_mp_book(book_id) then
         self:showMPAccount(book)
@@ -664,25 +685,37 @@ function M:showBookRecord(book)
     if not book_id then return end
 
     local account_key = self.library_db and self.library_db:accountKey() or nil
-    local saved = books[book_id] or {}
+    local stored = BookRecords.get(self.settings, book_id)
+    local saved = stored or {}
+    -- Opening a book the plugin already knows must not rewrite its record:
+    -- only persist when the shelf entry or cached details add something new.
+    local changed = stored == nil
     if account_key and saved._library_account_key
         and saved._library_account_key ~= account_key then
         saved = keep_local_cache(saved)
+        changed = true
+    end
+    local function assign(key, value)
+        if not transient_record_fields[key] and not same_value(saved[key], value) then
+            changed = true
+        end
+        saved[key] = value
     end
     local cached = self.library_db and self.library_db:getBook(book_id) or nil
     for key, value in pairs(cached or {}) do
-        if saved[key] == nil then saved[key] = value end
+        if saved[key] == nil then assign(key, value) end
     end
     for key, value in pairs(book) do
-        if value ~= nil and key ~= "_cached" then saved[key] = value end
+        if value ~= nil and key ~= "_cached" then assign(key, value) end
     end
-    saved.book_id = book_id
-    saved._library_account_key = account_key
-    saved.updated_at = saved.updated_at or os.time()
-    books[book_id] = saved
-    self.settings:set("books", books)
-    self.settings:flush()
-    if self.library_db then self.library_db:putBook(saved) end
+    assign("book_id", book_id)
+    assign("_library_account_key", account_key)
+    if saved.updated_at == nil then assign("updated_at", os.time()) end
+    if changed then
+        BookRecords.put(self.settings, book_id, saved)
+        self.settings:flush()
+        if self.library_db then self.library_db:putBook(saved) end
+    end
     if type(saved.chapters) ~= "table" and self.library_db then
         saved.chapters = self.library_db:getChapters(book_id)
     end
@@ -730,9 +763,7 @@ function M:refreshBookRecord(book, old_view, options)
             book._library_account_key = self.library_db
                 and self.library_db:accountKey() or nil
             book.detail_updated_at = os.time()
-            local books = self.settings:get("books", {})
-            books[book_id] = book
-            self.settings:set("books", books)
+            BookRecords.put(self.settings, book_id, book)
             self.settings:flush()
             if self.library_db then self.library_db:putBook(book) end
         end)
@@ -762,7 +793,7 @@ function M:showBookMenu(book)
             end
         end
     end
-    local saved = self.settings:get("books", {})[book_id] or book
+    local saved = BookRecords.get(self.settings, book_id) or book
     local cached_path = self:getFullBookCachePath(saved)
     local is_full_cached = file_exists(cached_path)
     local has_cache = self:bookRecordHasDownload(saved)
@@ -822,7 +853,7 @@ function M:showBookMenu(book)
     local view
     local open_chapter_list = self:safeCallback(_("Chapter list"), function()
         self:showChapterList(book, function()
-            local latest = self.settings:get("books", {})[book_id] or book
+            local latest = BookRecords.get(self.settings, book_id) or book
             if view then UIManager:close(view) end
             self:showBookMenu(latest)
         end)
@@ -1026,10 +1057,9 @@ function M:showMPShelfPage()
 end
 
 function M:showMPAccount(book)
-    self:rememberMPAccount(book)
-    local book_id = book.book_id or book.bookId
-    local cached = self:getCachedMPArticles(book_id)
-    if cached and #cached > 0 then
+    local record = self:rememberMPAccount(book)
+    local cached = record and record.mp_articles
+    if type(cached) == "table" and #cached > 0 then
         self:showMPArticleList(book, cached)
         return
     end
@@ -1042,19 +1072,27 @@ function M:rememberMPAccount(book)
     if not book_id then
         return
     end
-    local books = self.settings:get("books", {})
-    local record = books[book_id] or {}
-    record.book_id = book_id
-    record.title = book.title or record.title
-    record.author = book.author or record.author
-    record.updated_at = os.time()
+    local stored = BookRecords.get(self.settings, book_id)
+    local record = stored or {}
+    local title = book.title or record.title
+    local author = book.author or record.author
     -- Keep the resolved cache directory in sync both ways so the transient book
     -- object used for cached-path lookups knows where its articles actually live.
-    record.cache_dir = book.cache_dir or record.cache_dir
-    book.cache_dir = record.cache_dir
-    books[book_id] = record
-    self.settings:set("books", books)
-    self.settings:flush()
+    local cache_dir = book.cache_dir or record.cache_dir
+    book.cache_dir = cache_dir
+    -- Only write when something changed; a tap on a known account must not
+    -- rewrite its record (and article list) on every visit.
+    if stored == nil or record.book_id ~= book_id or record.title ~= title
+        or record.author ~= author or record.cache_dir ~= cache_dir then
+        record.book_id = book_id
+        record.title = title
+        record.author = author
+        record.cache_dir = cache_dir
+        record.updated_at = os.time()
+        BookRecords.put(self.settings, book_id, record)
+        self.settings:flush()
+    end
+    return record
 end
 
 function M:fetchMPArticles(book)
@@ -1101,21 +1139,11 @@ function M:fetchMPArticles(book)
     end)
 end
 
-function M:getCachedMPArticles(book_id)
-    local books = self.settings:get("books", {})
-    local record = books[book_id]
-    if record and record.mp_articles then
-        return record.mp_articles
-    end
-    return nil
-end
-
 function M:cacheMPArticles(book_id, articles)
-    local books = self.settings:get("books", {})
-    books[book_id] = books[book_id] or {}
-    books[book_id].mp_articles = articles
-    books[book_id].mp_articles_time = os.time()
-    self.settings:set("books", books)
+    local record = BookRecords.get(self.settings, book_id) or {}
+    record.mp_articles = articles
+    record.mp_articles_time = os.time()
+    BookRecords.put(self.settings, book_id, record)
     self.settings:flush()
 end
 
@@ -1191,12 +1219,12 @@ function M:downloadMPArticleAndRead(book, article)
         -- article files can still be located after the download directory changes.
         local book_id = book.book_id or book.bookId
         if book_id and book.cache_dir then
-            local books = self.settings:get("books", {})
-            local record = books[book_id] or {}
-            record.cache_dir = book.cache_dir
-            books[book_id] = record
-            self.settings:set("books", books)
-            self.settings:flush()
+            local record = BookRecords.get(self.settings, book_id) or {}
+            if record.cache_dir ~= book.cache_dir then
+                record.cache_dir = book.cache_dir
+                BookRecords.put(self.settings, book_id, record)
+                self.settings:flush()
+            end
         end
         self:openFile(path_or_err)
     end)
@@ -1267,15 +1295,13 @@ function M:loadChapters(book, callback, force_refresh)
         if not cache_ok then
             logger.warn("save chapter catalog cache failed:", log_error(cache_err))
         end
-        local books = self.settings:get("books", {})
         local book_id = book.book_id or book.bookId
         if book_id then
             if self.library_db then
                 self.library_db:putChapters(book_id, chapters_or_err)
                 self.library_db:putBook(book)
             end
-            books[book_id] = book
-            self.settings:set("books", books)
+            BookRecords.put(self.settings, book_id, book)
             self.settings:flush()
         end
         callback(chapters_or_err)
@@ -1287,7 +1313,7 @@ function M:showChapterList(book, on_close)
     local function reloadBookCache()
         if not self.settings then return end
         local book_id = book.book_id or book.bookId
-        local latest = book_id and self.settings:get("books", {})[book_id]
+        local latest = book_id and BookRecords.get(self.settings, book_id)
         if type(latest) ~= "table" then return end
         for field in pairs(local_cache_fields) do
             if latest[field] ~= nil then book[field] = latest[field] end
@@ -1748,8 +1774,7 @@ function M:parseReaderURLWithUI(url)
         if not book_id then
             return _("Reader HTML loaded, but bookId was not found.")
         end
-        local books = self.settings:get("books", {})
-        local record = books[book_id] or {}
+        local record = BookRecords.get(self.settings, book_id) or {}
         record.book_id = book_id
         record.title = title
         record.reader_url = url
@@ -1757,8 +1782,7 @@ function M:parseReaderURLWithUI(url)
         record.pclts = pclts
         record.token = token
         record.updated_at = os.time()
-        books[book_id] = record
-        self.settings:set("books", books)
+        BookRecords.put(self.settings, book_id, record)
         self.settings:flush()
         return T(_("Reader URL parsed.\nBook: %1\nbookId: %2"), title, book_id)
     end)
@@ -1767,7 +1791,7 @@ end
 
 function M:showCurrentBookDetails()
     local book_id = self:detectWeReadBook()
-    local book = book_id and self.settings:get("books", {})[book_id] or nil
+    local book = book_id and BookRecords.get(self.settings, book_id) or nil
     if not book then
         self:showInfo(_("The current document is not a WeRead cached book."))
         return
