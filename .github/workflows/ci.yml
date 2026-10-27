@@ -68,6 +68,15 @@ jobs:
       - name: Emulator scenario inventory
         run: python3 scripts/run_emulator_scenarios.py --list
 
+      - name: CLI smoke of CI tooling
+        run: |
+          python3 scripts/run_emulator_scenarios.py --help > /dev/null
+          python3 scripts/check_test_policy.py --help > /dev/null
+          for command in merge report diff total gate baseline; do
+            python3 scripts/coverage_tools.py "$command" --help > /dev/null
+          done
+          python3 -c "import json; json.load(open('.ci/coverage-policy.json'))"
+
   package:
     name: Package and changelog
     runs-on: ubuntu-latest
