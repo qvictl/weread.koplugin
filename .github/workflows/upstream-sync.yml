@@ -176,6 +176,7 @@ jobs:
           BRANCH: ${{ steps.merge.outputs.branch }}
           UP: ${{ steps.fetch.outputs.upstream_sha }}
           UP_SHORT: ${{ steps.fetch.outputs.upstream_short }}
+          TIP: ${{ steps.fetch.outputs.tip_sha }}
         run: |
           set -euo pipefail
           if ! git push --force origin "$BRANCH" 2>"$RUNNER_TEMP/push.err"; then
@@ -214,7 +215,9 @@ jobs:
             number="$(gh pr list --state open --head "$BRANCH" --json number --jq '.[0].number')"
           fi
           echo "number=$number" >> "$GITHUB_OUTPUT"
-          # A clean merge resolves an earlier conflict report.
+          # Only a clean merge of the tip resolves an earlier conflict report
+          # (a partial upstream_ref merge does not).
+          [[ "$UP" == "$TIP" ]] || exit 0
           conflict="$(gh issue list --state open --search "\"$CONFLICT_ISSUE_TITLE\" in:title" \
             --json number,title --jq "[.[] | select(.title == \"$CONFLICT_ISSUE_TITLE\")][0].number // \"\"")"
           if [[ -n "$conflict" ]]; then
