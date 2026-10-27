@@ -1067,6 +1067,32 @@ test("suspend closes an unanswered choice and resume asks again", function()
     eq(#f.choices, 2, "fresh choice after resume")
 end)
 
+test("a background upload is polled until it finishes", function()
+    local f = fixture({
+        bookId = "book",
+        progress = 50,
+        chapterUid = 33,
+        chapterIdx = 3,
+        chapterOffset = 100,
+        updateTime = 10,
+    })
+    local calls = 0
+    f.sync.upload_position = function()
+        calls = calls + 1
+        if calls < 3 then
+            return false, { error = "upload_pending", error_kind = "pending" }
+        end
+        return true, { accepted = true }
+    end
+    f.sync:on_reader_ready()
+    f.drain()
+    f.choices[1].keep_local()
+    f.drain()
+    eq(calls, 3, "polled until the job finished")
+    eq(f.sync:status().uploading, false, "upload finished")
+    eq(f.notifications[#f.notifications].code, "upload_success", "result reported")
+end)
+
 print(string.format(
     "progress_sync_spec: %d checks, %d failure(s)", checks, failures))
 os.exit(failures == 0 and 0 or 1)
