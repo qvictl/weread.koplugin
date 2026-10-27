@@ -155,4 +155,18 @@ for _i = 1, 3 do host:_usesUnifiedAnnotations() end
 expect(counts.documents == 1, "book open re-read the per-file binding database")
 expect(counts.detect == 2, "book open rescanned the library more than once for the binding")
 
+-- Reader-ready runs unprotected from onReaderReady: a locked annotation
+-- database after the context was prepared must not crash opening the book.
+local locked_store = {
+    get = function() error("database is locked") end,
+    put = function() error("database is locked") end,
+    projectionKey = function(_self, key, uid) return key .. ":" .. uid end,
+}
+host._prepareAnnotationContext = function()
+    return { book_id = "b1", document_key = "doc-key", store = locked_store,
+        chapters = { { chapterUid = "1" } }, statuses = {}, binding = { book_id = "b1" } }
+end
+local ready_ok, ready_err = pcall(host.onUnifiedAnnotationsReady, host)
+expect(ready_ok, "a locked database crashed reader-ready: " .. tostring(ready_err))
+
 print(("annotation_tap_cost_spec: %d checks"):format(checks))

@@ -14,6 +14,12 @@ end
 local ExternalAnnotationsDB = {}
 ExternalAnnotationsDB.__index = ExternalAnnotationsDB
 ExternalAnnotationsDB.LEGACY_SETTINGS_KEY = "external_annotations"
+-- Forked prefetch workers write these databases while the UI process reads
+-- them; every operation opens and closes its own connection, so WAL cleanup
+-- briefly locks the file. Without a busy handler a UI read fails at once with
+-- SQLITE_BUSY. Retry for a bounded, imperceptible time on the UI thread;
+-- workers raise this to a longer timeout in their own process.
+ExternalAnnotationsDB.UI_BUSY_TIMEOUT_MS = 100
 
 local function getSQ3()
     local ok, SQ3 = pcall(require, "lua-ljsqlite3/init")
@@ -47,6 +53,7 @@ function ExternalAnnotationsDB:new(settings, options)
         settings = settings,
         data_dir = data_dir .. "/external-annotations",
         remove_file = options.remove_file or os.remove,
+        busy_timeout_ms = options.busy_timeout_ms or ExternalAnnotationsDB.UI_BUSY_TIMEOUT_MS,
     }, self)
 end
 
@@ -95,8 +102,12 @@ function ExternalAnnotationsDB:open(document_path, create)
     if not ok or not db then
         return nil, tostring(db or "database open failed")
     end
+    if self.busy_timeout_ms then
+        -- Best effort: an older SQLite binding without the setter keeps
+        -- failing fast instead of refusing to open the database.
+        pcall(function() db:set_busy_timeout(self.busy_timeout_ms) end)
+    end
     local schema_ok, schema_err = pcall(function()
-        if self.busy_timeout_ms then db:set_busy_timeout(self.busy_timeout_ms) end
         db:exec("PRAGMA journal_mode=WAL")
         db:exec("PRAGMA synchronous=NORMAL")
         db:exec([[

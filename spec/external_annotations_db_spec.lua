@@ -206,7 +206,12 @@ expect(store:clearSyncCheckpoint("/books/第一炉香.epub")
         and store:getSyncCheckpoint("/books/第一炉香.epub") == nil,
     "completed sync checkpoint was not cleared")
 
-expect(#busy_timeouts == 0, "UI database access must not wait on background locks")
+expect(#busy_timeouts > 0, "UI database access failed at once on a transient lock")
+for _i, timeout in ipairs(busy_timeouts) do
+    expect(timeout > 0 and timeout <= 200,
+        "UI database access may block the reader for " .. tostring(timeout) .. " ms")
+end
+for index = #busy_timeouts, 1, -1 do busy_timeouts[index] = nil end
 store.busy_timeout_ms = 1000
 local worker_db = assert(store:open("/books/第一炉香.epub", false))
 worker_db:close()
