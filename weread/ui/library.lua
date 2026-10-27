@@ -270,7 +270,7 @@ function M:fetchVisibleShelfCovers(view, items, options)
     local cache = self:getShelfCoverCache()
     local visible = shelf_page_items(items, view.page, view.page_size or 6)
     local missing = {}
-    local online = self:isNetworkOnline()
+    local online = self:isNetworkConnected()
     for _, book in ipairs(visible) do
         if shelf_cover_url(book)
             and not cache:pathFor(book) then
@@ -436,7 +436,7 @@ function M:showShelfView(mode, keyword, old_view, options)
         cover_paths = {}
         cover_loading = {}
         local cache = self:getShelfCoverCache()
-        local online = self:isNetworkOnline()
+        local online = self:isNetworkConnected()
         local visible, clamped_page = shelf_page_items(source, page, page_size)
         page = clamped_page
         for _, book in ipairs(visible) do
@@ -739,7 +739,7 @@ function M:refreshBookRecord(book, old_view, options)
         return
     end
     local book_id = book.book_id or book.bookId
-    if not self:isNetworkOnline() then
+    if not self:isNetworkConnected() then
         if options.automatic then self:showBookMenu(book) end
         self:showOffline(_("Book info"))
         return

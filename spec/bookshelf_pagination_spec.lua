@@ -144,7 +144,9 @@ local host = {
     shelfFilterSummary = function() return "All" end,
     showShelfSortOptions = function() end,
     showShelfFilterOptions = function() end,
-    isNetworkOnline = function() return false end,
+    isNetworkConnected = function() return false end,
+    -- Rendering must never run the blocking DNS-based online check.
+    isNetworkOnline = function() error("blocking online check during shelf render") end,
     safeCallback = function(_self, _label, callback) return callback end,
 }
 for key, value in pairs(Library) do
@@ -216,7 +218,7 @@ expect(shown[8].data.cover_mode == true and shown[8].data.paged == true
 
 local cover_requests = {}
 for index = 1, 12 do shelf[index].cover = "https://cdn.example/" .. tostring(index) end
-host.isNetworkOnline = function() return true end
+host.isNetworkConnected = function() return true end
 host.client = {
     get_binary = function(_self, url, options)
         cover_requests[#cover_requests + 1] = { url = url, options = options }
@@ -274,7 +276,7 @@ local archives = {
 }
 shelf_settings.view_mode = "list"
 shelf_settings.paginated = true
-host.isNetworkOnline = function() return false end
+host.isNetworkConnected = function() return false end
 host:applyShelfSnapshot(grouped_books, archives)
 host:showShelfView("books")
 local groups = host.shelf_groups
@@ -296,11 +298,11 @@ shown[#shown].callbacks.on_select_group("__ungrouped__")
 expect(#shown[#shown].data.books == 10, "uncategorized group has wrong membership")
 shown[#shown].callbacks.on_select_group("archive:7")
 for index = 1, 12 do grouped_books[index].cover = "https://cdn.example/group-" .. index end
-host.isNetworkOnline = function() return true end
+host.isNetworkConnected = function() return true end
 shown[#shown].callbacks.on_display_change("view_mode", "cover")
 expect(shown[#shown].data.cover_mode and shown[#shown].data.group_key == "archive:7",
     "display mode change discarded the group")
-host.isNetworkOnline = function() return false end
+host.isNetworkConnected = function() return false end
 shown[#shown].callbacks.on_display_change("view_mode", "list")
 shown[#shown].callbacks.on_page_changed(2)
 
