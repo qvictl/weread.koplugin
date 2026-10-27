@@ -6,12 +6,12 @@ name: Upstream sync
 # update the "Upstream sync conflict" issue listing the conflicting files.
 # Our own PRs merged upstream come back through the same PR.
 #
-# Token: GITHUB_TOKEN cannot push commits that touch .github/workflows and
-# its PRs do not trigger pull_request workflows. Store a fine-grained PAT
+# Token: GITHUB_TOKEN cannot push commits that touch .github/workflows, and
+# pull_request runs of its PRs wait for approval. Store a fine-grained PAT
 # (contents, pull requests, issues, workflows: read/write on this repo) as
-# the SYNC_TOKEN secret to lift both limits. Without it, CI is dispatched on
-# the sync branch explicitly and workflow-file updates are reported in an
-# issue for a manual push.
+# the SYNC_TOKEN secret to lift both limits. Without it, the workflow
+# approves the PR's pending runs itself (or dispatches them) and reports
+# workflow-file updates in an issue for a manual push.
 
 on:
   schedule:
@@ -225,13 +225,34 @@ jobs:
           fi
 
       - name: Run CI on the sync branch
-        # Events created with GITHUB_TOKEN do not start workflows; dispatch
-        # them explicitly so the PR gets ci / integration / tests-policy.
+        # pull_request runs for a PR opened with GITHUB_TOKEN wait for
+        # approval ("action_required") and would keep the PR blocked: approve
+        # them so ci / integration / tests-policy run as normal PR checks.
+        # If approval is not possible, dispatch the workflows on the branch.
         if: steps.pr.outputs.number != '' && env.USING_PAT != 'true'
         env:
           BRANCH: ${{ steps.merge.outputs.branch }}
           NUMBER: ${{ steps.pr.outputs.number }}
         run: |
-          gh workflow run ci.yml --ref "$BRANCH"
-          gh workflow run integration.yml --ref "$BRANCH"
-          gh workflow run pr-policy.yml --ref "$BRANCH" -f pr="$NUMBER"
+          set -euo pipefail
+          head="$(git rev-parse HEAD)"
+          approved=0
+          for _attempt in 1 2 3 4 5 6; do
+            sleep 10
+            ids="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs?head_sha=$head&event=pull_request&per_page=20" \
+              --jq '.workflow_runs[] | select(.conclusion == "action_required" or .status == "waiting" or .status == "action_required") | .id')"
+            [[ -z "$ids" ]] && continue
+            for id in $ids; do
+              if gh api -X POST "repos/$GITHUB_REPOSITORY/actions/runs/$id/approve" >/dev/null; then
+                echo "approved run $id"
+                approved=$((approved + 1))
+              fi
+            done
+            break
+          done
+          if (( approved == 0 )); then
+            echo "::warning::Could not approve the PR's workflow runs; dispatching them on $BRANCH instead."
+            gh workflow run ci.yml --ref "$BRANCH"
+            gh workflow run integration.yml --ref "$BRANCH"
+            gh workflow run pr-policy.yml --ref "$BRANCH" -f pr="$NUMBER"
+          fi
