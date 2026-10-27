@@ -3,10 +3,7 @@ local logger = require("weread.lib.logger")
 local UIManager = require("ui/uimanager")
 local WidgetContainer = require("ui/widget/container/widgetcontainer")
 
-local Client = require("weread.lib.client")
-local BackgroundWorker = require("weread.lib.background_worker")
 local Content = require("weread.lib.content")
-local Downloader = require("weread.lib.downloader")
 local ExternalAnnotationsDB = require("weread.lib.external_annotations_db")
 local Integrations = require("integrations.init")
 local LibraryDB = require("weread.lib.library_db")
@@ -17,7 +14,7 @@ local ProgressSync = require("weread.lib.progress_sync")
 local ProgressSyncDialog = require("weread.ui.progress_sync_dialog")
 local QRLogin = require("weread.lib.qr_login")
 local ReadReport = require("weread.lib.read_report")
-local Settings = require("weread.lib.settings")
+local Runtime = require("weread.lib.runtime")
 local Updater = require("weread.lib.updater")
 local UpdaterUI = require("weread.ui.updater")
 
@@ -46,7 +43,15 @@ end
 
 function WeReadPlugin:init()
     math.randomseed(os.time())
-    self.settings = Settings:new()
+    -- Settings, client, background worker and downloader are process
+    -- singletons shared by the FileManager and ReaderUI instances; see
+    -- weread/lib/runtime.lua.
+    local runtime = Runtime.get()
+    self.runtime = runtime
+    self.settings = runtime.settings
+    self.client = runtime.client
+    self.prefetch_worker = runtime.prefetch_worker
+    self.downloader = runtime.downloader
     self.external_annotations_db = ExternalAnnotationsDB:new(self.settings)
     self.library_db = LibraryDB:new(self.settings)
     local updater = Updater:new{
@@ -63,36 +68,13 @@ function WeReadPlugin:init()
             self:refreshUI()
         end,
     }
-    self.client = Client:new(self.settings)
-    self.prefetch_worker = BackgroundWorker:new{
-        temp_dir = self.settings.data_dir .. "/workers",
-        -- A soft launch gate, not a reservation: fork uses copy-on-write and
-        -- normally consumes far less than this on a 512 MB Kindle.
-        min_available_kb = 64 * 1024,
-    }
-    self.downloader = Downloader:new{
-        client = self.client,
-        settings = self.settings,
-        background_worker = self.prefetch_worker,
-        show_info       = function(text) self:showInfo(text) end,
-        show_transient  = function(text, timeout) self:showTransientInfo(text, timeout) end,
-        refresh_ui      = function() self:refreshUI() end,
-        refresh_shelf   = function() self:refreshShelfCacheIndicators() end,
-        open_file       = function(path) self:openFile(path) end,
-        safe_callback   = function(label, fn) return self:safeCallback(label, fn) end,
-        require_login   = function(cookie, api_key) return self:requireLogin(cookie, api_key) end,
-        run_online_task = function(label, fn)
-            return self:runOnlineTask(label, fn)
-        end,
-        is_connected = function()
-            return self:isNetworkConnected()
-        end,
-    }
-    Migrations.run(self.settings, self.client)
-    self.external_annotations_db:migrateLegacySettings()
-    if self.downloader.recover then
-        self.downloader:recover()
-    end
+    runtime:once("migrations", function()
+        Migrations.run(self.settings, self.client)
+        self.external_annotations_db:migrateLegacySettings()
+    end)
+    -- Only the first instance of a process may clear stale download
+    -- artifacts; later instances share the live downloader.
+    runtime:recover()
     self.qr_login = QRLogin:new(self, self.client, self.settings)
     self.read_report = ReadReport:new{
         settings = self.settings,
@@ -131,13 +113,13 @@ function WeReadPlugin:init()
             return self:detectWeReadBook()
         end,
         get_book = function(book_id)
-            return self.settings:get("books", {})[tostring(book_id)]
+            return self.settings:get_book(book_id)
         end,
         get_chapters = function(book)
             return self:ensureChaptersLoaded(book)
         end,
         refresh_catalog = function(book_id)
-            local book = self.settings:get("books", {})[tostring(book_id)]
+            local book = self.settings:get_book(book_id)
             if type(book) ~= "table" then
                 return nil, "book_not_found"
             end
@@ -214,9 +196,45 @@ function WeReadPlugin:init()
         self.read_report:maybe_start("plugin_start")
     end
     self._reader_session_gen = 0
+    -- Downloader UI callbacks reach this instance from now until it closes.
+    runtime:attach(self)
     self.updater:schedule_auto_check()
     logger.info("initialized:", "version=", self.version)
-    updater:cleanup_backup()
+    if updater.restart_pending and updater:restart_pending() then
+        runtime:markRestartRequired("update installed in place")
+    else
+        updater:cleanup_backup()
+    end
+end
+
+-- KOReader closes the FileManager or ReaderUI that owns this instance (book
+-- open, book switch, reader exit). Stop everything this instance scheduled so
+-- closed instances never keep timers, report, or receive download callbacks.
+-- Shared services (settings, downloader) live on in the runtime.
+--
+-- Feature mixins must not define onCloseWidget themselves (Mixin.apply would
+-- reject the duplicate); add the teardown call here instead.
+function WeReadPlugin:onCloseWidget()
+    if self.runtime then
+        self.runtime:detach(self)
+    end
+    if self.read_report and self.read_report.stop then
+        -- The close-document progress upload scheduled by onCloseDocument
+        -- still runs: upload_position does not depend on the report timer.
+        self.read_report:stop("plugin_closed")
+    end
+    local function teardown(label, fn, ...)
+        local ok, err = pcall(fn, ...)
+        if not ok then logger.warn("teardown failed:", label, tostring(err)) end
+    end
+    if self.qr_login and self.qr_login.cancel then
+        teardown("qr_login", self.qr_login.cancel, self.qr_login)
+    end
+    -- Annotation sync jobs own a progress dialog and a standby guard bound to
+    -- this instance (no-op when idle; the reader already cancels on close).
+    if self._cancelUnifiedAnnotationSync then
+        teardown("annotation_sync", self._cancelUnifiedAnnotationSync, self)
+    end
 end
 
 Mixin.apply(WeReadPlugin, {

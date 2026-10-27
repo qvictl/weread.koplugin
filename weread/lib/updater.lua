@@ -55,6 +55,37 @@ local function read_file(path, max_bytes)
     return data
 end
 
+local SHA256_CHUNK_BYTES = 64 * 1024
+
+-- Hashes a file without holding it in memory. KOReader's ffi/sha2 accepts
+-- the input chunk by chunk; the pure-Lua fallback (plain LuaJIT specs) reads
+-- the whole file, which is acceptable outside the device.
+local function sha256_file(path, max_bytes)
+    local file, err = io.open(path, "rb")
+    if not file then return nil, err end
+    local size = file:seek("end")
+    if not size or (max_bytes and size > max_bytes) then
+        file:close()
+        return nil, size and "file is larger than expected" or "could not determine file size"
+    end
+    file:seek("set", 0)
+    local ok_sha, sha2 = pcall(require, "ffi/sha2")
+    if ok_sha and type(sha2) == "table" and type(sha2.sha256) == "function" then
+        local append = sha2.sha256()
+        while true do
+            local chunk = file:read(SHA256_CHUNK_BYTES)
+            if not chunk then break end
+            append(chunk)
+        end
+        file:close()
+        return string.lower(append())
+    end
+    local data = file:read("*a")
+    file:close()
+    if not data then return nil, "could not read file" end
+    return Crypto.sha256_hex(data)
+end
+
 local function remove_file(path)
     if path then pcall(os.remove, path) end
 end
@@ -367,8 +398,30 @@ end
 -- The backup must survive installation so a failed activation can be rolled
 -- back. Reaching the end of the next plugin initialization confirms that the
 -- new copy can load, at which point the previous copy is no longer needed.
+-- Version declared by the _meta.lua currently on disk. After install_release
+-- this is the new version while the running process still executes the old
+-- code (modules already loaded) until KOReader restarts.
+function Updater:installed_version()
+    local meta = read_file(self.plugin_dir .. "/_meta.lua", 65536)
+    return meta and meta:match('version%s*=%s*"([^"]+)"') or nil
+end
+
+-- True when an update was installed in place but KOReader has not restarted
+-- yet. Any module required from now on would come from the new version, so
+-- callers should avoid starting work that lazily loads plugin modules.
+function Updater:restart_pending()
+    local installed = self:installed_version()
+    return installed ~= nil and installed ~= self.current_version
+end
+
 function Updater:cleanup_backup()
     local backup = self.plugin_dir .. ".backup"
+    if self:restart_pending() then
+        -- New plugin instances are created on every book open; keep the
+        -- previous version (still running in this process) until restart.
+        logger.info("update backup kept until restart")
+        return true
+    end
     local ok_lfs, lfs = pcall(require, "libs/libkoreader-lfs")
     if ok_lfs and lfs and not lfs.attributes(backup, "mode") then
         return true
@@ -417,15 +470,15 @@ function Updater:install_release(release, on_progress)
         remove_file(archive); remove_tree(stage)
         return nil, checksum_err
     end
-    local package, package_err = read_file(archive, Updater.MAX_PACKAGE_BYTES)
+    report("verifying", 82)
+    local actual, package_err = sha256_file(archive, Updater.MAX_PACKAGE_BYTES)
     local checksum_body = read_file(checksum, 4096)
-    if not package or not checksum_body then
+    if not actual or not checksum_body then
         remove_file(archive); remove_file(checksum); remove_tree(stage)
         return nil, package_err or "invalid checksum file"
     end
-    report("verifying", 82)
     local expected = checksum_body:match("^%s*([0-9a-fA-F]+)")
-    if not expected or #expected ~= 64 or Crypto.sha256_hex(package) ~= expected:lower() then
+    if not expected or #expected ~= 64 or actual ~= expected:lower() then
         remove_file(archive); remove_file(checksum); remove_tree(stage)
         return nil, "SHA-256 verification failed"
     end

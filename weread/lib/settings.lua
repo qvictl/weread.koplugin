@@ -21,7 +21,6 @@ local defaults = {
         login_method = "",
         login_time = 0,
     },
-    books = {},
     downloads = {},
     sync = {
         pull_on_open = false,
@@ -122,6 +121,37 @@ local function clear_auth_store(store)
     store:saveSetting("wr_ticket", "")
     store:saveSetting("wr_wrpa", "")
     store:saveSetting("account", deepcopy(defaults.account))
+end
+
+local function signature(value, out)
+    if type(value) ~= "table" then
+        out[#out + 1] = type(value) .. ":" .. tostring(value)
+        return
+    end
+    local keys = {}
+    for key in pairs(value) do keys[#keys + 1] = key end
+    table.sort(keys, function(a, b) return tostring(a) < tostring(b) end)
+    out[#out + 1] = "{"
+    for _, key in ipairs(keys) do
+        out[#out + 1] = tostring(key) .. "="
+        signature(value[key], out)
+    end
+    out[#out + 1] = "}"
+end
+
+local AUTH_KEYS = { "cookies", "api_key", "wr_ticket", "wr_wrpa", "account" }
+
+-- Compact fingerprint of the stored credentials. Callers may have mutated the
+-- live cookie table in place before calling update_auth (Cookie.merge_set_cookie
+-- does), so change detection compares against what was last flushed rather
+-- than against the in-memory store.
+local function auth_signature(store)
+    local out = {}
+    for _, key in ipairs(AUTH_KEYS) do
+        out[#out + 1] = key
+        signature(store:readSetting(key, nil), out)
+    end
+    return table.concat(out, "\n")
 end
 
 function Settings:new()
@@ -239,37 +269,81 @@ function Settings:new()
     if legacy_changed then
         obj.store:flush()
     end
+    obj._flushed_auth = auth_signature(obj.store)
     return setmetatable(obj, self)
 end
 
+local function reject_books_key(key)
+    if key == "books" then
+        error("settings 'books' is index-only; use get_book/get_books/get_book_dirs/put_book/delete_book")
+    end
+end
+
 function Settings:get(key, default)
+    reject_books_key(key)
     if default == nil then
         default = defaults[key]
     end
-    if key ~= "books" then
-        return self.store:readSetting(key, deepcopy(default))
-    end
-    local indexes = self.store:readSetting("books", {})
+    return self.store:readSetting(key, deepcopy(default))
+end
+
+function Settings:set(key, value)
+    reject_books_key(key)
+    self.store:saveSetting(key, value)
+end
+
+function Settings:_book_index()
+    return self.store:readSetting("books", {}) or {}
+end
+
+local function lookup(index, book_id)
+    if book_id == nil then return nil, nil end
+    local key = tostring(book_id)
+    if index[key] ~= nil then return key, index[key] end
+    local num = tonumber(book_id)
+    if num ~= nil and index[num] ~= nil then return num, index[num] end
+    return nil, nil
+end
+
+function Settings:get_book(book_id)
+    local key, entry = lookup(self:_book_index(), book_id)
+    if key == nil then return nil end
+    return BookStore.load(self, key, entry)
+end
+
+function Settings:get_books()
     local books = {}
-    for book_id, index in pairs(indexes or {}) do
-        books[book_id] = BookStore.load(self, book_id, index)
+    for book_id, entry in pairs(self:_book_index()) do
+        books[book_id] = BookStore.load(self, book_id, entry)
     end
     return books
 end
 
-function Settings:set(key, value)
-    if key == "books" and type(value) == "table" then
-        local indexes = {}
-        for book_id, book in pairs(value) do
-            local ok, index_or_err = BookStore.save(self, book_id, book)
-            if not ok then
-                error("Could not save book data: " .. tostring(index_or_err))
-            end
-            indexes[book_id] = index_or_err
-        end
-        value = indexes
+function Settings:get_book_dirs()
+    local dirs = {}
+    for book_id, entry in pairs(self:_book_index()) do
+        dirs[book_id] = BookStore.resolved_dir(self, book_id, entry)
     end
-    self.store:saveSetting(key, value)
+    return dirs
+end
+
+function Settings:put_book(book_id, book)
+    local index = self:_book_index()
+    local key = lookup(index, book_id) or tostring(book_id)
+    local ok, entry_or_err = BookStore.save(self, key, book)
+    if not ok then
+        error("Could not save book data: " .. tostring(entry_or_err))
+    end
+    index[key] = entry_or_err
+    self.store:saveSetting("books", index)
+end
+
+function Settings:delete_book(book_id)
+    local index = self:_book_index()
+    local key = lookup(index, book_id)
+    if key == nil then return end
+    index[key] = nil
+    self.store:saveSetting("books", index)
 end
 
 function Settings:delete(key)
@@ -287,6 +361,7 @@ end
 
 function Settings:flush()
     self.store:flush()
+    self._flushed_auth = auth_signature(self.store)
 end
 
 function Settings:get_device_fingerprint()
@@ -312,10 +387,12 @@ function Settings:get_device_fingerprint()
     return fingerprint
 end
 
+-- Returns true when the stored credentials differ from the last flushed
+-- state. Unchanged values (for example a Set-Cookie that repeats the current
+-- wr_skey) do not flush weread.lua.
 function Settings:update_auth(credentials, options)
     credentials = credentials or {}
     options = options or {}
-    local changed = false
 
     if type(credentials.cookies) == "table" then
         local cookies = credentials.cookies
@@ -325,21 +402,19 @@ function Settings:update_auth(credentials, options)
             cookies = deepcopy(cookies)
         end
         self:set("cookies", cookies)
-        changed = true
     end
 
     for _, key in ipairs({ "api_key", "wr_ticket", "wr_wrpa" }) do
         local value = credentials[key]
         if type(value) == "string" then
             self:set(key, value)
-            changed = true
         end
     end
     if type(credentials.account) == "table" then
         self:set("account", deepcopy(credentials.account))
-        changed = true
     end
 
+    local changed = auth_signature(self.store) ~= self._flushed_auth
     if changed and options.flush ~= false then
         self:flush()
     end

@@ -15,26 +15,57 @@ local function auth_fingerprint(settings)
     return table.concat(parts, ";")
 end
 
+-- Suppresses flushes and records credential changes while a worker task runs.
+--
+-- Client and Content hold a reference to the settings object itself, so a
+-- separate proxy would not see their calls; the overrides are therefore
+-- installed on the object, but only for the duration of the task. The
+-- returned collector removes them again. That matters when Trapper cannot
+-- fork and runs the task in-process ("falling back to blocking in-process
+-- run"): without the restore the parent's settings would never flush again.
+-- The second return value restores without collecting (for error paths).
 function M.capture(settings)
     local changed = false
-    settings.flush = function() end
+    local saved = {}
+    for _, key in ipairs({ "flush", "update_auth" }) do
+        saved[key] = { present = rawget(settings, key) ~= nil, value = rawget(settings, key) }
+    end
+    local function no_flush() end
+    settings.flush = no_flush
     local update_auth = settings.update_auth
+    local wrapped_update_auth
     if type(update_auth) == "function" then
-        settings.update_auth = function(object, credentials, options)
+        wrapped_update_auth = function(object, credentials, options)
             changed = true
-            options = options or {}
-            options.flush = false
-            return update_auth(object, credentials, options)
+            local copy = {}
+            for key, value in pairs(options or {}) do copy[key] = value end
+            copy.flush = false
+            return update_auth(object, credentials, copy)
+        end
+        settings.update_auth = wrapped_update_auth
+    end
+    local restored = false
+    local function restore()
+        if restored then return end
+        restored = true
+        -- Only undo our own overrides; leave anything installed later alone.
+        if rawget(settings, "flush") == no_flush then
+            rawset(settings, "flush", saved.flush.present and saved.flush.value or nil)
+        end
+        if wrapped_update_auth and rawget(settings, "update_auth") == wrapped_update_auth then
+            rawset(settings, "update_auth",
+                saved.update_auth.present and saved.update_auth.value or nil)
         end
     end
     return function()
+        restore()
         if not changed or type(settings.get) ~= "function" then return nil end
         return {
             cookies = settings:get("cookies", {}),
             wr_ticket = settings:get("wr_ticket", ""),
             wr_wrpa = settings:get("wr_wrpa", ""),
         }
-    end
+    end, restore
 end
 
 function M.fingerprint(settings)
