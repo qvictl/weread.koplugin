@@ -1099,30 +1099,40 @@ function Downloader:_finishChapter(dl)
     if dl.cancelled then self:_step(dl); return end
     if not dl.current then return end
     local chapter = dl.current.chapter
-    local cache = self.settings:get("cache")
-    local stage_text
-    if cache.download_book_images then
-        stage_text = T(_("Downloading images · chapter %1/%2"), tostring(dl.index), tostring(dl.total))
+    local ok, result
+    if dl.current.finalized then
+        -- The worker already fetched the images together with the text.
+        ok, result = true, {
+            xhtml = dl.current.xhtml, assets = dl.current.assets, state = dl.state,
+        }
     else
-        stage_text = T(_("Processing chapter %1/%2"), tostring(dl.index), tostring(dl.total))
-    end
-    self:_setStage(dl,
-        stage_text, dl.index - 0.1)
-    local started = time.now()
-    local ok, result = pcall(function()
-        local function finalize()
-            local xhtml, assets = Content.finalize_single_chapter_content(
-                self.client, self.settings, dl.book, chapter, dl.current.xhtml, dl.state)
-            return { xhtml = xhtml, assets = assets, state = dl.state }
+        local cache = self.settings:get("cache") or {}
+        local stage_text
+        if cache.download_book_images then
+            stage_text = T(_("Downloading images · chapter %1/%2"), tostring(dl.index), tostring(dl.total))
+        else
+            stage_text = T(_("Processing chapter %1/%2"), tostring(dl.index), tostring(dl.total))
         end
-        if cache.download_book_images then return self:_runInterruptible(dl, finalize) end
-        return finalize()
-    end)
-    if dl.cancelled then self:_step(dl); return end
-    self:_perf(dl, "images_and_finalize", started, "ok=", tostring(ok))
-    if not ok then
-        self:_failChapter(dl, result)
-        return
+        self:_setStage(dl,
+            stage_text, dl.index - 0.1)
+        local started = time.now()
+        ok, result = pcall(function()
+            local function finalize()
+                local xhtml, assets = Content.finalize_single_chapter_content(
+                    self.client, self.settings, dl.book, chapter, dl.current.xhtml, dl.state)
+                return { xhtml = xhtml, assets = assets, state = dl.state }
+            end
+            -- Only reached when images were enabled after the source was
+            -- fetched without them; the normal image path never forks here.
+            if cache.download_book_images then return self:_runInterruptible(dl, finalize) end
+            return finalize()
+        end)
+        if dl.cancelled then self:_step(dl); return end
+        self:_perf(dl, "images_and_finalize", started, "ok=", tostring(ok))
+        if not ok then
+            self:_failChapter(dl, result)
+            return
+        end
     end
     local xhtml, chapter_assets = result.xhtml, result.assets
     dl.state = result.state
@@ -1462,6 +1472,8 @@ function Downloader:_step(dl)
     if dl.resumable and self:_skipCompletedChapterBatch(dl) then return end
 
     local chapter = dl.chapters[dl.index]
+    local cache = self.settings.get and self.settings:get("cache", {}) or {}
+    local with_images = cache.download_book_images and true or false
     self:_setStage(dl,
         T(_("Downloading chapter %1/%2: %3"), tostring(dl.index), tostring(dl.total),
             chapter.title or tostring(chapter.chapterUid)),
@@ -1471,11 +1483,20 @@ function Downloader:_step(dl)
         return self:_runInterruptible(dl, function()
             local xhtml = Content.fetch_single_chapter_source(
                 self.client, self.settings, dl.book, chapter, dl.state)
-            return { xhtml = xhtml, state = dl.state, book = reader_book(dl.book) }
+            local value = { xhtml = xhtml, state = dl.state, book = reader_book(dl.book) }
+            if with_images then
+                -- Fetch the images in the same worker: one fork per chapter
+                -- instead of two, and the source text never crosses the pipe.
+                value.xhtml, value.assets = Content.finalize_single_chapter_content(
+                    self.client, self.settings, dl.book, chapter, xhtml, dl.state)
+                value.finalized = true
+            end
+            return value
         end)
     end)
     if dl.cancelled then self:_step(dl); return end
-    self:_perf(dl, "chapter_source", started, "ok=", tostring(ok))
+    self:_perf(dl, with_images and "chapter_source_and_images" or "chapter_source",
+        started, "ok=", tostring(ok))
     if not ok then
         self:_retryChapterSource(dl, result)
         return
@@ -1495,7 +1516,12 @@ function Downloader:_step(dl)
         logger.warn("footnote scan failed; chapter will keep original footnote markup:",
             "chapter_uid=", uid, "error=", log_error(scan))
     end
-    dl.current = { chapter = chapter, xhtml = xhtml }
+    dl.current = {
+        chapter = chapter,
+        xhtml = xhtml,
+        assets = result.assets,
+        finalized = result.finalized == true,
+    }
     self:_finishChapter(dl)
 end
 
