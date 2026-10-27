@@ -25,25 +25,57 @@ checks pass:
 - `integration` - the plugin running inside a real headless KOReader
   emulator against the local mock WeRead service
   (`spec/emulator/scenarios/`), plus the pinned KOReader PluginLoader test;
-- `tests-policy` - Lua code changes under `main.lua`, `weread/` or
-  `integrations/` must come with changes under `spec/` (unit specs and/or
-  emulator scenarios), and at least 70% of the changed Lua lines must be
-  covered by the unit specs. Only a maintainer can waive the test rule with
-  the `no-tests-needed` label (for example pure logging or comment changes).
+- `tests-policy` - the test rule and the coverage gates below.
 
-Bug fixes need a regression test that fails without the fix. Changes to user
-flows (downloads, login, library, reader, sync, updater) should extend or add
-an emulator scenario. See [docs/testing.md](docs/testing.md).
+Test rule: Lua code changes under `main.lua`, `weread/` or `integrations/`
+must come with changes under `spec/`, and every user-visible feature or fix
+(PR title `feat...` / `fix...`) must add or update at least one emulator
+scenario in `spec/emulator/scenarios/` (name it in the PR description). Bug
+fixes need a regression test that fails without the fix. Only a maintainer
+can waive this with the `no-tests-needed` label, and only for docs, comments
+or log wording.
+
+### Coverage policy / 覆盖率策略
+
+Configured in [`.ci/coverage-policy.json`](.ci/coverage-policy.json) and
+enforced by `tests-policy` on every PR to `main`. Scope: the whole plugin
+(`main.lua`, `weread/`, `integrations/`; never `spec/`, `scripts/` or
+fixtures). Plugin files no test loads count as 0%.
+
+| Gate | Rule | Blocking |
+| --- | --- | --- |
+| Diff, unit | changed executable Lua lines covered by unit specs ≥ 80% | yes (waived by `no-tests-needed`) |
+| Diff, combined | changed lines covered by unit specs + emulator scenarios ≥ 90% | yes (waived by `no-tests-needed`) |
+| Ratchet | overall unit and overall combined coverage must not drop below `main`'s latest value (0.05 pp tolerance for run-to-run noise) | yes |
+| Target 4 weeks | overall combined ≥ max(75%, day-one baseline 80.78%) from 2026-11-24 | report-only before the date, then yes |
+| Target 8 weeks | overall combined ≥ 85% from 2026-12-22 | report-only before the date, then yes |
+
+Emulator coverage is measured with LuaCov inside the real KOReader app while
+the scenarios run (forked download/login workers included). Every PR gets
+the full table (diff unit, diff combined, overall, ratchet, targets, trend)
+in the job summary and as a sticky comment. After each green `Integration`
+run on `main`, the *Coverage* workflow publishes `baseline.json`,
+`history.jsonl` and the README badge on the
+[`coverage` branch](https://github.com/qvictl/weread.koplugin/tree/coverage).
+Day-one baseline (2026-10-27): unit 73.80%, unit + emulator 80.78%.
+
+覆盖率策略见 `.ci/coverage-policy.json`，由 `tests-policy` 在每个合入 `main` 的 PR
+上强制执行：改动的可执行 Lua 行单元测试覆盖率 ≥ 80%，单元测试 + 模拟器场景合计 ≥ 90%；
+整体覆盖率（单元、合计）不得低于 `main` 当前值；合计整体覆盖率在 2026-11-24 起
+≥ max(75%, 首日基线 80.78%)，2026-12-22 起 ≥ 85%，到期前仅报告。每个 PR 的摘要和评论
+都会列出各项结果，`main` 的历史趋势与徽章发布在 `coverage` 分支。
+
+See [docs/testing.md](docs/testing.md).
 
 本仓库是 finlater/weread.koplugin 的维护分支：`main` 为本分支发布线（默认、受保护），
 `upstream` 为上游 `finlater/main` 的只读镜像，每周自动同步并向 `main` 发起合并 PR。
 
 欢迎任何 PR，无论由人还是由 AI 编写；我们以测试而非作者身份把关。合并前必须通过
 `ci`、`integration`（真实 KOReader 模拟器 + 本地 mock 服务的集成场景，以及固定版本
-PluginLoader 测试）和 `tests-policy`（修改 Lua 代码必须同时修改 `spec/` 下的测试，且改动
-行单元测试覆盖率不低于 70%；仅维护者可用 `no-tests-needed` 标签豁免）。Bug 修复需附带
-修复前会失败的回归测试；涉及下载、登录、书架、阅读、同步、更新等流程的改动应补充模拟器
-场景。
+PluginLoader 测试）和 `tests-policy`（修改 Lua 代码必须同时修改 `spec/` 下的测试，`feat`/`fix`
+类 PR 必须新增或更新至少一个模拟器场景，并满足下面的覆盖率门禁；仅维护者可用
+`no-tests-needed` 标签豁免，且仅限文档、注释或日志措辞改动）。Bug 修复需附带修复前会失败的
+回归测试。
 
 ## Issues / 提交 Issue
 
@@ -206,8 +238,8 @@ bash scripts/check_secrets.sh              # needs a PCRE2-enabled ripgrep
 # Linux x86_64: the emulator scenarios CI runs as the `integration` check
 bash scripts/fetch_koreader_emulator.sh /tmp/koreader
 python3 scripts/run_emulator_scenarios.py --koreader /tmp/koreader --out /tmp/weread-emulator
-# diff coverage (LuaCov) as reported by `tests-policy`
-bash scripts/run_lua_coverage.sh && python3 scripts/coverage_tools.py diff coverage/luacov.report.out --base origin/main
+# unit diff coverage (LuaCov), the first gate of `tests-policy`
+bash scripts/run_lua_coverage.sh && python3 scripts/coverage_tools.py diff coverage/unit.report.out --base origin/main
 ```
 
 提交 PR 前，如果可以，请运行相关检查：
@@ -223,8 +255,8 @@ bash scripts/check_secrets.sh              # needs a PCRE2-enabled ripgrep
 # Linux x86_64: the emulator scenarios CI runs as the `integration` check
 bash scripts/fetch_koreader_emulator.sh /tmp/koreader
 python3 scripts/run_emulator_scenarios.py --koreader /tmp/koreader --out /tmp/weread-emulator
-# diff coverage (LuaCov) as reported by `tests-policy`
-bash scripts/run_lua_coverage.sh && python3 scripts/coverage_tools.py diff coverage/luacov.report.out --base origin/main
+# unit diff coverage (LuaCov), the first gate of `tests-policy`
+bash scripts/run_lua_coverage.sh && python3 scripts/coverage_tools.py diff coverage/unit.report.out --base origin/main
 ```
 
 See [docs/testing.md](docs/testing.md) for the test layers, required regression

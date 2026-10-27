@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Runs every top-level spec under LuaCov (JIT off so line hooks fire) and
-# writes coverage/luacov.stats.out + coverage/luacov.report.out.
+# writes coverage/unit.stats.out + coverage/unit.report.out. Plugin files no
+# spec loads are included with 0 hits (whole-plugin scope).
 # Each spec writes its own stats file (specs may fork; children must not
 # interleave writes into one file); they are merged afterwards.
 set -euo pipefail
@@ -37,10 +38,7 @@ for spec_file in spec/*_spec.lua; do
     spec_count=$((spec_count + 1))
 done
 
-python3 scripts/coverage_tools.py merge coverage/parts coverage/luacov.stats.out
-"$lua_bin" -e "
-    local runner = require('luacov.runner')
-    runner.load_config(dofile('.luacov'))
-    require('luacov.reporter').report()
-"
-echo "Coverage collected from $spec_count specs ($failed failed under coverage): coverage/luacov.report.out"
+python3 scripts/coverage_tools.py merge --all-files --out coverage/unit.stats.out coverage/parts
+python3 scripts/coverage_tools.py report coverage/unit.stats.out coverage/unit.report.out
+python3 scripts/coverage_tools.py total coverage/unit.report.out
+echo "Coverage collected from $spec_count specs ($failed failed under coverage): coverage/unit.report.out"

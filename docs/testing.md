@@ -159,29 +159,50 @@ When updating the pinned KOReader commit, update all three locations together:
 - `.github/workflows/integration.yml`;
 - this document.
 
-## 4. PR policy and diff coverage / PR 测试策略与增量覆盖率
+## 4. PR policy and coverage / PR 测试策略与覆盖率
 
 The `PR policy` workflow's `tests-policy` job is a required check:
 
-- a PR that changes Lua code in `main.lua`, `weread/` or `integrations/` must
-  also change something under `spec/` (unit specs, KOReader specs or emulator
-  scenarios), unless a maintainer adds the `no-tests-needed` label
-  (`upstream-sync` PRs are exempt as well) - `scripts/check_test_policy.py`;
-- the changed Lua lines must be at least 70% covered by the unit specs under
-  LuaCov (`scripts/run_lua_coverage.sh`, `scripts/coverage_tools.py diff`).
-  The per-file table with missed line numbers is posted to the job summary
-  and as a sticky PR comment.
+- **Test rule** (`scripts/check_test_policy.py`): a PR that changes Lua code
+  in `main.lua`, `weread/` or `integrations/` must also change `spec/`; a
+  user-visible feature or fix (PR title `feat...`/`fix...`) must add or
+  update an emulator scenario. Waivers: `no-tests-needed` (maintainers;
+  docs, comments or log wording only), `upstream-sync`.
+- **Coverage gates** (`scripts/coverage_tools.py gate`, thresholds and dated
+  targets in `.ci/coverage-policy.json`): unit diff coverage ≥ 80%, unit +
+  emulator diff coverage ≥ 90%, overall unit and combined coverage not below
+  `main`'s baseline, and whole-plugin targets that turn blocking on their
+  date. See [CONTRIBUTING.md](../CONTRIBUTING.md#coverage-policy--覆盖率策略).
 
-Locally (LuaCov from luarocks, or a checkout on `LUA_PATH`):
+How coverage is measured:
+
+- unit: `scripts/run_lua_coverage.sh` runs every `spec/*_spec.lua` under
+  LuaCov (JIT off), merges per-spec stats and adds untested plugin files with
+  zero hits;
+- emulator: `scripts/run_emulator_scenarios.py --coverage` installs
+  `spec/emulator/luacov_patch.lua` as an early KOReader userpatch, so LuaCov
+  runs inside the real app from before plugin loading, including forked
+  download/login workers (per-PID stats). `@no_coverage` scenarios (timing
+  budgets) run without it. CI uploads `coverage-emulator-shard-*`;
+- the gate waits for the PR's `Integration` run, merges both and reports diff
+  unit, diff combined, overall, ratchet, targets and the trend on `main`.
+
+Locally (LuaCov checkout on `LUA_PATH`):
 
 ```bash
+export LUA_PATH="/path/to/luacov/src/?.lua;;"
 bash scripts/run_lua_coverage.sh
-python3 scripts/coverage_tools.py diff coverage/luacov.report.out --base origin/main
+python3 scripts/run_emulator_scenarios.py --koreader /tmp/koreader --out /tmp/emu \
+    --coverage --luacov-src /path/to/luacov/src
+python3 scripts/coverage_tools.py merge --all-files --out coverage/combined.stats.out \
+    coverage/unit.stats.out /tmp/emu/coverage/emulator.stats.out
+python3 scripts/coverage_tools.py report coverage/combined.stats.out coverage/combined.report.out
+python3 scripts/coverage_tools.py gate --unit coverage/unit.report.out \
+    --combined coverage/combined.report.out --base origin/main
 ```
 
-修改 `main.lua`、`weread/`、`integrations/` 中 Lua 代码的 PR 必须同时修改 `spec/`
-下的测试（单元测试或模拟器场景），否则需维护者添加 `no-tests-needed` 标签；改动行在单元
-测试下的覆盖率需达到 70%。
+修改 Lua 代码的 PR 必须修改 `spec/`，`feat`/`fix` 类 PR 必须新增或更新模拟器场景；改动行
+覆盖率单元 ≥ 80%、单元 + 模拟器 ≥ 90%，整体覆盖率不得低于 `main`，并按日期执行整体目标。
 
 ## Updater simulator regression / 更新弹窗模拟器回归
 

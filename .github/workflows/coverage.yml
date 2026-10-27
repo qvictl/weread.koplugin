@@ -1,0 +1,128 @@
+name: Coverage
+
+# After every successful Integration run on main: combine unit-spec and
+# emulator-scenario line coverage of the whole plugin and publish it on the
+# `coverage` branch:
+#   baseline.json  ratchet baseline for the tests-policy gate
+#   history.jsonl  one record per main commit (trend)
+#   badge.json     shields.io endpoint for the README badge (unit + emulator)
+#   badge-unit.json, README.md (history table)
+# The branch holds no workflow files, so GITHUB_TOKEN may push it.
+
+on:
+  workflow_run:
+    workflows:
+      - Integration
+    types:
+      - completed
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      integration_run:
+        description: Integration run id on main to take emulator coverage from (default latest successful)
+        required: false
+
+permissions:
+  contents: write
+  actions: read
+
+concurrency:
+  group: coverage-main
+  cancel-in-progress: false
+
+env:
+  LUACOV_VERSION: v0.16.0
+
+jobs:
+  publish:
+    name: Publish main coverage
+    if: github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event != 'pull_request')
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Resolve Integration run
+        id: run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_RUN: ${{ github.event.workflow_run.id }}
+          EVENT_SHA: ${{ github.event.workflow_run.head_sha }}
+          INPUT_RUN: ${{ inputs.integration_run }}
+        run: |
+          set -euo pipefail
+          if [[ -n "${EVENT_RUN:-}" ]]; then
+            run_id="$EVENT_RUN"; sha="$EVENT_SHA"
+          elif [[ -n "${INPUT_RUN:-}" ]]; then
+            run_id="$INPUT_RUN"
+            sha="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run_id" --jq .head_sha)"
+          else
+            read -r run_id sha < <(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/integration.yml/runs?branch=main&status=success&per_page=20" \
+              --jq '[.workflow_runs[] | select(.event != "pull_request")][0] | "\(.id) \(.head_sha)"')
+          fi
+          echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "Integration run $run_id at $sha"
+
+      - name: Checkout the measured commit
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ steps.run.outputs.sha }}
+          fetch-depth: 0
+
+      - name: Install LuaJIT and LuaCov
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y luajit libsqlite3-0
+          git clone --quiet --depth 1 --branch "$LUACOV_VERSION" \
+            https://github.com/lunarmodules/luacov.git "$RUNNER_TEMP/luacov"
+          echo "LUA_PATH=$RUNNER_TEMP/luacov/src/?.lua;;" >> "$GITHUB_ENV"
+
+      - name: Unit specs under LuaCov
+        run: bash scripts/run_lua_coverage.sh
+
+      - name: Combine with emulator coverage
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ steps.run.outputs.run_id }}
+        run: |
+          set -euo pipefail
+          gh run download "$RUN_ID" --repo "$GITHUB_REPOSITORY" -p 'coverage-emulator-shard-*' -D "$RUNNER_TEMP/emulator-coverage"
+          python3 scripts/coverage_tools.py merge --all-files --out coverage/combined.stats.out \
+            coverage/unit.stats.out "$RUNNER_TEMP/emulator-coverage"
+          python3 scripts/coverage_tools.py report coverage/combined.stats.out coverage/combined.report.out
+          python3 scripts/coverage_tools.py total coverage/combined.report.out
+
+      - name: Update the coverage branch
+        env:
+          SHA: ${{ steps.run.outputs.sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ steps.run.outputs.run_id }}
+        run: |
+          set -euo pipefail
+          site="$RUNNER_TEMP/coverage-site"
+          if git fetch --no-tags origin coverage:refs/remotes/origin/coverage 2>/dev/null; then
+            git worktree add "$site" origin/coverage
+            git -C "$site" checkout -B coverage
+          else
+            git worktree add --detach "$site"
+            git -C "$site" checkout --orphan coverage
+            git -C "$site" rm -rfq .
+          fi
+          if [[ -f "$site/baseline.json" ]] && [[ "$(jq -r .sha "$site/baseline.json")" == "$SHA" ]]; then
+            echo "Coverage for $SHA already published."
+            exit 0
+          fi
+          python3 scripts/coverage_tools.py baseline \
+            --unit coverage/unit.report.out --combined coverage/combined.report.out \
+            --sha "$SHA" --run-url "$RUN_URL" --out-dir "$site"
+          cd "$site"
+          git add baseline.json history.jsonl badge.json badge-unit.json README.md
+          git -c user.name="github-actions[bot]" \
+              -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+              commit -q -m "coverage: ${SHA:0:8} $(jq -r '.combined.percent' baseline.json)% (unit $(jq -r '.unit.percent' baseline.json)%)"
+          git push origin coverage
+          {
+            echo "### Coverage on main @ ${SHA:0:8}"
+            echo
+            echo "- unit + emulator: $(jq -r '.combined.percent' baseline.json)%"
+            echo "- unit: $(jq -r '.unit.percent' baseline.json)%"
+          } >> "$GITHUB_STEP_SUMMARY"

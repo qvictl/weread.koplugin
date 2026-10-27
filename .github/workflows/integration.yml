@@ -6,7 +6,10 @@ name: Integration
 #   local mock WeRead service (scripts/run_emulator_scenarios.py). Uses the
 #   qvictl/koreader fork's rolling emulator build when it is published,
 #   otherwise the official KOReader linux release (see
-#   scripts/fetch_koreader_emulator.sh).
+#   scripts/fetch_koreader_emulator.sh). Scenarios run under LuaCov (except
+#   `@no_coverage` timing budgets); the per-shard line counts are uploaded as
+#   coverage-emulator-shard-* for the tests-policy gate and the Coverage
+#   workflow.
 # - plugin-loader: KOReader's own Busted environment and PluginLoader at the
 #   pinned upstream commit (scripts/run_koreader_integration.sh).
 # Release.yml publishes after this workflow succeeds on main.
@@ -31,6 +34,9 @@ on:
 permissions:
   contents: read
 
+env:
+  LUACOV_VERSION: v0.16.0
+
 concurrency:
   group: integration-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -52,6 +58,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y xvfb libsdl2-2.0-0 zip unzip
+          git clone --quiet --depth 1 --branch "$LUACOV_VERSION" \
+            https://github.com/lunarmodules/luacov.git "$RUNNER_TEMP/luacov"
 
       - name: Fetch KOReader emulator
         id: koreader
@@ -69,6 +77,7 @@ jobs:
             --koreader "$RUNTIME" \
             --label "$LABEL" \
             --shard "${{ matrix.shard }}/3" \
+            --coverage --luacov-src "$RUNNER_TEMP/luacov/src" \
             --out "$RUNNER_TEMP/emulator"
 
       - name: Scenario summary
@@ -79,6 +88,15 @@ jobs:
           else
             echo "No scenario summary was produced." >> "$GITHUB_STEP_SUMMARY"
           fi
+
+      - name: Upload emulator coverage
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: coverage-emulator-shard-${{ matrix.shard }}
+          path: ${{ runner.temp }}/emulator/coverage/emulator.stats.out
+          if-no-files-found: warn
+          retention-days: 30
 
       - name: Upload scenario evidence
         if: always()

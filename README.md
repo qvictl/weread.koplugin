@@ -8,6 +8,8 @@
 
 # WeRead KOReader Plugin
 
+[![coverage](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Fqvictl%2Fweread.koplugin%2Fcoverage%2Fbadge.json)](https://github.com/qvictl/weread.koplugin/tree/coverage)
+
 > **免责声明**：本项目仅供个人学习和技术研究使用，不得用于商业用途。使用本项目所产生的一切后果（包括但不限于账号封禁、数据丢失等）由使用者自行承担，项目作者概不负责。请遵守微信读书的用户协议和相关法律法规。
 
 在 KOReader 上阅读微信读书中的书籍、公众号文章的插件。支持同步进度同步，阅读时长同步和统计，查看书评、划线和想法。让Kindle、Kobo等封闭系统设备也能体验微信读书！

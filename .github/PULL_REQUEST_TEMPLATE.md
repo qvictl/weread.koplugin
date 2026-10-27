@@ -28,9 +28,18 @@
 ## 测试
 
 本仓库欢迎人或 AI 编写的 PR，以测试把关：必需检查 `ci`、`integration`（KOReader 模拟器
-集成场景 + PluginLoader）、`tests-policy`（修改 `main.lua`、`weread/`、`integrations/`
-的 Lua 代码必须同时修改 `spec/` 下的测试，改动行单元测试覆盖率 ≥ 70%）全部通过后才能合并。
-仅维护者可添加 `no-tests-needed` 标签豁免测试要求。
+集成场景 + PluginLoader）、`tests-policy` 全部通过后才能合并。`tests-policy` 要求：修改
+`main.lua`、`weread/`、`integrations/` 的 Lua 代码必须同时修改 `spec/` 下的测试；`feat`/`fix`
+类 PR 必须新增或更新至少一个模拟器场景；改动行覆盖率单元测试 ≥ 80%、单元 + 模拟器 ≥ 90%；
+整体覆盖率不得下降（见 `.ci/coverage-policy.json`）。仅维护者可添加 `no-tests-needed`
+标签豁免（仅限文档、注释或日志措辞改动）。
+
+新增/更新的模拟器场景名称（`spec/emulator/scenarios/NN_name.lua`，用户可见的功能或修复必填）:
+
+```text
+
+```
+
 
 请说明你如何验证这个 PR，并给出证据。
 

@@ -1,5 +1,6 @@
 -- @title Budget: 200-chapter full-book download (memory and time)
 -- @timeout 600
+-- @no_coverage
 -- Downloads the hidden 200-chapter mock book 900100 as one resumable full
 -- EPUB through the real Downloader (one worker fork per chapter) and records
 -- RSS / Lua heap (baseline, sampled peak, after), total time and per-chapter

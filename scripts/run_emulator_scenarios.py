@@ -15,6 +15,11 @@ depth below it is searched) or a .tar.xz/.tar.gz/.AppImage-free tarball.
 Exit status is non-zero when any scenario fails; evidence (crash.log,
 requests.jsonl, screenshots, result.json) is kept per scenario and summarized
 in summary.md / summary.json.
+
+--coverage runs KOReader under LuaCov (JIT off; forked workers included, see
+spec/emulator/luacov_patch.lua) and writes the merged plugin line counts to
+<out>/coverage/emulator.stats.out (repo-relative file names). Scenarios
+marked `-- @no_coverage` (timing budgets) run without it.
 """
 
 from __future__ import annotations
@@ -63,7 +68,7 @@ def find_runtime(path: Path, scratch: Path) -> Path:
 
 
 def parse_meta(path: Path) -> dict:
-    meta = dict(timeout=240, fixtures=[], title=path.stem, budget=None)
+    meta = dict(timeout=240, fixtures=[], title=path.stem, coverage=True)
     for line in path.read_text(encoding="utf-8").splitlines()[:40]:
         match = re.match(r"^--\s*@(\w+)\s*(.*)$", line)
         if not match:
@@ -75,6 +80,8 @@ def parse_meta(path: Path) -> dict:
             meta["fixtures"].append(value)
         elif key == "title":
             meta["title"] = value
+        elif key == "no_coverage":
+            meta["coverage"] = False
     return meta
 
 
@@ -162,6 +169,16 @@ def run_scenario(path: Path, runtime: Path, candidate: Path, out: Path, args) ->
         "http_proxy": "http://127.0.0.1:9", "https_proxy": "http://127.0.0.1:9",
         "no_proxy": "127.0.0.1,localhost",
     }
+    coverage_dir = None
+    if args.coverage and meta["coverage"]:
+        coverage_dir = run / "coverage"
+        coverage_dir.mkdir()
+        (paths["profile"] / "patches").mkdir()
+        shutil.copyfile(REPO / "spec/emulator/luacov_patch.lua", paths["profile"] / "patches/1-weread-luacov.lua")
+        env.update(WEREAD_LUACOV_DIR=str(coverage_dir), WEREAD_LUACOV_SRC=str(args.luacov_src), WEREAD_COVERAGE="1")
+        # The JIT is off under LuaCov: allow for the slower interpreter.
+        meta["timeout"] = int(meta["timeout"] * 2)
+        env["WEREAD_TEST_TIMEOUT"] = str(meta["timeout"])
     if args.xvfb:
         env.pop("SDL_VIDEODRIVER")
         env.pop("SDL_VIDEO_DRIVER")
@@ -214,7 +231,8 @@ def run_scenario(path: Path, runtime: Path, candidate: Path, out: Path, args) ->
     lua_errors = [line for line in log_text.splitlines()
                   if re.search(r"\bERROR\b", line) and "WeRead" in line]
     result.update(scenario=path.stem, title=meta["title"], wall_s=round(elapsed, 1), returncode=returncode,
-                  weread_error_lines=len(lua_errors), traceback_lines=len(crashes))
+                  weread_error_lines=len(lua_errors), traceback_lines=len(crashes),
+                  coverage=bool(coverage_dir))
     (paths["evidence"] / "result.json").write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
     status = "PASS" if result["ok"] else "FAIL"
     print(f"<== {path.stem}: {status} in {elapsed:.1f}s", flush=True)
@@ -253,6 +271,8 @@ def main() -> int:
     parser.add_argument("--width", type=int, default=600)
     parser.add_argument("--height", type=int, default=800)
     parser.add_argument("--dpi", type=int, default=167)
+    parser.add_argument("--coverage", action="store_true", help="collect LuaCov line counts of the plugin")
+    parser.add_argument("--luacov-src", type=Path, help="LuaCov source dir (containing luacov/runner.lua)")
     args = parser.parse_args()
     scenarios = sorted(SCENARIO_DIR.glob("*.lua"))
     if args.scenario:
@@ -276,6 +296,10 @@ def main() -> int:
         return 2
     if not args.koreader:
         parser.error("--koreader is required")
+    if args.coverage:
+        if not args.luacov_src or not (args.luacov_src / "luacov/runner.lua").is_file():
+            parser.error("--coverage needs --luacov-src pointing at LuaCov's src directory")
+        args.luacov_src = args.luacov_src.resolve()
     out = args.out.resolve()
     out.mkdir(parents=True, exist_ok=True)
     runtime = find_runtime(args.koreader, out)
@@ -286,6 +310,11 @@ def main() -> int:
     candidate = build_candidate(out)
     results = [run_scenario(path, runtime, candidate, out, args) for path in scenarios]
     write_summary(out, results, label)
+    if args.coverage:
+        parts = sorted(out.glob("*/coverage/luacov.stats.*.out"))
+        (out / "coverage").mkdir(exist_ok=True)
+        subprocess.run([sys.executable, str(REPO / "scripts/coverage_tools.py"), "merge",
+                        "--out", str(out / "coverage/emulator.stats.out"), *map(str, parts)], check=True)
     print((out / "summary.md").read_text(encoding="utf-8"))
     return 0 if all(result["ok"] for result in results) else 1
 

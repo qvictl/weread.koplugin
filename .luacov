@@ -1,7 +1,7 @@
--- LuaCov configuration for scripts/run_lua_coverage.sh (CI diff coverage).
+-- LuaCov configuration for scripts/run_lua_coverage.sh and scripts/coverage_tools.py.
 return {
-    statsfile = "coverage/luacov.stats.out",
-    reportfile = "coverage/luacov.report.out",
+    statsfile = "coverage/unit.stats.out",
+    reportfile = "coverage/unit.report.out",
     include = { "^main$", "^weread/", "^integrations/" },
     exclude = { "^spec/", "luacov" },
     deletestats = false,
