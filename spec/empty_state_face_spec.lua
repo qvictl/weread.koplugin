@@ -709,6 +709,17 @@ do
         "last chapter page was not sliced correctly")
     expect(not view:goToPage(view.page_count + 1), "chapter list paged beyond the end")
 
+    local current_page = view.page
+    local refreshed = {}
+    for index = 1, 811 do refreshed[index] = { title = "R" .. index, status = "Cached", source = {} } end
+    view:setChapters(refreshed)
+    expect(view.page == current_page and view.chapters == refreshed
+            and #view._chapter_rows == 811 - (view.page_count - 1) * per_page,
+        "in-place catalog refresh lost the current page")
+    view:setChapters({ refreshed[1] })
+    expect(view.page == 1 and view.page_count == 1 and #view._chapter_rows == 1,
+        "shrunken catalog was not clamped to its last page")
+
     local short = ChapterListView.show({ title = "Short", chapters = { rows[1], rows[2] } }, {})
     expect(short.page_count == 1 and short._page_buttons == nil and #short._chapter_rows == 2,
         "short catalog created page controls")

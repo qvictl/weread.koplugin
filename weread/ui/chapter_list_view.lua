@@ -253,6 +253,7 @@ function ChapterListView:buildPage()
         for _i, button in ipairs(self._page_buttons) do outside_scroll[button] = true end
     end
     FocusNav.apply(self, rows, { scroll = scroll, outside_scroll = outside_scroll })
+    self.ges_events.ChapterPageSwipe = nil
     if self.page_count > 1 then
         if Device:hasKeys() then
             -- Paging keys turn catalog pages, like the bookshelf.
@@ -306,18 +307,33 @@ function ChapterListView:init()
     self._toolbar = self:toolbar()
     self.list_height = math.max(1, self.screen_h - self.title_bar:getHeight()
         - self._toolbar:getSize().h)
+    local page = tonumber(self.page)
+    self:paginate()
+    if not page and tonumber(self.focus_index) then
+        page = math.floor((tonumber(self.focus_index) - 1) / self.page_size) + 1
+    end
+    self.page = math.max(1, math.min(math.floor(page or 1), self.page_count))
+    self:buildPage()
+end
+
+function ChapterListView:paginate()
     local count = #(self.chapters or {})
     self.page_size = self:computePageSize(self.list_height, false)
     if count > self.page_size then
         self.page_size = self:computePageSize(self.list_height, true)
     end
     self.page_count = math.max(1, math.ceil(count / self.page_size))
-    local page = tonumber(self.page)
-    if not page and tonumber(self.focus_index) then
-        page = math.floor((tonumber(self.focus_index) - 1) / self.page_size) + 1
-    end
-    self.page = math.max(1, math.min(math.floor(page or 1), self.page_count))
+    self.page = math.max(1, math.min(math.floor(tonumber(self.page) or 1), self.page_count))
+end
+
+-- Replace the catalog rows (after a download or refresh) in place, keeping
+-- the current page. Showing a new list instead would cover the download
+-- completion dialog or whatever else is on top.
+function ChapterListView:setChapters(chapters)
+    self.chapters = chapters
+    self:paginate()
     self:buildPage()
+    UIManager:setDirty(self, "ui")
 end
 
 function ChapterListView:onShow()
