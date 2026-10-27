@@ -818,36 +818,60 @@ local function checked_body(response_text)
     return body
 end
 
+-- Base64 decoding with a byte lookup table. Accepts the standard and the
+-- URL-safe alphabet, ignores padding and any other byte, and drops trailing
+-- bits that do not fill a byte (same output as the original bit-string
+-- implementation, which allocated ~46x its input in garbage, F1.4).
+local B64_VALUES = {}
+for index = 1, #b64chars do B64_VALUES[b64chars:byte(index)] = index - 1 end
+B64_VALUES[("-"):byte()] = 62
+B64_VALUES[("_"):byte()] = 63
+local B64_CHUNK_BYTES = 3 * 1024 -- below LuaJIT's unpack() limit
+local unpack_bytes = rawget(table, "unpack") or unpack
+
 local function base64_decode(data)
-    data = data:gsub("-", "+"):gsub("_", "/")
-    local pad = #data % 4
-    if pad > 0 then
-        data = data .. string.rep("=", 4 - pad)
+    data = tostring(data or "")
+    if data:find("[^A-Za-z0-9+/_%-]") then
+        data = data:gsub("[^A-Za-z0-9+/_%-]", "")
     end
-    data = data:gsub("[^" .. b64chars .. "=]", "")
-    return (data:gsub(".", function(char)
-        if char == "=" then
-            return ""
+    local byte, char, floor = string.byte, string.char, math.floor
+    local values = B64_VALUES
+    local parts, part_count = {}, 0
+    local out, out_count = {}, 0
+    local length = #data
+    local full = length - length % 4
+    for index = 1, full, 4 do
+        local a, b, c, d = byte(data, index, index + 3)
+        local n = values[a] * 262144 + values[b] * 4096 + values[c] * 64 + values[d]
+        out[out_count + 1] = floor(n / 65536)
+        out[out_count + 2] = floor(n / 256) % 256
+        out[out_count + 3] = n % 256
+        out_count = out_count + 3
+        if out_count >= B64_CHUNK_BYTES then
+            part_count = part_count + 1
+            parts[part_count] = char(unpack_bytes(out, 1, out_count))
+            out_count = 0
         end
-        local bits = ""
-        local index = b64chars:find(char, 1, true) - 1
-        for bit = 6, 1, -1 do
-            bits = bits .. (index % 2 ^ bit - index % 2 ^ (bit - 1) > 0 and "1" or "0")
-        end
-        return bits
-    end):gsub("%d%d%d?%d?%d?%d?%d?%d?", function(bits)
-        if #bits ~= 8 then
-            return ""
-        end
-        local byte = 0
-        for i = 1, 8 do
-            if bits:sub(i, i) == "1" then
-                byte = byte + 2 ^ (8 - i)
-            end
-        end
-        return string.char(byte)
-    end))
+    end
+    local rest = length - full
+    if rest == 2 then
+        local a, b = byte(data, full + 1, full + 2)
+        out_count = out_count + 1
+        out[out_count] = values[a] * 4 + floor(values[b] / 16)
+    elseif rest == 3 then
+        local a, b, c = byte(data, full + 1, full + 3)
+        local n = values[a] * 4096 + values[b] * 64 + values[c]
+        out[out_count + 1] = floor(n / 1024)
+        out[out_count + 2] = floor(n / 4) % 256
+        out_count = out_count + 2
+    end
+    if out_count > 0 then
+        part_count = part_count + 1
+        parts[part_count] = char(unpack_bytes(out, 1, out_count))
+    end
+    return table.concat(parts)
 end
+Content._base64_decode = base64_decode -- exposed for specs
 
 local function swap_positions(encoded)
     local length = #encoded
