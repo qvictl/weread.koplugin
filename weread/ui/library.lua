@@ -870,7 +870,8 @@ function M:showBookMenu(book)
                     book.cached_full_book = nil
                     book.cached_chapters = nil
                     book.cache_dir = nil
-                    if view then UIManager:close(view) end
+                    if not (view and UIManager:isWidgetShown(view)) then return end
+                    UIManager:close(view)
                     self:showBookMenu(book)
                 end)
             end),

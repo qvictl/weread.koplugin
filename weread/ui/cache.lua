@@ -470,7 +470,36 @@ function M:isBookDownloaded(book, saved_books, downloaded_cache)
     return is_downloaded
 end
 
+-- Monotonic seconds for time-slicing long cache walks; nil when KOReader's
+-- clock is unavailable (slices then fall back to a fixed number of books).
+local function monotonic_seconds()
+    local ok, time = pcall(require, "ui/time")
+    if not ok or type(time) ~= "table" or not time.now or not time.to_s then return nil end
+    return time.to_s(time.now())
+end
+
+local CACHE_SCAN_SLICE_SECONDS = 0.25
+local CACHE_SCAN_SLICE_BOOKS = 8
+
+-- Run a slow cache operation after a busy message has been painted.
+function M:runCacheTask(text, task)
+    self:showBusy(text)
+    UIManager:scheduleIn(0.1, function()
+        local ok, err = pcall(task)
+        self:closeBusy()
+        if not ok then
+            logger.warn("cache task failed:", log_error(err))
+            self:showInfo(T(_("%1 failed:\n%2"), text, display_error(err)))
+        end
+    end)
+end
+
+-- Measuring the cache walks every file of every book. With hundreds of
+-- books (and hundreds of chapter files each) that froze the UI before the
+-- page appeared, so walk the books in time-limited slices behind a busy
+-- message and show the page when done.
 function M:showCacheManagement()
+    if self._cache_scan then return end
     local lfs = require("libs/libkoreader-lfs")
     local books = BookRecords.all(self.settings)
     local items = {}
@@ -529,66 +558,103 @@ function M:showCacheManagement()
     -- Only list plugin-owned entries tracked in the books table. Scanning the
     -- filesystem would list unrelated subfolders when cache_dir is a user-selected
     -- library directory, and deleting one would rm -rf a non-WeRead folder.
+    local queue = {}
     for book_id, book in pairs(books) do
-        add_cache_entry(book_id, book.title, Content.book_resolved_dir(self.settings, book_id, book))
+        queue[#queue + 1] = { book_id = book_id, book = book }
     end
+    local scan = { index = 1 }
+    self._cache_scan = scan
 
-    table.sort(entries, function(a, b)
-        if a.is_mp ~= b.is_mp then
-            return a.is_mp
+    local finish
+    local function step()
+        if self._cache_scan ~= scan then return end
+        local started = monotonic_seconds()
+        local processed = 0
+        while scan.index <= #queue do
+            local item = queue[scan.index]
+            scan.index = scan.index + 1
+            add_cache_entry(item.book_id, item.book.title,
+                Content.book_resolved_dir(self.settings, item.book_id, item.book))
+            processed = processed + 1
+            local now = started and monotonic_seconds()
+            if scan.index <= #queue and ((now and now - started >= CACHE_SCAN_SLICE_SECONDS)
+                    or (not now and processed >= CACHE_SCAN_SLICE_BOOKS)) then
+                UIManager:scheduleIn(0.1, step)
+                return
+            end
         end
-        return tostring(a.title):lower() < tostring(b.title):lower()
-    end)
+        self._cache_scan = nil
+        self:closeBusy()
+        finish()
+    end
+    self:showBusy(_("Calculating cache size..."))
+    UIManager:scheduleIn(0.1, step)
 
-    local total_str = total_size < 1024 * 1024
-        and string.format("%.0f KB", total_size / 1024)
-        or string.format("%.1f MB", total_size / 1024 / 1024)
-    local mp_total_str = mp_total_size < 1024 * 1024
-        and string.format("%.0f KB", mp_total_size / 1024)
-        or string.format("%.1f MB", mp_total_size / 1024 / 1024)
-    table.insert(items, {
-        text = T(_("[Cleanup] Clear all public account cache (%1)"), mp_total_str),
-        callback = self:safeCallback(_("Clear all public account cache"), function()
-            UIManager:show(ConfirmBox:new{
-                text = _("Clear all public account cache? Downloaded articles and cached article lists will be deleted."),
-                ok_text = _("Clear"),
-                ok_callback = function()
-                    if not self:clearAllMPCache() then return end
-                    self:refreshCacheManagement(_("Public account cache cleared"))
-                end,
-            })
-        end),
-    })
-    table.insert(items, {
-        text = T(_("[Cleanup] Clear all cache (%1)"), total_str),
-        separator = true,
-        callback = self:safeCallback(_("Clear all cache"), function()
-            UIManager:show(ConfirmBox:new{
-                text = _("Clear all cache? Downloaded books and articles, underlines, thoughts, and matching progress will be deleted."),
-                ok_text = _("Clear"),
-                ok_callback = function()
-                    if not self:clearAllCache() then return end
-                    self:refreshCacheManagement(_("Cache cleared"))
-                end,
-            })
-        end),
-    })
+    finish = function()
 
-    for entry_index, entry in ipairs(entries) do
-        local size_str = entry.size < 1024 * 1024
-            and string.format("%.0f KB", entry.size / 1024)
-            or string.format("%.1f MB", entry.size / 1024 / 1024)
+        table.sort(entries, function(a, b)
+            if a.is_mp ~= b.is_mp then
+                return a.is_mp
+            end
+            return tostring(a.title):lower() < tostring(b.title):lower()
+        end)
+
+        local total_str = total_size < 1024 * 1024
+            and string.format("%.0f KB", total_size / 1024)
+            or string.format("%.1f MB", total_size / 1024 / 1024)
+        local mp_total_str = mp_total_size < 1024 * 1024
+            and string.format("%.0f KB", mp_total_size / 1024)
+            or string.format("%.1f MB", mp_total_size / 1024 / 1024)
         table.insert(items, {
-            text = entry.title,
-            post_text = T(_("%1 files, %2"), tostring(entry.file_count), size_str),
-            mandatory = entry.is_mp and _("Public Account") or "",
-            callback = self:safeCallback(entry.title, function()
-                self:confirmClearBookCache(entry.book_id, entry.title)
+            text = T(_("[Cleanup] Clear all public account cache (%1)"), mp_total_str),
+            callback = self:safeCallback(_("Clear all public account cache"), function()
+                UIManager:show(ConfirmBox:new{
+                    text = _("Clear all public account cache? Downloaded articles and cached article lists will be deleted."),
+                    ok_text = _("Clear"),
+                    ok_callback = function()
+                        if self:refuseWhileDownloading() then return end
+                        self:runCacheTask(_("Clearing cache..."), function()
+                            if not self:clearAllMPCache() then return end
+                            self:refreshCacheManagement(_("Public account cache cleared"))
+                        end)
+                    end,
+                })
             end),
         })
-    end
+        table.insert(items, {
+            text = T(_("[Cleanup] Clear all cache (%1)"), total_str),
+            separator = true,
+            callback = self:safeCallback(_("Clear all cache"), function()
+                UIManager:show(ConfirmBox:new{
+                    text = _("Clear all cache? Downloaded books and articles, underlines, thoughts, and matching progress will be deleted."),
+                    ok_text = _("Clear"),
+                    ok_callback = function()
+                        if self:refuseWhileDownloading() then return end
+                        self:runCacheTask(_("Clearing cache..."), function()
+                            if not self:clearAllCache() then return end
+                            self:refreshCacheManagement(_("Cache cleared"))
+                        end)
+                    end,
+                })
+            end),
+        })
 
-    self.cache_menu = self:showTrackedList(_("Cache management"), items, _("No cached items"))
+        for entry_index, entry in ipairs(entries) do
+            local size_str = entry.size < 1024 * 1024
+                and string.format("%.0f KB", entry.size / 1024)
+                or string.format("%.1f MB", entry.size / 1024 / 1024)
+            table.insert(items, {
+                text = entry.title,
+                post_text = T(_("%1 files, %2"), tostring(entry.file_count), size_str),
+                mandatory = entry.is_mp and _("Public Account") or "",
+                callback = self:safeCallback(entry.title, function()
+                    self:confirmClearBookCache(entry.book_id, entry.title)
+                end),
+            })
+        end
+
+        self.cache_menu = self:showTrackedList(_("Cache management"), items, _("No cached items"))
+    end
 end
 
 -- Rebuild the cache management page if it is open. A scan or cleanup run
@@ -720,13 +786,16 @@ function M:confirmClearBookCache(book_id, title, on_cleared)
         text = T(_("Clear cache for \"%1\"?\nDownloaded files, underlines, thoughts, and matching progress will be deleted."), title),
         ok_text = _("Clear"),
         ok_callback = function()
-            if not self:clearBookCache(book_id) then return end
-            if on_cleared then
-                on_cleared()
-                self:showTransientInfo(_("Cache cleared"))
-            else
-                self:refreshCacheManagement(_("Cache cleared"))
-            end
+            if self:refuseWhileDownloading() then return end
+            self:runCacheTask(_("Clearing cache..."), function()
+                if not self:clearBookCache(book_id) then return end
+                if on_cleared then
+                    on_cleared()
+                    self:showTransientInfo(_("Cache cleared"))
+                else
+                    self:refreshCacheManagement(_("Cache cleared"))
+                end
+            end)
         end,
     })
 end
