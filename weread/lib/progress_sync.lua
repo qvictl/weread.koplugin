@@ -627,10 +627,9 @@ function ProgressSync:_finish_upload(entry, ok, accepted, outcome)
     if ok and type(outcome) == "table" and outcome.error_kind == "remote_ahead" then
         -- Someone read further elsewhere: this older snapshot must not
         -- replace it. Drop it; the open book keeps the cloud as a floor.
+        -- Not recorded as last_remote_position: that would make this
+        -- foreign position count as one this device knew (a baseline).
         clear_pending.last_sync_error = false
-        if type(outcome.remote) == "table" then
-            clear_pending.last_remote_position = outcome.remote
-        end
         self:_persist(book_id, clear_pending)
         log("info", "upload skipped, cloud progress is ahead:",
             "book=", book_id,
@@ -884,7 +883,10 @@ function ProgressSync:_known_cloud_positions(book_id, extra)
     if ok and type(book) == "table" then
         add(book.last_remote_position)
         add(book.last_uploaded_position)
-        if book.chapter_uid ~= nil and book.chapter_offset ~= nil then
+        -- The read report's last position counts only when it was this
+        -- device's reading position, not a cloud position it re-asserted.
+        if book.reported_local == true
+            and book.chapter_uid ~= nil and book.chapter_offset ~= nil then
             add({
                 chapter_uid = book.chapter_uid,
                 chapter_offset = tonumber(book.chapter_offset),
@@ -1396,6 +1398,7 @@ function ProgressSync:position_for_report(book_id)
         if self.report_fallback and self.state ~= "awaiting_choice" then
             local fallback = copy(self.report_fallback)
             fallback.book_id = tostring(book_id)
+            fallback.cloud = true
             return fallback, nil, true
         end
         -- Without automatic pulls nothing ever verifies the session, so
@@ -1424,6 +1427,7 @@ function ProgressSync:position_for_report(book_id)
             EXACT_THRESHOLD_PERCENT) then
             local floor = copy(self.remote_floor)
             floor.book_id = tostring(book_id)
+            floor.cloud = true
             return floor, nil, true
         end
         self.remote_floor = nil

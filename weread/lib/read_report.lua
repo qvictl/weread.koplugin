@@ -34,6 +34,11 @@ local CONTEXT_FIELDS = {
     "title", "reader_url", "app_id", "psvts", "pclts", "token",
     "chapter_uid", "chapter_idx", "chapter_offset", "progress", "summary",
     "read_context_updated_at", "read_session_entered_at", "read_session_id",
+    -- true when the position fields above are this device's own reading
+    -- position (sent by a report); false when they are a cloud position
+    -- merged in or re-asserted. Only the former counts as "ours" for the
+    -- monotonic guard.
+    "reported_local",
 }
 
 local ReadReport = {}
@@ -105,7 +110,8 @@ local function slim_position(position)
         chapter_uid = position.chapter_uid,
         chapter_idx = tonumber(position.chapter_idx),
         chapter_offset = tonumber(position.chapter_offset),
-        percent = tonumber(position.raw_percent) or tonumber(position.percent),
+        percent = tonumber(position.raw_percent) or tonumber(position.percent)
+            or tonumber(position.progress),
         summary = position.summary,
         has_chapter_offset = position.has_chapter_offset,
     }
@@ -122,6 +128,7 @@ local function merge_cloud_position(book, remote)
     if tostring(remote.summary or "") ~= "" then
         book.summary = remote.summary
     end
+    book.reported_local = false
 end
 
 -- Identifies one progress upload so a later call with the same snapshot can
@@ -972,6 +979,7 @@ function ReadReport:_apply_report_floor(book_id, position)
     if PositionMapper.is_behind(position, floor.position) then
         local result = {}
         for key, value in pairs(floor.position) do result[key] = value end
+        result.cloud = true
         return result
     end
     self.report_floor = nil
@@ -1127,9 +1135,16 @@ end
 function ReadReport:_run_pipeline(book_id, opts)
     opts = opts or {}
     local outcome = { accepted = false, renew_attempted = false }
-    -- What the stored context last sent (or saw) before this attempt; the
-    -- context build below may merge fresh cloud progress into it.
-    local stored = opts.guard and slim_position(get_book(self.settings, book_id))
+    -- The reading position this device last sent, if the stored context
+    -- holds one (not a merged cloud position); read before the context
+    -- build below may merge fresh cloud progress into it.
+    local stored
+    if opts.guard then
+        local record = get_book(self.settings, book_id)
+        if type(record) == "table" and record.reported_local == true then
+            stored = slim_position(record)
+        end
+    end
 
     local context_ok, book = pcall(function()
         return self:ensure_context(book_id, false, opts)
@@ -1351,6 +1366,7 @@ function ReadReport:_merge_remote_progress(book_id, book)
     book.chapter_offset = tonumber(remote.chapterOffset or remote.chapterPos or remote.offset)
         or tonumber(book.chapter_offset) or 0
     book.summary = remote.summary or book.summary or ""
+    book.reported_local = false
 end
 
 -- Build (and refresh when stale) the reader context on the given book
@@ -1471,6 +1487,8 @@ local function apply_position(book, position)
     book.progress = tonumber(position.percent or position.progress)
         or tonumber(book.progress) or 0
     book.summary = position.summary or book.summary or ""
+    -- Positions marked `cloud` re-assert the cloud's own position.
+    book.reported_local = position.cloud ~= true
     return book
 end
 
