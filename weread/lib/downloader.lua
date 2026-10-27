@@ -82,6 +82,31 @@ local function is_low_memory_error(err)
     return tostring(err):find(LOW_MEMORY_ERROR, 1, true) ~= nil
 end
 
+-- Raised before forking when the device reports no network link. Shown to
+-- the user as the "last error" of a network pause.
+local NETWORK_UNAVAILABLE_ERROR = "network is not connected"
+-- Resumable jobs pause instead of marching through the remaining chapters
+-- (one worker fork per attempt) while the network is gone (F3).
+local TRANSPORT_FAILURES_BEFORE_PAUSE = 2
+local CHAPTER_FAILURES_BEFORE_PAUSE = 3
+local TRANSPORT_ERROR_PATTERNS = {
+    NETWORK_UNAVAILABLE_ERROR, "http nil", "http unknown", "timeout",
+    "wantread", "wantwrite", "closed", "connection refused",
+    "connection reset", "address family not supported", "host not found",
+    "name resolution", "network is unreachable", "no route to host",
+    "broken pipe",
+}
+
+local function is_transport_error(err)
+    -- Only the message: worker errors carry a traceback whose frame names
+    -- (e.g. "set_timeout") must not count.
+    local text = (tostring(err or ""):match("^[^\n]*") or ""):lower()
+    for _i, pattern in ipairs(TRANSPORT_ERROR_PATTERNS) do
+        if text:find(pattern, 1, true) then return true end
+    end
+    return false
+end
+
 local function kb_to_mb(kb)
     return tostring(math.floor((tonumber(kb) or 0) / 1024 + 0.5))
 end
@@ -593,6 +618,10 @@ end
 function Downloader:_runInterruptible(dl, task)
     if dl.cancelled then return nil end
     if not dl.trapper then return task() end
+    -- No point forking a worker (and paying its memory) without a link.
+    if self.is_connected and not self.is_connected() then
+        error(NETWORK_UNAVAILABLE_ERROR, 0)
+    end
     self:_waitForMemory(dl)
     if dl.cancelled then return nil end
     local dialog = dl.progress_dialog
@@ -882,8 +911,44 @@ function Downloader:_perf(dl, stage, started, ...)
         "chapter=", tostring(dl.index) .. "/" .. tostring(dl.total), ...)
 end
 
+-- Count one failed chapter attempt. Returns true when a resumable job was
+-- paused because the network looks gone (TRANSPORT_FAILURES_BEFORE_PAUSE
+-- transport errors in a row) or chapters keep failing
+-- (CHAPTER_FAILURES_BEFORE_PAUSE given-up chapters in a row). A successful
+-- chapter resets both counters.
+function Downloader:_recordFailure(dl, err, chapter_given_up)
+    if is_transport_error(err) then
+        dl.consecutive_transport_failures = (dl.consecutive_transport_failures or 0) + 1
+    else
+        dl.consecutive_transport_failures = 0
+    end
+    if chapter_given_up then
+        dl.consecutive_chapter_failures = (dl.consecutive_chapter_failures or 0) + 1
+    end
+    if not dl.resumable then return false end
+    local network = dl.consecutive_transport_failures >= TRANSPORT_FAILURES_BEFORE_PAUSE
+    local repeated = (dl.consecutive_chapter_failures or 0) >= CHAPTER_FAILURES_BEFORE_PAUSE
+    if not network and not repeated then return false end
+    local reason = network and "network_unavailable" or "repeated_failures"
+    logger.warn("full-book download paused after repeated failures:",
+        "reason=", reason,
+        "transport_failures=", tostring(dl.consecutive_transport_failures),
+        "chapter_failures=", tostring(dl.consecutive_chapter_failures or 0),
+        "index=", tostring(dl.index) .. "/" .. tostring(dl.total),
+        "error=", log_error(err))
+    self:_preserveWorkspace(dl, reason)
+    if not dl.prefetch then
+        local message = network
+            and _("Full-book download paused: the network seems to be unavailable.\n\nCompleted chapters were kept. Choose Download full book again to continue when the connection is back.\n\nLast error: %1")
+            or _("Full-book download paused: several chapters in a row failed.\n\nCompleted chapters were kept. Choose Download full book again to continue later.\n\nLast error: %1")
+        self.show_info(T(message, display_error(err)))
+    end
+    return true
+end
+
 function Downloader:_failChapter(dl, err)
     if is_low_memory_error(err) then return self:_stopForLowMemory(dl, err) end
+    if self:_recordFailure(dl, err, true) then return end
     local chapter = dl.chapters[dl.index]
     local uid = tostring(chapter and chapter.chapterUid or dl.index)
     table.insert(dl.failed, uid)
@@ -941,6 +1006,7 @@ function Downloader:_retryChapterSource(dl, err)
         self:_failChapter(dl, err)
         return false
     end
+    if self:_recordFailure(dl, err, false) then return false end
     logger.warn("chapter source download failed; retrying:",
         "index=", tostring(dl.index) .. "/" .. tostring(dl.total),
         "chapter_uid=", uid, "attempt=", tostring(attempt),
@@ -1212,6 +1278,8 @@ function Downloader:_finishChapter(dl)
         "rss_kb=", tostring(rss_kb or "unknown"))
     dl.current = nil
     dl.annotation = nil
+    dl.consecutive_transport_failures = 0
+    dl.consecutive_chapter_failures = 0
     dl.index = dl.index + 1
     if dl.progress_dialog then
         dl.progress_dialog:reportProgress(dl.index - 1)
