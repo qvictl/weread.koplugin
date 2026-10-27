@@ -589,11 +589,42 @@ test("a cloud position this device sent itself does not block moving back", func
     local report, records = guard_fixture(
         { chapter_uid = 22, chapter_idx = 2, chapter_offset = 200, percent = 30 },
         { bookId = "book", progress = 40, chapterUid = 33, chapterIdx = 3, chapterOffset = 10 },
-        { chapter_uid = 33, chapter_offset = 10, progress = 40 })
+        { chapter_uid = 33, chapter_offset = 10, progress = 40, reported_local = true })
     report:_tick(report.generation, report.task)
     eq(records[1].chapter_uid, 22, "local position sent")
     eq(records[1].chapter_offset, 200, "local offset sent")
     eq(report.report_floor, nil, "no floor")
+end)
+
+test("a cloud position only re-asserted earlier is not treated as ours", function()
+    -- A previous session found the cloud ahead and re-sent it as a floor;
+    -- the stored context now holds that foreign position.
+    local report, records = guard_fixture(
+        { chapter_uid = 22, chapter_idx = 2, chapter_offset = 200, percent = 30 },
+        { bookId = "book", progress = 40, chapterUid = 33, chapterIdx = 3, chapterOffset = 10 },
+        { chapter_uid = 33, chapter_offset = 10, progress = 40, reported_local = false })
+    report:_tick(report.generation, report.task)
+    eq(records[1].chapter_uid, 33, "older local position still not sent")
+end)
+
+test("a floor report is stored as a cloud position, a local one as ours", function()
+    local report = guard_fixture(
+        { chapter_uid = 22, chapter_idx = 2, chapter_offset = 200, percent = 30 },
+        { bookId = "book", progress = 40, chapterUid = 33, chapterIdx = 3, chapterOffset = 10 },
+        { chapter_uid = 22, chapter_offset = 150, progress = 25, reported_local = true })
+    local snapshots = {}
+    report._persist_context = function(_self, _id, snapshot) snapshots[#snapshots + 1] = snapshot end
+    local outcome = report:_run_pipeline("book", {
+        allow_renewal = false, elapsed_seconds = 30, session_open = true,
+        position = { chapter_uid = 22, chapter_offset = 200, percent = 30 },
+        guard = {},
+    })
+    eq(outcome.book.reported_local, false, "substituted cloud position is not ours")
+    outcome = report:_run_pipeline("book", {
+        allow_renewal = false, elapsed_seconds = 30, session_open = true,
+        position = { chapter_uid = 33, chapter_offset = 50, percent = 41 },
+    })
+    eq(outcome.book.reported_local, true, "a sent reading position is ours")
 end)
 
 test("a time-only report re-asserts the fresh cloud position", function()
