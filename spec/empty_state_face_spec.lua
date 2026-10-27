@@ -554,4 +554,37 @@ if native_widgets then
     print("native bookshelf geometry: real KOReader Button and layout containers passed")
 end
 
+-- Covers that finish loading are swapped into the existing cells in place;
+-- covers that failed turn their loading placeholder into "No cover".
+do
+    local update_books = {
+        { bookId = "u1", title = "U1" }, { bookId = "u2", title = "U2" },
+        { bookId = "u3", title = "U3" },
+    }
+    local closed_with
+    local update_view = LibraryView.show({
+        mode = "books", books = update_books, accounts = {},
+        paged = true, page = 1, page_size = 6,
+        cover_mode = true, cover_columns = 3,
+        cover_paths = {},
+        cover_loading = { [update_books[1]] = true, [update_books[2]] = true },
+    }, { on_closed = function(view) closed_with = view end })
+    local cells = { update_view._item_rows[1], update_view._item_rows[2], update_view._item_rows[3] }
+    local focus_row = update_view._focus_item_rows[1]
+    cells[1].frame.invert = true
+    expect(update_view:updateCovers(function(book)
+        return book == update_books[1] and "/covers/u1.jpg" or nil
+    end), "finished covers did not update the shelf")
+    expect(update_view._item_rows[1] == cells[1] and focus_row[1] == cells[1],
+        "cover update replaced the focusable cell")
+    expect(cells[1]._has_cover == true and cells[1].frame.invert == true,
+        "loaded cover was not shown or lost the focus highlight")
+    expect(cells[2]._has_cover == false and cells[2].cover_loading == false,
+        "failed cover kept its loading placeholder")
+    expect(not update_view:updateCovers(function() return nil end),
+        "a second update without new covers rebuilt cells")
+    update_view:onCloseWidget()
+    expect(closed_with == update_view, "closing the shelf did not notify its owner")
+end
+
 print(("empty_state_face_spec: %d checks"):format(checks))
