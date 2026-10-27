@@ -39,34 +39,76 @@ function M:_annotationStore()
     return self.annotation_store
 end
 
-function M:_annotationBinding()
-    local path = file(self)
-    if not path then return nil end
-    local entry = self.external_annotations_db:getDocument(path)
+local function library_book(plugin, book_id)
+    local books = plugin.settings:get("books", {})
+    return books[tostring(book_id)] or books[tonumber(book_id)] or books[book_id]
+end
+
+local function resolve_binding(plugin, path)
+    local entry, read_err = plugin.external_annotations_db:getDocument(path)
     if entry and entry.binding then return entry.binding end
-    local book_id = self:detectWeReadBook()
+    if read_err then return nil, read_err end
+    local book_id = plugin:detectWeReadBook()
     if not book_id then return nil end
-    local books = self.settings:get("books", {})
-    local book = books[tostring(book_id)] or books[book_id]
+    local book = library_book(plugin, book_id)
     if not book then return nil end
     return { book_id = tostring(book_id), title = book.title, author = book.author,
         format = book.format, automatic = true }
 end
 
+-- Resolving the binding opens the per-file SQLite database and scans the
+-- whole library. It only changes when the user (re)binds this file, so it is
+-- resolved once per document; _invalidateAnnotationBinding() drops it. A
+-- failed database read is never cached.
+function M:_annotationBinding()
+    local path = file(self)
+    if not path then return nil end
+    local cached = self._annotation_binding_cache
+    if cached and cached.path == path then return cached.binding or nil end
+    local binding, err = resolve_binding(self, path)
+    if err then return nil, err end
+    self._annotation_binding_cache = { path = path, binding = binding or false }
+    return binding
+end
+
+function M:_invalidateAnnotationBinding()
+    self._annotation_binding_cache = nil
+    self._annotation_document_key = nil
+    self._unified_annotations_active = nil
+end
+
+-- Document identity (path, size, mtime, engine) hashed with pure-Lua SHA-256.
+function M:_annotationDocumentKey(path)
+    path = path or file(self)
+    local cached = self._annotation_document_key
+    if cached and cached.path == path then return cached.key end
+    local key = self:_annotationStore().documentKey(path)
+    self._annotation_document_key = { path = path, key = key }
+    return key
+end
+
+-- Cached in _unified_annotations_active, including a negative answer: the
+-- ReaderLink tap wrapper consults this on every tap. Later activation
+-- (on_chapter, clearing, rebinding) updates or resets the cached value.
 function M:_usesUnifiedAnnotations()
     if self._unified_annotations_active ~= nil then return self._unified_annotations_active end
-    local binding = self:_annotationBinding()
-    if not binding then return false end
-    if binding.automatic then
-        local books = self.settings:get("books", {})
-        local book = books[binding.book_id] or books[tonumber(binding.book_id)]
-        local descriptor = Chapters.descriptor(book, file(self))
-        if descriptor and descriptor.clean then return true end
+    local binding, err = self:_annotationBinding()
+    if err then error(err, 0) end
+    local active = false
+    if binding then
+        if binding.automatic then
+            local descriptor = Chapters.descriptor(library_book(self, binding.book_id), file(self))
+            active = descriptor ~= nil and descriptor.clean == true
+        end
+        if not active then
+            local store = self:_annotationStore()
+            local key = self:_annotationDocumentKey()
+            active = store:get(binding.book_id, "display", key) == true
+                or store:get(binding.book_id, "manual_only", key) == true
+        end
     end
-    local store = self:_annotationStore()
-    local key = store.documentKey(file(self))
-    return store:get(binding.book_id, "display", key) == true
-        or store:get(binding.book_id, "manual_only", key) == true
+    self._unified_annotations_active = active
+    return active
 end
 
 function M:_prepareAnnotationContext(online, refresh_catalog)
@@ -84,9 +126,8 @@ function M:_prepareAnnotationContext(online, refresh_catalog)
         return context
     end
     local store = self:_annotationStore()
-    local books = self.settings:get("books", {})
     local book_id = tostring(binding.book_id)
-    local book = books[book_id] or books[tonumber(book_id)]
+    local book = library_book(self, book_id)
     local descriptor = binding.automatic and Chapters.descriptor(book, path)
     local catalog = store:get(book_id, "meta", "catalog") or book and book.chapters
     if online and (not catalog or refresh_catalog) then
@@ -99,7 +140,7 @@ function M:_prepareAnnotationContext(online, refresh_catalog)
         if refresh_catalog then store:put(book_id, "meta", "prune_catalog", catalog) end
     end
     catalog = catalog or descriptor and descriptor.chapters or {}
-    local document_key = store.documentKey(path)
+    local document_key = self:_annotationDocumentKey(path)
     local overrides = store:get(book_id, "chapter_mapping", document_key)
     started = perf("annotation_catalog", started, "chapters=", #catalog)
     local selected, ranges = Chapters.map(self.ui.document, catalog, descriptor, overrides)

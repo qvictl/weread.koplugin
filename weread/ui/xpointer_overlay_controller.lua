@@ -188,6 +188,9 @@ function M:bindExternalAnnotationsBook(touchmenu_instance)
                                 old.records = {}
                                 self._annotation_context = nil
                                 self._unified_annotations_active = nil
+                                if self._invalidateAnnotationBinding then
+                                    self:_invalidateAnnotationBinding()
+                                end
                                 local saved, save_err = self.external_annotations_db:saveDocument(path, old)
                                 if not saved then error(save_err) end
                                 local cleared, clear_err =

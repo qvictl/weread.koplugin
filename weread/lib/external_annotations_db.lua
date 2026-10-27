@@ -142,6 +142,7 @@ function ExternalAnnotationsDB:getDocument(path)
     if not db then
         if open_err then
             logger.warn("external annotation database read skipped:", open_err)
+            return nil, tostring(open_err)
         end
         return nil
     end
@@ -156,7 +157,9 @@ function ExternalAnnotationsDB:getDocument(path)
     pcall(function() db:close() end)
     if not ok then
         logger.warn("external annotation database read failed:", err)
-        return nil
+        -- The second value lets callers avoid caching a transient failure
+        -- (e.g. SQLITE_BUSY) as "this file has no binding".
+        return nil, tostring(err)
     end
     return value
 end
