@@ -73,6 +73,12 @@ function M.show(opts)
 
     local pooled = _pool[position]
     if pooled then
+        -- Never stack the same widget twice: close the visible instance first
+        -- (running its close callback once) before rebuilding its layout.
+        local ok, shown = pcall(function() return UIManager:isWidgetShown(pooled) end)
+        if ok and shown then
+            UIManager:close(pooled)
+        end
         pooled:_reopen(opts)
         UIManager:show(pooled)
         return pooled

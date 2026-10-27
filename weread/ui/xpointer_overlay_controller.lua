@@ -136,6 +136,13 @@ function M:_onXPointerOverlayTap(ges)
             },
         }
     end
+    -- Never open the popup inside the gesture handler: KOReader dispatches
+    -- the rest of this input batch before the next paint, so a queued tap
+    -- would reach the not-yet-painted popup. The shared queue defers the show
+    -- to the next tick and swallows taps while a popup is pending or shown.
+    if self._queueThoughtPopup then
+        return self:_queueThoughtPopup(items)
+    end
     require("weread.ui.thought_popup").show(ThoughtPopupConfig.build(self, items))
     return true
 end
