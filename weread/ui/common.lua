@@ -123,8 +123,17 @@ function M:showOffline(label)
     self:showInfo(T(_("%1 failed:\n%2"), label, _("No network connection. Please connect Wi-Fi and try again.")))
 end
 
+-- options.silent_offline: no offline notice (background work).
+-- options.link_only: check the interface link only, never a blocking DNS
+-- lookup; for lifecycle-triggered work, where the request itself fails fast.
 function M:runOnlineTask(label, callback, delay, options)
-    if not self:isNetworkOnline() then
+    local online
+    if options and options.link_only then
+        online = self:isNetworkConnected()
+    else
+        online = self:isNetworkOnline()
+    end
+    if not online then
         if not (options and options.silent_offline) then
             self:showOffline(label)
         end

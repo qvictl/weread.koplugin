@@ -435,9 +435,20 @@ test("page change uploads once on close", function()
     f.sync:on_page_update()
     eq(f.sync:status().dirty, true, "page change marks dirty")
     f.sync:on_close_document()
-    eq(#f.uploads, 1, "close uploads once")
-    eq(f.uploads[1].percent, 50, "close uploads current percent")
-    eq(f.uploads[1].chapter_uid, 33, "close uploads current chapter")
+    eq(#f.uploads, 0, "close never touches the network")
+    eq(#f.queue, 0, "close schedules nothing")
+    local pending = f.values.books.book.pending_upload_position
+    eq(pending and pending.percent, 50, "close persists the current percent")
+    eq(pending and pending.chapter_uid, 33, "close persists the current chapter")
+
+    -- The next open sends it: the cloud still holds what this device saw,
+    -- so the newer local position is kept and uploaded without a prompt.
+    f.sync:on_reader_ready()
+    f.drain()
+    eq(#f.choices, 0, "own progress does not prompt")
+    eq(#f.uploads, 1, "uploaded once after reopening")
+    eq(f.uploads[1].percent, 50, "uploads the closed position")
+    eq(f.uploads[1].chapter_uid, 33, "uploads the closed chapter")
     eq(f.values.books.book.pending_upload_position, nil,
         "successful upload clears pending snapshot")
 end)
@@ -1091,6 +1102,196 @@ test("a background upload is polled until it finishes", function()
     eq(calls, 3, "polled until the job finished")
     eq(f.sync:status().uploading, false, "upload finished")
     eq(f.notifications[#f.notifications].code, "upload_success", "result reported")
+end)
+
+test("a newer position is uploaded after the one in flight (F10)", function()
+    local f = fixture({
+        bookId = "book",
+        progress = 50,
+        chapterUid = 33,
+        chapterIdx = 3,
+        chapterOffset = 100,
+        updateTime = 10,
+    })
+    local finish_first = false
+    local sent = {}
+    f.sync.upload_position = function(_book_id, position)
+        if #sent == 0 and not finish_first then
+            return false, { error_kind = "pending" }
+        end
+        sent[#sent + 1] = position
+        return true, { accepted = true }
+    end
+    f.sync:on_reader_ready()
+    f.drain()
+    f.choices[1].keep_local()
+    eq(f.sync:status().uploading, true, "first upload in flight")
+    f.document.page = 30
+    f.sync:_upload_snapshot(assert(f.sync:capture_local()), "newer", false)
+    eq(f.values.books.book.pending_upload_position.percent, 30,
+        "newer position persisted at once")
+    finish_first = true
+    f.drain()
+    eq(#sent, 2, "both positions sent, in order")
+    eq(sent[1].percent, 25, "older one first")
+    eq(sent[2].percent, 30, "newer one after it")
+    eq(f.values.books.book.pending_upload_position, nil,
+        "pending cleared only after the newest succeeded")
+end)
+
+test("suspend stops an upload in flight and resume sends it again", function()
+    local f = fixture({
+        bookId = "book",
+        progress = 25,
+        chapterUid = 22,
+        chapterIdx = 2,
+        chapterOffset = 150,
+        updateTime = 10,
+    })
+    local polls = 0
+    local done = false
+    f.sync.upload_position = function(_book_id, position)
+        polls = polls + 1
+        if not done then return false, { error_kind = "pending" } end
+        f.uploads[#f.uploads + 1] = position
+        return true, { accepted = true }
+    end
+    f.sync:on_reader_ready()
+    f.drain()
+    f.document.page = 40
+    f.sync:on_suspend()
+    f.sync:on_resume()
+    f.step()  -- network work after resume starts the upload
+    eq(f.sync:status().uploading, true, "upload started after resume")
+    f.sync:on_suspend()
+    local before = polls
+    f.drain()
+    eq(polls, before, "no polling while suspended")
+    eq(f.sync:status().uploading, false, "chain stopped")
+    done = true
+    f.sync:on_resume()
+    f.drain()
+    eq(#f.uploads, 1, "sent once after the second resume")
+    eq(f.uploads[1].percent, 40, "the suspended position")
+end)
+
+test("resume network work waits for Wi-Fi and gives up quietly (F4)", function()
+    local online = false
+    local checks = 0
+    local f = fixture({
+        bookId = "book",
+        progress = 25,
+        chapterUid = 22,
+        chapterIdx = 2,
+        chapterOffset = 150,
+        updateTime = 10,
+    }, {
+        is_online = function()
+            checks = checks + 1
+            return online
+        end,
+    })
+    online = true
+    f.sync:on_reader_ready()
+    f.drain()
+    online = false
+    f.document.page = 40
+    f.sync:on_suspend()
+    checks = 0
+    f.sync:on_resume()
+    eq(checks, 0, "resume handler itself checks nothing")
+    local delays = {}
+    while #f.queue > 0 do
+        delays[#delays + 1] = f.queue[1].delay
+        f.step()
+    end
+    eq(table.concat(delays, ","), "5,10,20", "bounded back-off")
+    eq(#f.uploads, 0, "nothing sent while offline")
+    eq(#f.notifications, 0, "silent")
+    online = true
+    f.sync:on_suspend()
+    f.sync:on_resume()
+    f.drain()
+    eq(#f.uploads, 1, "sent after the next resume")
+end)
+
+test("automatic pulls never do a DNS check, manual ones may", function()
+    local seen = {}
+    local f = fixture({
+        bookId = "book",
+        progress = 25,
+        chapterUid = 22,
+        chapterIdx = 2,
+        chapterOffset = 150,
+        updateTime = 10,
+    }, {
+        run_online = function(_kind, callback, options)
+            seen[#seen + 1] = options
+            callback()
+            return true
+        end,
+    })
+    f.sync:on_reader_ready()
+    f.drain()
+    eq(seen[1].link_only, true, "automatic pull checks the link only")
+    f.sync:sync_now()
+    eq(seen[2].link_only, false, "manual pull keeps the full check")
+end)
+
+test("resume sends positions other books left pending", function()
+    local f = fixture({
+        bookId = "book",
+        progress = 25,
+        chapterUid = 22,
+        chapterIdx = 2,
+        chapterOffset = 150,
+        updateTime = 10,
+    })
+    f.values.books.other = {
+        book_id = "other",
+        pending_upload_position = { book_id = "other", chapter_uid = 7, percent = 12 },
+        pending_upload_baselines = { { chapter_uid = 7, chapter_offset = 1 } },
+    }
+    local ids = {}
+    f.sync.upload_position = function(book_id, position)
+        ids[#ids + 1] = book_id
+        f.uploads[#f.uploads + 1] = position
+        return true, { accepted = true }
+    end
+    f.sync:on_reader_ready()
+    f.drain()
+    eq(#f.uploads, 0, "opening another book does not scan every book")
+    f.sync:on_suspend()
+    f.sync:on_resume()
+    f.drain()
+    eq(ids[1], "other", "pending position of a closed book sent")
+    eq(f.uploads[1].guard.baselines[1].chapter_uid, 7, "with its guard baselines")
+    eq(f.values.books.other.pending_upload_position, nil, "cleared after success")
+end)
+
+test("teardown cancels timers and keeps unsent positions", function()
+    local f = fixture({
+        bookId = "book",
+        progress = 25,
+        chapterUid = 22,
+        chapterIdx = 2,
+        chapterOffset = 150,
+        updateTime = 10,
+    })
+    local unscheduled = 0
+    f.sync.scheduler.unschedule = function() unscheduled = unscheduled + 1 end
+    f.sync:on_reader_ready()
+    f.drain()
+    f.document.page = 40
+    f.sync:on_suspend()
+    f.sync:on_resume()
+    eq(#f.queue, 1, "network work scheduled")
+    f.sync:teardown("close_widget")
+    eq(unscheduled, 1, "pending timer unscheduled")
+    eq(f.values.books.book.pending_upload_position.percent, 40,
+        "in-memory position persisted for the next instance")
+    f.drain()
+    eq(#f.uploads, 0, "nothing runs after teardown")
 end)
 
 print(string.format(
