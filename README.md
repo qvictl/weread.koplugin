@@ -1,3 +1,11 @@
+> ## 关于本分支 · About this fork
+>
+> 本仓库是 [finlater/weread.koplugin](https://github.com/finlater/weread.koplugin) 的维护分支，包含针对内存受限设备（如 Kindle Oasis 3）的稳定性修复，并配套运行在 [qvictl/koreader](https://github.com/qvictl/koreader) 分支上。我们会定期合并上游更新，修复也会尽量以 PR 形式回馈上游；插件内的在线更新指向本仓库的 Release。
+>
+> **贡献规则**：欢迎任何 PR，无论由人编写还是由 AI 编写。我们以测试而非作者身份把关：每个 PR 必须附带充分的单元测试，并通过基于 KOReader 模拟器的集成测试与全部 CI 检查后才能合并。
+>
+> This is a maintained fork of finlater/weread.koplugin with stability fixes for memory-constrained devices, built to run on the qvictl/koreader fork. Upstream updates are merged regularly and fixes are offered upstream as PRs where possible. Pull requests are welcome whether written by people or by AI; every PR must include adequate unit tests and pass the emulator-based integration tests and all CI checks before merging.
+
 # WeRead KOReader Plugin
 
 > **免责声明**：本项目仅供个人学习和技术研究使用，不得用于商业用途。使用本项目所产生的一切后果（包括但不限于账号封禁、数据丢失等）由使用者自行承担，项目作者概不负责。请遵守微信读书的用户协议和相关法律法规。

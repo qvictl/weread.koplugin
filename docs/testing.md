@@ -55,16 +55,86 @@ run independently.
 
 ## 3. KOReader integration / KOReader 集成测试
 
-The integration spec uses KOReader's own Busted environment,
-`commonrequire.lua`, and real `PluginLoader`. It verifies discovery and loading
-against the pinned KOReader commit without initializing an account or making a
-WeRead request.
+The `Integration` workflow (`.github/workflows/integration.yml`) runs on every
+PR, on pushes to `main`, weekly, and on demand. Its aggregate `integration`
+job is a required status check for `main`. It has two parts.
 
-The repository includes a scheduled/manual GitHub Actions workflow named
-`KOReader integration`. It is separate from normal PR checks because building
-KOReader is comparatively expensive. The workflow runs on `ubuntu-latest`
-inside KOReader's official `koreader/kobase:1.0.0-22.04` build image, matching
-the project's Linux CI environment without installing host-specific packages.
+`Integration` 工作流在每个 PR、`main` 推送、每周定时和手动触发时运行，汇总 job
+`integration` 是 `main` 的必需检查，包含以下两部分。
+
+### 3.1 Emulator scenarios / 模拟器场景
+
+`scripts/run_emulator_scenarios.py` starts the real KOReader application
+(`reader.lua`) headless (SDL dummy video driver; `--xvfb` uses `xvfb-run`)
+once per scenario with:
+
+- a fresh, isolated `KO_HOME` (never the user's profile);
+- the candidate release package built by `scripts/package_release.sh`;
+- the test-only driver plugin `spec/emulator/wereadtest.koplugin`, which runs
+  one scenario from `spec/emulator/scenarios/` as a coroutine on the real
+  UIManager loop (`spec/emulator/harness.lua`: steps, waits, real tap
+  gestures, screenshots, metrics);
+- its own `scripts/mock_weread.py` instance; the plugin runs in its built-in
+  mock environment, so no real account, credential or WeRead/GitHub request
+  is involved.
+
+Current scenarios (`python3 scripts/run_emulator_scenarios.py --list`):
+
+| Scenario | Covers |
+| --- | --- |
+| `01_plugin_load` | real start-up, PluginLoader, namespaced modules, isolated mock environment, menu entry |
+| `02_qr_login` | logout, QR dialog + forked long poll, OTP (wrong then right code), expired QR saves nothing |
+| `03_library` | shelf sync, 26 books over 3 pages (next/previous), groups, taps before first paint, book detail and 6-chapter list |
+| `04_download` | download chapter and read; full-book download cancelled mid-way resumes without refetching completed chapters; valid EPUB |
+| `05_memory_gate` | fake `/proc/meminfo` via the downloader's injectable reader: wait-then-recover, pause with checkpoint, resume |
+| `06_network_loss` | link loss pauses (no fork busy loop, offline restart refused), server timeouts pause after 2 attempts, resume |
+| `07_reader_progress_sync` | open the EPUB, page turns, conflict dialog dismissal uploads nothing, cloud never moves backwards |
+| `08_read_report_suspend` | report timer stops on Suspend with zero network requests, re-arms on Resume and reports again |
+| `09_annotations_thoughts` | annotation sync, underline drawn, tap opens the thought popup, popup paging and close |
+| `10_updater` | updater against a mocked GitHub release: notes dialog, SHA-256 mismatch rejected, install with backup |
+| `11_budget_200_chapters` | 200-chapter download: peak RSS growth, Lua heap growth, late/early per-chapter time, packaging and total time budgets |
+
+Every scenario exits non-zero on failure. Evidence per scenario: `crash.log`
+(KOReader output), `requests.jsonl` (mock requests), `result.json` (steps,
+timings, metrics), screenshots; plus `summary.md` / `summary.json`. CI uploads
+them as `emulator-evidence-shard-*` artifacts and shows the summary table on
+the run page.
+
+KOReader build: `scripts/fetch_koreader_emulator.sh` prefers the
+`qvictl/koreader` fork's rolling emulator build (release `nightly`, asset
+`koreader-emulator-x86_64-latest.tar.xz`), the KOReader the owner's Kindle
+runs. If that asset is missing or cannot load the plugin, it falls back to the
+official `koreader-linux-x86_64-v2026.07.1.tar.xz`, so the switch happens
+automatically once the fork publishes the asset. `workflow_dispatch` can force
+`fork` or `official`.
+
+Run locally (any Linux x86_64 machine; macOS: use a Linux VM or container):
+
+```bash
+bash scripts/fetch_koreader_emulator.sh /tmp/koreader          # prints runtime=...
+python3 scripts/run_emulator_scenarios.py --list
+python3 scripts/run_emulator_scenarios.py --koreader /tmp/koreader/official/extract/lib/koreader \
+    --out /tmp/weread-emulator [--scenario 04_download]
+```
+
+Writing a scenario: add `spec/emulator/scenarios/NN_name.lua` returning
+`function(H) ... end` with `-- @title` and `-- @timeout` header lines. Drive
+the plugin through `H.call` / `H.tap_text` (UI-loop context, like a user
+event), assert with `H.check` / `H.wait_until`, record budgets with
+`H.metric`. Extend `scripts/mock_weread.py` (and its contract test
+`scripts/test_mock_weread.py`) instead of stubbing plugin code.
+
+新增场景：在 `spec/emulator/scenarios/` 添加返回 `function(H)` 的 Lua 文件，通过
+`H.call`/`H.tap_text` 在 UI 循环中操作插件，用 `H.check`/`H.wait_until` 断言。需要新
+接口时扩展 mock 服务及其契约测试，不要替换被测插件代码。
+
+### 3.2 PluginLoader at the pinned KOReader commit / 固定版本 PluginLoader
+
+The `plugin-loader` job uses KOReader's own Busted environment,
+`commonrequire.lua`, and real `PluginLoader`. It verifies discovery and
+loading against the pinned KOReader commit without initializing an account or
+making a WeRead request. It runs inside KOReader's official
+`koreader/kobase:1.0.0-22.04` build image; the KOReader build is cached.
 
 To run it locally:
 
@@ -86,8 +156,32 @@ existing plugin or spec.
 When updating the pinned KOReader commit, update all three locations together:
 
 - `scripts/run_koreader_integration.sh`;
-- `.github/workflows/koreader-integration.yml`;
+- `.github/workflows/integration.yml`;
 - this document.
+
+## 4. PR policy and diff coverage / PR 测试策略与增量覆盖率
+
+The `PR policy` workflow's `tests-policy` job is a required check:
+
+- a PR that changes Lua code in `main.lua`, `weread/` or `integrations/` must
+  also change something under `spec/` (unit specs, KOReader specs or emulator
+  scenarios), unless a maintainer adds the `no-tests-needed` label
+  (`upstream-sync` PRs are exempt as well) - `scripts/check_test_policy.py`;
+- the changed Lua lines must be at least 70% covered by the unit specs under
+  LuaCov (`scripts/run_lua_coverage.sh`, `scripts/coverage_tools.py diff`).
+  The per-file table with missed line numbers is posted to the job summary
+  and as a sticky PR comment.
+
+Locally (LuaCov from luarocks, or a checkout on `LUA_PATH`):
+
+```bash
+bash scripts/run_lua_coverage.sh
+python3 scripts/coverage_tools.py diff coverage/luacov.report.out --base origin/main
+```
+
+修改 `main.lua`、`weread/`、`integrations/` 中 Lua 代码的 PR 必须同时修改 `spec/`
+下的测试（单元测试或模拟器场景），否则需维护者添加 `no-tests-needed` 标签；改动行在单元
+测试下的覆盖率需达到 70%。
 
 ## Updater simulator regression / 更新弹窗模拟器回归
 

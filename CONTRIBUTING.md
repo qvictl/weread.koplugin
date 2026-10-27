@@ -4,6 +4,47 @@ Thanks for your interest in WeRead KOReader Plugin.
 
 感谢你愿意参与 WeRead KOReader Plugin。为了让 issue 和 PR 更容易被处理，请遵循下面的规则。
 
+## This fork / 关于本分支
+
+`qvictl/weread.koplugin` is a maintained fork of
+[finlater/weread.koplugin](https://github.com/finlater/weread.koplugin) with
+stability fixes for memory-constrained devices. Branches:
+
+- `main` - this fork's release line (default branch, protected). Releases and
+  the in-app updater come from here.
+- `upstream` - a read-only mirror of `finlater/main`, fast-forwarded weekly by
+  the *Upstream sync* workflow, which also opens a `sync/upstream-<date>` PR
+  into `main` (or an "Upstream sync conflict" issue).
+
+Pull requests are welcome whether written by people or by AI. We gate on
+tests, not on who wrote the code. A PR can be merged only when all required
+checks pass:
+
+- `ci` - Lua lint (luacheck), namespace policy, unit/component specs, Python
+  scripts, mock-service contract, package and changelog checks, secret scan;
+- `integration` - the plugin running inside a real headless KOReader
+  emulator against the local mock WeRead service
+  (`spec/emulator/scenarios/`), plus the pinned KOReader PluginLoader test;
+- `tests-policy` - Lua code changes under `main.lua`, `weread/` or
+  `integrations/` must come with changes under `spec/` (unit specs and/or
+  emulator scenarios), and at least 70% of the changed Lua lines must be
+  covered by the unit specs. Only a maintainer can waive the test rule with
+  the `no-tests-needed` label (for example pure logging or comment changes).
+
+Bug fixes need a regression test that fails without the fix. Changes to user
+flows (downloads, login, library, reader, sync, updater) should extend or add
+an emulator scenario. See [docs/testing.md](docs/testing.md).
+
+本仓库是 finlater/weread.koplugin 的维护分支：`main` 为本分支发布线（默认、受保护），
+`upstream` 为上游 `finlater/main` 的只读镜像，每周自动同步并向 `main` 发起合并 PR。
+
+欢迎任何 PR，无论由人还是由 AI 编写；我们以测试而非作者身份把关。合并前必须通过
+`ci`、`integration`（真实 KOReader 模拟器 + 本地 mock 服务的集成场景，以及固定版本
+PluginLoader 测试）和 `tests-policy`（修改 Lua 代码必须同时修改 `spec/` 下的测试，且改动
+行单元测试覆盖率不低于 70%；仅维护者可用 `no-tests-needed` 标签豁免）。Bug 修复需附带
+修复前会失败的回归测试；涉及下载、登录、书架、阅读、同步、更新等流程的改动应补充模拟器
+场景。
+
 ## Issues / 提交 Issue
 
 Before opening an issue, please search existing issues and read the README first.
@@ -156,22 +197,34 @@ Before submitting a PR, run the relevant checks if possible:
 
 ```bash
 bash scripts/run_lua_specs.sh
-bash scripts/check_lua_namespace.sh
-luacheck main.lua _meta.lua weread spec
+bash scripts/check_lua_namespace.sh        # needs a PCRE2-enabled ripgrep
+luacheck main.lua _meta.lua weread integrations spec
 python3 -m py_compile scripts/*.py
+python3 scripts/test_mock_weread.py
 bash scripts/package_release.sh /tmp/weread.koplugin-release-test.zip
-rg -n -P "wrk-(?!x{8,})[A-Za-z0-9_-]{12,}|(wr_skey|wr_rt|wr_vid|ptcz)=((?!XXX)[^;[:space:]'\''\"]{8,})|x-wrpa-[0-9]+:\s*((?!\.\.\.)[A-Za-z0-9+/=_-]{12,})|thirdwx[=:]\s*[A-Za-z0-9_-]{8,}" . --glob '!cache/**' --glob '!*.epub'
+bash scripts/check_secrets.sh              # needs a PCRE2-enabled ripgrep
+# Linux x86_64: the emulator scenarios CI runs as the `integration` check
+bash scripts/fetch_koreader_emulator.sh /tmp/koreader
+python3 scripts/run_emulator_scenarios.py --koreader /tmp/koreader --out /tmp/weread-emulator
+# diff coverage (LuaCov) as reported by `tests-policy`
+bash scripts/run_lua_coverage.sh && python3 scripts/coverage_tools.py diff coverage/luacov.report.out --base origin/main
 ```
 
 提交 PR 前，如果可以，请运行相关检查：
 
 ```bash
 bash scripts/run_lua_specs.sh
-bash scripts/check_lua_namespace.sh
-luacheck main.lua _meta.lua weread spec
+bash scripts/check_lua_namespace.sh        # needs a PCRE2-enabled ripgrep
+luacheck main.lua _meta.lua weread integrations spec
 python3 -m py_compile scripts/*.py
+python3 scripts/test_mock_weread.py
 bash scripts/package_release.sh /tmp/weread.koplugin-release-test.zip
-rg -n -P "wrk-(?!x{8,})[A-Za-z0-9_-]{12,}|(wr_skey|wr_rt|wr_vid|ptcz)=((?!XXX)[^;[:space:]'\''\"]{8,})|x-wrpa-[0-9]+:\s*((?!\.\.\.)[A-Za-z0-9+/=_-]{12,})|thirdwx[=:]\s*[A-Za-z0-9_-]{8,}" . --glob '!cache/**' --glob '!*.epub'
+bash scripts/check_secrets.sh              # needs a PCRE2-enabled ripgrep
+# Linux x86_64: the emulator scenarios CI runs as the `integration` check
+bash scripts/fetch_koreader_emulator.sh /tmp/koreader
+python3 scripts/run_emulator_scenarios.py --koreader /tmp/koreader --out /tmp/weread-emulator
+# diff coverage (LuaCov) as reported by `tests-policy`
+bash scripts/run_lua_coverage.sh && python3 scripts/coverage_tools.py diff coverage/luacov.report.out --base origin/main
 ```
 
 See [docs/testing.md](docs/testing.md) for the test layers, required regression
