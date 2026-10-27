@@ -273,12 +273,17 @@ function Chapters.map(document, catalog, descriptor, overrides)
         end
         stack[#stack + 1] = i
     end
-    local doc_end = Chapters.documentEnd(document)
+    -- Walking to the last visible word costs up to 10000 CREngine calls on
+    -- the UI thread; only a chapter that runs to the end of the book needs it.
+    local doc_end, doc_end_known
     for i, match in ipairs(matched) do
         local entry = toc[match.index]
         local stop = stops[match.index]
         local next_match = matched[i + 1]
         if next_match and (not stop or next_match.index < stop) then stop = next_match.index end
+        if not stop and not doc_end_known then
+            doc_end, doc_end_known = Chapters.documentEnd(document), true
+        end
         ranges[Chapters.uid(match.chapter)] = {
             start_xpointer = entry.xpointer, end_xpointer = stop and toc[stop].xpointer or doc_end,
             title = entry.title, toc_index = match.index,

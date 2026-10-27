@@ -38,6 +38,14 @@ helper.legacy_checkpoints["old.epub"] = { book_id = "book", started_at = 1, chap
     { chapter_uid = "2", complete = false, underlines = {}, review_batches = {
         { batch_index = 1, reviews = { "saved" } } } },
 } }
+local import_writes, real_write = 0, store.write
+store.write = function(...) import_writes = import_writes + 1; return real_write(...) end
+helper.legacy_entries["old.epub"].records = {
+    { chapter_uid = "2", pos0 = "a" }, { chapter_uid = "3", pos0 = "b" } }
+store:importLegacy("book", "old.epub", "old-key")
+store.write = nil
+assert(import_writes == 1, "legacy import used " .. import_writes .. " write transactions")
+assert(#store:get("book", "projection", "old-key:3").records == 1, "legacy projection not imported")
 store:importLegacy("book", "old.epub", "old-key")
 assert(store:get("book", "source", "1").revision == "b", "migration overwrote newer shared source")
 assert(store:get("book", "download", "2").next_batch == 2)

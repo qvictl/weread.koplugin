@@ -94,4 +94,23 @@ local _, replaced = Chapters.map(partial_doc, catalog, descriptor, { ["0"] = "12
 assert(replaced["12"].start_xpointer == "0" and not replaced["9"] and replaced["15"],
     "manual choice outside a generated partial EPUB descriptor was lost")
 assert(descriptor.chapters[1] == catalog[1], "annotation mapping modified the download/progress descriptor")
+-- The document end is a walk of up to 10000 CREngine calls on the UI thread:
+-- only compute it when a mapped chapter actually runs to the end of the book.
+local end_walks = 0
+local walked_doc = {
+    getToc = function() return toc end,
+    getPageCount = function() return 9 end,
+    getPageXPointer = function() return "90" end,
+    getNextVisibleWordEnd = function(_self, xp)
+        end_walks = end_walks + 1
+        return xp == "90" and "99" or xp
+    end,
+}
+Chapters.map(walked_doc, { catalog[1] })
+assert(end_walks == 0, "document end was walked although no chapter ends there")
+Chapters.map(walked_doc, { { chapterUid = "77", title = "Unmatched" } })
+assert(end_walks == 0, "document end was walked although no chapter matched")
+local _, to_end = Chapters.map(walked_doc, catalog)
+assert(end_walks == 2 and to_end["15"].end_xpointer == "99",
+    "last chapter did not end at the document end")
 print("annotation_chapters_spec: nested TOC, UTF-8 titles and noncontiguous selections passed")
