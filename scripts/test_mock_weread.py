@@ -125,6 +125,10 @@ class MockTests(unittest.TestCase):
         self.assertEqual(release["tag_name"], "v9999.9.1")
         url = release["assets"][0]["browser_download_url"]
         self.assertEqual(self.request(url[len(self.base):])[1], b"PK")
+        self.assertEqual(self.request("/github/download/v9999.9.1/weread.koplugin-v9999.9.1.zip.sha256.corrupt")[0], 404)
+        self.server.github_release["files"]["weread.koplugin-v9999.9.1.zip.sha256"] = b"ab  x.zip\n"
+        status, corrupt = self.request("/github/download/v9999.9.1/weread.koplugin-v9999.9.1.zip.sha256.corrupt")
+        self.assertEqual((status, corrupt), (200, b"0" * 64 + b"  weread.koplugin-v9999.9.1.zip\n"))
         self.server.github_release = None
 
     def test_unknown_routes_and_malformed_control_fail(self):

@@ -278,6 +278,11 @@ class MockServer(ThreadingHTTPServer):
         prefix = f"/github/download/{tag}/"
         if path.startswith(prefix) and path[len(prefix):] in release["files"]:
             return 200, release["files"][path[len(prefix):]]
+        # Test-only: "<asset>.sha256.corrupt" is a well-formed checksum file
+        # with a wrong digest (updater SHA-256 enforcement). Not an asset.
+        name = path[len(prefix):-len(".corrupt")] if path.endswith(".sha256.corrupt") else ""
+        if path.startswith(prefix) and name in release["files"]:
+            return 200, "0" * 64 + "  " + name[:-len(".sha256")] + "\n"
         return 404, dict(message="Not Found")
 
     def set_progress(self, data):

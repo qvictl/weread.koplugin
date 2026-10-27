@@ -258,8 +258,15 @@ def main() -> int:
     if args.scenario:
         scenarios = [s for s in scenarios if any(s.stem.startswith(prefix) for prefix in args.scenario)]
     if args.shard:
+        # Longest-first onto the least-loaded shard, weighted by @timeout.
         index, count = (int(part) for part in args.shard.split("/"))
-        scenarios = [s for position, s in enumerate(scenarios) if position % count == index - 1]
+        loads = [0] * count
+        assigned = {}
+        for scenario in sorted(scenarios, key=lambda s: (-parse_meta(s)["timeout"], s.stem)):
+            target = loads.index(min(loads))
+            loads[target] += parse_meta(scenario)["timeout"]
+            assigned[scenario] = target
+        scenarios = [s for s in scenarios if assigned[s] == index - 1]
     if args.list:
         for scenario in scenarios:
             print(scenario.stem, "-", parse_meta(scenario)["title"])

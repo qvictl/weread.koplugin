@@ -338,8 +338,7 @@ end
 --- Taps the painted element showing needle; waits for it first.
 function H.tap_text(needle, timeout)
     local target = H.wait_until("text '" .. needle .. "' painted", function()
-        local _hit, painted = H.find_text(needle)
-        return painted
+        return (select(2, H.find_text(needle)))
     end, timeout or 15)
     local x, y = center(target.dimen)
     H.log("tap", needle, "@", x, y)
@@ -394,7 +393,7 @@ local function http_request(method, path, body)
     -- A direct connection to the local mock; never a global proxy.
     local old_proxy = http.PROXY
     http.PROXY = nil
-    local _ok, code = http.request(req)
+    local code = select(2, http.request(req))
     http.PROXY = old_proxy
     local text = table.concat(chunks)
     local decoded
