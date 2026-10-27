@@ -704,6 +704,15 @@ function M:onUnifiedAnnotationsReady()
     started = perf("context_total", started, "ok=", ok, "available=", ok and context ~= nil)
     if not ok then logger.warn("annotation context:", context); return end
     if not context then return end
+    -- Runs unprotected from onReaderReady: a busy or broken annotation
+    -- database must leave the book readable instead of crashing its open.
+    local ready_ok, ready_err = xpcall(self._activateAnnotationContext, debug.traceback,
+        self, context, started)
+    if not ready_ok then logger.warn("annotation display state:", tostring(ready_err)) end
+end
+
+function M:_activateAnnotationContext(context, started)
+    local perf = PluginUtil.reader_open_perf
     -- Recover partial chapter selections created by older builds that wrote a
     -- projection but waited for the whole document before marking it usable.
     -- Only write when the flag is missing: a write transaction per book open
