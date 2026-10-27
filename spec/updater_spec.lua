@@ -238,6 +238,68 @@ expect(request_count == 1,
 expect(io.open(download_path, "rb") == nil,
     "oversized partial download should be removed")
 
+-- The package checksum is computed chunk by chunk through ffi/sha2 instead of
+-- reading the whole archive into memory.
+local Crypto = require("weread.lib.crypto")
+local sha_chunks = {}
+package.loaded["ffi/sha2"] = {
+    sha256 = function(message)
+        assert(message == nil, "package hash must use the chunked API")
+        local parts = {}
+        local function append(chunk)
+            if chunk == nil then return Crypto.sha256_hex(table.concat(parts)):upper() end
+            sha_chunks[#sha_chunks + 1] = #chunk
+            parts[#parts + 1] = chunk
+            return append
+        end
+        return append
+    end,
+}
+package.loaded["ffi/archiver"] = {
+    Reader = {
+        new = function()
+            return { open = function() return false end, close = function() end,
+                err = "fixture archive not opened" }
+        end,
+    },
+}
+local install_root = os.tmpname() .. "-weread-install"
+os.remove(install_root)
+os.execute("mkdir -p '" .. install_root .. "/weread.koplugin'")
+local package_body = string.rep("weread", 30000)
+local install_updater = Updater:new{
+    settings = { data_dir = install_root, get = function() return update_state end },
+    current_version = "0.6.0",
+    plugin_dir = install_root .. "/weread.koplugin",
+}
+package.loaded["util"] = {
+    makePath = function(path) return os.execute("mkdir -p '" .. path .. "'") == 0 or true end,
+}
+local checksum_text = Crypto.sha256_hex(package_body)
+function install_updater:_http_get_with_mirrors(url, destination)
+    local file = assert(io.open(destination, "wb"))
+    file:write(url == "checksum" and (checksum_text .. "  plugin.zip\n") or package_body)
+    file:close()
+    return true
+end
+local install_ok, install_err = install_updater:install_release{
+    archive_url = "archive", checksum_url = "checksum", version = "0.7.0",
+}
+expect(not install_ok and install_err == "fixture archive not opened",
+    "a matching checksum should pass verification: " .. tostring(install_err))
+expect(#sha_chunks > 1 and sha_chunks[1] == 64 * 1024,
+    "the package was not hashed in 64 KiB chunks")
+checksum_text = string.rep("0", 64)
+install_ok, install_err = install_updater:install_release{
+    archive_url = "archive", checksum_url = "checksum", version = "0.7.0",
+}
+expect(not install_ok and install_err == "SHA-256 verification failed",
+    "a mismatching checksum must be rejected")
+package.loaded["ffi/sha2"] = nil
+package.loaded["ffi/archiver"] = nil
+
+os.execute("rm -rf '" .. install_root .. "'")
+
 local updater_source = assert(io.open("weread/lib/updater.lua", "r")):read("*a")
 expect(updater_source:find('require("ui/', 1, true) == nil,
     "core updater must not import UI modules")
