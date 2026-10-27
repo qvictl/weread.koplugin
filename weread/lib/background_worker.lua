@@ -6,6 +6,7 @@
 local FFIUtil = require("ffi/util")
 local UIManager = require("ui/uimanager")
 local lfs = require("libs/libkoreader-lfs")
+local MemoryGate = require("weread.lib.memory_gate")
 
 local ok_json, Json = pcall(require, "json")
 if not ok_json then Json = require("rapidjson") end
@@ -47,16 +48,7 @@ local function ensure_dir(path)
     return lfs.mkdir(path)
 end
 
-local function available_memory_kb(raw)
-    local values = {}
-    for key, value in tostring(raw or ""):gmatch("([%a_]+):%s*(%d+)%s*kB") do
-        values[key] = tonumber(value)
-    end
-    if values.MemAvailable then return values.MemAvailable end
-    if values.MemFree then
-        return values.MemFree + (values.Buffers or 0) + (values.Cached or 0)
-    end
-end
+local available_memory_kb = MemoryGate.parse_available_kb
 
 local function memory_error(value)
     local text = tostring(value or ""):lower()

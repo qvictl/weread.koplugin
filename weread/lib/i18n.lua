@@ -339,6 +339,7 @@ local zh = {
     ["Next chapter prefetch failed: %1"] = "下一章预下载失败：%1",
     ["Network is not connected"] = "网络未连接",
     ["Not enough free memory; prefetch skipped"] = "可用内存不足，已跳过本次预下载",
+    ["Not enough free memory to continue the download"] = "可用内存不足，下载已暂停，稍后可继续",
     ["Background prefetch is unavailable"] = "当前设备不支持后台预下载",
     ["Background prefetch timed out"] = "后台预下载超时",
     ["No chapters were downloaded."] = "没有成功下载任何章节。",

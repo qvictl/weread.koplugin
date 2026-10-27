@@ -21,6 +21,7 @@ local Content = require("weread.lib.content")
 local DownloadDialog = require("weread.ui.download_dialog")
 local Footnotes = require("weread.lib.footnotes")
 local I18n = require("weread.lib.i18n")
+local MemoryGate = require("weread.lib.memory_gate")
 local StandbyGuard = require("weread.lib.standby_guard")
 local WeRead = require("weread.lib.protocol")
 local WorkerSettings = require("weread.lib.worker_settings")
@@ -66,6 +67,16 @@ end
 local Downloader = {}
 Downloader.__index = Downloader
 local RESUME_SKIP_BATCH_SIZE = 25
+-- Before each worker fork, wait up to MEMORY_WAIT_ATTEMPTS * MEMORY_WAIT_SECONDS
+-- for memory to free up, then stop the job (a full-book download keeps its
+-- checkpoint and can be resumed) instead of forking into a thrash.
+local MEMORY_WAIT_SECONDS = 10
+local MEMORY_WAIT_ATTEMPTS = 12
+local LOW_MEMORY_ERROR = "Not enough free memory to continue the download"
+
+local function is_low_memory_error(err)
+    return tostring(err):find(_(LOW_MEMORY_ERROR), 1, true) ~= nil
+end
 
 -- o = {
 --   client, settings,                       -- injected dependencies
@@ -77,6 +88,10 @@ local RESUME_SKIP_BATCH_SIZE = 25
 -- }
 function Downloader:new(o)
     o = o or {}
+    -- function() -> ok, available_kb; checked before every worker fork.
+    o.memory_gate = o.memory_gate or function()
+        return MemoryGate.check(MemoryGate.DEFAULT_MIN_AVAILABLE_KB)
+    end
     setmetatable(o, self)
     return o
 end
@@ -454,9 +469,30 @@ end
 
 -- Only network-heavy work runs in the child; checkpoints, settings and UI stay
 -- in the parent. Reuse KOReader's pipe transport and cancellation/reaping.
+-- Runs inside the Trapper coroutine: sleeping yields back to the UI loop.
+function Downloader:_waitForMemory(dl)
+    local ok, available = self.memory_gate()
+    local attempts = 0
+    local co = coroutine.running()
+    while not ok and co and attempts < MEMORY_WAIT_ATTEMPTS and not dl.cancelled do
+        attempts = attempts + 1
+        logger.warn("download waiting for free memory:",
+            "available_kb=", tostring(available),
+            "attempt=", tostring(attempts) .. "/" .. tostring(MEMORY_WAIT_ATTEMPTS))
+        UIManager:scheduleIn(MEMORY_WAIT_SECONDS, function() coroutine.resume(co) end)
+        coroutine.yield()
+        ok, available = self.memory_gate()
+    end
+    if not ok and not dl.cancelled then
+        error(_(LOW_MEMORY_ERROR) .. " (" .. tostring(available) .. " kB)", 0)
+    end
+end
+
 function Downloader:_runInterruptible(dl, task)
     if dl.cancelled then return nil end
     if not dl.trapper then return task() end
+    self:_waitForMemory(dl)
+    if dl.cancelled then return nil end
     local dialog = dl.progress_dialog
     local fingerprint = WorkerSettings.fingerprint(self.settings)
     local completed, result = dl.trapper:dismissableRunInSubprocess(function()
@@ -739,6 +775,7 @@ function Downloader:_perf(dl, stage, started, ...)
 end
 
 function Downloader:_failChapter(dl, err)
+    if is_low_memory_error(err) then error(err, 0) end
     local chapter = dl.chapters[dl.index]
     local uid = tostring(chapter and chapter.chapterUid or dl.index)
     table.insert(dl.failed, uid)
@@ -780,6 +817,9 @@ function Downloader:_skipCompletedChapterBatch(dl)
 end
 
 function Downloader:_retryChapterSource(dl, err)
+    -- Not a chapter problem: stop the job (see _scheduleGuarded), so no chapter
+    -- is skipped and a full-book download keeps its checkpoint.
+    if is_low_memory_error(err) then error(err, 0) end
     local chapter = dl.chapters[dl.index]
     local uid = tostring(chapter and chapter.chapterUid or dl.index)
     dl.chapter_source_retries = dl.chapter_source_retries or {}
