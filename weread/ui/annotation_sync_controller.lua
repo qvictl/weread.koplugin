@@ -118,7 +118,11 @@ function M:_usesUnifiedAnnotations()
     return active
 end
 
-function M:_prepareAnnotationContext(online, refresh_catalog)
+-- options.defer_network: return nil, remote instead of fetching the catalog
+-- on the UI thread (see _withAnnotationContext); options.catalog: a catalog
+-- fetched by that subprocess.
+function M:_prepareAnnotationContext(online, refresh_catalog, options)
+    options = options or {}
     local path = file(self)
     if not path or not self:_xpointerOverlayPrototypeAvailable() then return nil end
     local perf = PluginUtil.reader_open_perf
@@ -137,11 +141,16 @@ function M:_prepareAnnotationContext(online, refresh_catalog)
     local book = library_book(self, book_id)
     local descriptor = binding.automatic and Chapters.descriptor(book, path)
     local catalog = store:get(book_id, "meta", "catalog") or book and book.chapters
-    if online and (not catalog or refresh_catalog) then
+    local fetched = options.catalog
+    if not fetched and online and (not catalog or refresh_catalog) then
         local remote = { bookId = book_id, book_id = book_id, title = binding.title,
             author = binding.author, format = binding.format }
+        if options.defer_network then return nil, remote end
         Content.ensure_reader_state(self.client, remote)
-        catalog = Content.fetch_catalog(self.client, remote)
+        fetched = Content.fetch_catalog(self.client, remote)
+    end
+    if fetched then
+        catalog = fetched
         assert(type(catalog) == "table" and #catalog > 0, _("No chapter catalog available."))
         store:put(book_id, "meta", "catalog", catalog)
         if refresh_catalog then store:put(book_id, "meta", "prune_catalog", catalog) end
@@ -641,14 +650,82 @@ function M:_runAnnotationJob(context, options)
     UIManager:scheduleIn(0.1, safe_step)
 end
 
+local function display_error(err)
+    if PluginUtil.display_error then return PluginUtil.display_error(err) end
+    return tostring(err):match("^[^\r\n]+") or tostring(err)
+end
+
+-- Short user-triggered requests (book search, chapter catalog) run in a
+-- dismissable subprocess, like chapter downloads: blocking HTTP on the UI
+-- thread freezes taps and repaints for the whole request. on_success runs in
+-- the parent with the task's result; failures are reported with error_label.
+-- Falls back to an in-process call where KOReader cannot fork.
+function M:_runAnnotationRequest(busy_text, error_label, task, on_success)
+    local function report(err)
+        logger.warn("annotation request failed:", tostring(error_label), tostring(err))
+        self:showInfo(T(_("%1 failed:\n%2"), error_label, display_error(err)))
+    end
+    local function deliver(value)
+        local ok, err = xpcall(on_success, debug.traceback, value)
+        if not ok then report(err) end
+    end
+    local ok_ffi, ffiutil = pcall(require, "ffi/util")
+    local ok_trapper, Trapper = pcall(require, "ui/trapper")
+    if not (ok_ffi and type(ffiutil) == "table" and type(ffiutil.runInSubProcess) == "function"
+        and ok_trapper and Trapper) then
+        local ok, value = xpcall(task, debug.traceback)
+        if not ok then return report(value) end
+        return deliver(value)
+    end
+    local ok_json, Json = pcall(require, "json")
+    if not ok_json then Json = require("rapidjson") end
+    local WorkerSettings = require("weread.lib.worker_settings")
+    Trapper:wrap(function()
+        local fingerprint = WorkerSettings.fingerprint(self.settings)
+        local completed, encoded = Trapper:dismissableRunInSubprocess(function()
+            local auth_result = WorkerSettings.capture(self.settings)
+            local ok, value = xpcall(task, debug.traceback)
+            return Json.encode({ ok = ok, value = value, auth = auth_result() })
+        end, busy_text, true)
+        if not completed then
+            -- Dismissed by the user (the child was killed), or fork failed.
+            if encoded ~= nil then report(encoded) end
+            return
+        end
+        local decoded, result = pcall(Json.decode, encoded or "")
+        if not decoded or type(result) ~= "table" then
+            return report("no result from the request subprocess")
+        end
+        if result.auth then WorkerSettings.merge(self.settings, fingerprint, result.auth) end
+        if not result.ok then return report(result.value) end
+        deliver(result.value)
+    end)
+end
+
+-- Prepare the annotation context; when the chapter catalog must be fetched,
+-- do it in a subprocess and continue in the parent once it arrives. Results
+-- for a document or reader session that is no longer open are dropped.
+function M:_withAnnotationContext(error_label, online, refresh_catalog, callback)
+    local context, remote = self:_prepareAnnotationContext(online, refresh_catalog,
+        { defer_network = true })
+    if not remote then return callback(context) end
+    local path, session, client = file(self), self._reader_session_gen, self.client
+    return self:_runAnnotationRequest(_("Loading WeRead chapter list…"), error_label, function()
+        Content.ensure_reader_state(client, remote)
+        return Content.fetch_catalog(client, remote)
+    end, function(catalog)
+        if session ~= self._reader_session_gen or file(self) ~= path then return end
+        callback(self:_prepareAnnotationContext(online, refresh_catalog, { catalog = catalog }))
+    end)
+end
+
 function M:startUnifiedAnnotationSync(options)
     options = options or {}
     if not self:_annotationBinding() then self:bindExternalAnnotationsBook(); return end
     if not self:_xpointerOverlayPrototypeAvailable() then
         self:showInfo(_("Annotation matching requires a reflowable document.")); return
     end
-    local function start()
-        local context = self:_prepareAnnotationContext(not options.offline, options.refresh)
+    local function run(context)
         if not context or #context.chapters == 0 then
             self:showInfo(_("No matching chapters found. Check the bound book and local chapter titles."))
             return
@@ -661,6 +738,10 @@ function M:startUnifiedAnnotationSync(options)
         self.settings:flush()
         if self._xpointer_overlay then self._xpointer_overlay:setEnabled(true) end
         self:_runAnnotationJob(context, options)
+    end
+    local function start()
+        return self:_withAnnotationContext(_("Sync underlines and thoughts"),
+            not options.offline, options.refresh, run)
     end
     if options.offline then return start() end
     if not self:requireLogin(true, true) then return end
@@ -897,8 +978,7 @@ end
 
 function M:chooseAnnotationChapters()
     if not self:_annotationBinding() then return self:bindExternalAnnotationsBook() end
-    local function show()
-        local context = self:_prepareAnnotationContext(self:isNetworkConnected())
+    local function show_picker(context)
         if not context or not context.catalog or #context.catalog == 0 then
             self:showInfo(_("No chapter catalog available.")); return
         end
@@ -916,6 +996,10 @@ function M:chooseAnnotationChapters()
                 self:startUnifiedAnnotationSync({ chapters = chapters, clear_existing = true })
             end,
         }
+    end
+    local function show()
+        return self:_withAnnotationContext(_("Loading chapter list..."),
+            self:isNetworkConnected(), false, show_picker)
     end
     local context = self:_prepareAnnotationContext(false)
     if context and context.catalog and #context.catalog > 0 then return show() end
