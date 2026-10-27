@@ -75,4 +75,16 @@ assert(turned and loaded() == "19,20,21", "busy database crashed the page turn o
 context.store.get = real_get
 host:onPageUpdate()
 assert(loaded() == "29,30,31", "underlines were not reloaded once the database was readable")
+-- Only projections produced by locate() are known to be in document order;
+-- legacy imports must use the overlay's linear scan.
+assert(host._xpointer_overlay.records_ordered == true, "located projections lost the ordered index")
+context.store.get = function(_, _, _, uid)
+    return { legacy = uid == "30", records = { { chapter_uid = uid, pos0 = tonumber(uid) * 10,
+        pos1 = tonumber(uid) * 10 + 1 } } }
+end
+context.generation = (context.generation or 0) + 1
+page = 301
+host:onPageUpdate()
+assert(loaded() == "29,30,31" and host._xpointer_overlay.records_ordered == false,
+    "a legacy projection used the ordered early-exit scan")
 print("annotation_page_events_spec: page/scroll/jump/cache and 5000-chapter CPU bounds passed")

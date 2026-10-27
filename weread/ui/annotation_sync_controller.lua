@@ -310,7 +310,7 @@ function M:_refreshAnnotationOverlay()
     end
     local window = tostring(active) .. ":" .. tostring(last) .. ":" .. tostring(context.generation or 0)
     if overlay._annotation_window == window then return end
-    local records = {}
+    local records, ordered = {}, true
     for index = math.max(1, active - 1), math.min(#context.chapters, last + 1) do
         local uid = Chapters.uid(context.chapters[index])
         local key = context.store:projectionKey(context.document_key, uid)
@@ -322,14 +322,19 @@ function M:_refreshAnnotationOverlay()
             logger.warn("annotation projection read failed:", tostring(projection))
             return
         end
+        -- Records imported from the old per-file database carry no
+        -- ordering guarantee.
+        if projection and projection.legacy then ordered = false end
         for _, record in ipairs(projection and projection.records or {}) do
             records[#records + 1] = record
         end
     end
     -- locate() emits projections in document order.  Tell the overlay so it
     -- can use its ordered interval index instead of rescanning every record on
-    -- each page turn. Legacy records keep the conservative linear fallback.
-    overlay:setRecords(records, true)
+    -- each page turn. Legacy records keep the conservative linear fallback:
+    -- the ordered scan stops at the first record past the page, which would
+    -- skip an out-of-order underline further down the list.
+    overlay:setRecords(records, ordered)
     overlay._annotation_window = window
 end
 
