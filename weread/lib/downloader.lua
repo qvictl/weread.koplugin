@@ -67,15 +67,20 @@ end
 local Downloader = {}
 Downloader.__index = Downloader
 local RESUME_SKIP_BATCH_SIZE = 25
--- Before each worker fork, wait up to MEMORY_WAIT_ATTEMPTS * MEMORY_WAIT_SECONDS
--- for memory to free up, then stop the job (a full-book download keeps its
--- checkpoint and can be resumed) instead of forking into a thrash.
-local MEMORY_WAIT_SECONDS = 10
-local MEMORY_WAIT_ATTEMPTS = 12
-local LOW_MEMORY_ERROR = "Not enough free memory to continue the download"
+-- Before each worker fork, wait (with backoff, yielding to the UI) for memory
+-- to free up, then stop the job instead of forking into a thrash. A full-book
+-- download keeps its checkpoint and can be resumed. Waiting is not a chapter
+-- failure. Total wait: about 2 minutes.
+local MEMORY_WAIT_SCHEDULE = { 10, 15, 20, 25, 30, 30 }
+-- Machine-readable marker; never shown to the user.
+local LOW_MEMORY_ERROR = "weread_low_memory"
 
 local function is_low_memory_error(err)
-    return tostring(err):find(_(LOW_MEMORY_ERROR), 1, true) ~= nil
+    return tostring(err):find(LOW_MEMORY_ERROR, 1, true) ~= nil
+end
+
+local function kb_to_mb(kb)
+    return tostring(math.floor((tonumber(kb) or 0) / 1024 + 0.5))
 end
 
 -- o = {
@@ -85,15 +90,30 @@ end
 --   open_file(path), safe_callback(label, fn),
 --   require_login(cookie, api_key), run_online_task(label, fn),
 --   background_worker,                         -- host framework
+--   read_meminfo(), read_self_status(),        -- optional, for specs
 -- }
 function Downloader:new(o)
     o = o or {}
-    -- function() -> ok, available_kb; checked before every worker fork.
+    -- function() -> ok, available_kb, required_kb; checked before every
+    -- worker fork. Collects garbage in the parent first.
     o.memory_gate = o.memory_gate or function()
-        return MemoryGate.check(MemoryGate.DEFAULT_MIN_AVAILABLE_KB)
+        return MemoryGate.check_fork(o.read_meminfo)
     end
     setmetatable(o, self)
     return o
+end
+
+-- MemAvailable and this process' VmRSS for the per-chapter log line.
+function Downloader:_memorySnapshot()
+    local read_meminfo = self.read_meminfo or MemoryGate.read_meminfo
+    local read_status = self.read_self_status or MemoryGate.read_self_status
+    local ok_avail, available = pcall(function()
+        return MemoryGate.parse_available_kb(read_meminfo())
+    end)
+    local ok_rss, rss = pcall(function()
+        return MemoryGate.parse_rss_kb(read_status())
+    end)
+    return ok_avail and available or nil, ok_rss and rss or nil
 end
 
 function Downloader:recover()
@@ -467,25 +487,84 @@ function Downloader:_startPrefetchWorker(dl)
     return false
 end
 
--- Only network-heavy work runs in the child; checkpoints, settings and UI stay
--- in the parent. Reuse KOReader's pipe transport and cancellation/reaping.
--- Runs inside the Trapper coroutine: sleeping yields back to the UI loop.
-function Downloader:_waitForMemory(dl)
-    local ok, available = self.memory_gate()
-    local attempts = 0
+-- Sleep inside the Trapper coroutine: yields back to the UI loop, and the
+-- progress dialog's cancel button wakes the sleeper immediately. Returns false
+-- when not running in a coroutine (nothing to yield to).
+function Downloader:_sleepInJob(dl, seconds)
     local co = coroutine.running()
-    while not ok and co and attempts < MEMORY_WAIT_ATTEMPTS and not dl.cancelled do
-        attempts = attempts + 1
+    if not co then return false end
+    local woken = false
+    local function wake()
+        if woken then return end
+        woken = true
+        coroutine.resume(co)
+    end
+    local dialog = dl.progress_dialog
+    if dialog then dialog.dismiss_callback = wake end
+    UIManager:scheduleIn(seconds, wake)
+    coroutine.yield()
+    -- Whichever of timer/cancel fired first won; the other must stay a no-op.
+    woken = true
+    if UIManager.unschedule then UIManager:unschedule(wake) end
+    if dialog and dialog.dismiss_callback == wake then dialog.dismiss_callback = nil end
+    return true
+end
+
+-- Raises a LOW_MEMORY_ERROR when memory does not recover; callers route it to
+-- _stopForLowMemory instead of counting a chapter failure.
+function Downloader:_waitForMemory(dl)
+    local ok, available, required = self.memory_gate()
+    if ok then return end
+    local previous_title, previous_progress = dl.stage_title, dl.stage_progress
+    for attempt, delay in ipairs(MEMORY_WAIT_SCHEDULE) do
+        if dl.cancelled then return end
         logger.warn("download waiting for free memory:",
             "available_kb=", tostring(available),
-            "attempt=", tostring(attempts) .. "/" .. tostring(MEMORY_WAIT_ATTEMPTS))
-        UIManager:scheduleIn(MEMORY_WAIT_SECONDS, function() coroutine.resume(co) end)
-        coroutine.yield()
-        ok, available = self.memory_gate()
+            "required_kb=", tostring(required),
+            "lua_kb=", string.format("%.1f", collectgarbage("count")),
+            "attempt=", tostring(attempt) .. "/" .. tostring(#MEMORY_WAIT_SCHEDULE),
+            "delay_s=", tostring(delay))
+        self:_setStage(dl, T(_("Waiting for free memory... %1 MB free, %2 MB needed"),
+            kb_to_mb(available), kb_to_mb(required)), previous_progress)
+        if not self:_sleepInJob(dl, delay) then break end
+        if dl.cancelled then return end
+        ok, available, required = self.memory_gate()
+        if ok then
+            logger.info("download memory recovered:",
+                "available_kb=", tostring(available),
+                "required_kb=", tostring(required))
+            if previous_title then self:_setStage(dl, previous_title, previous_progress) end
+            return
+        end
     end
-    if not ok and not dl.cancelled then
-        error(_(LOW_MEMORY_ERROR) .. " (" .. tostring(available) .. " kB)", 0)
+    if dl.cancelled then return end
+    error(string.format("%s: available_kb=%s required_kb=%s", LOW_MEMORY_ERROR,
+        tostring(available), tostring(required)), 0)
+end
+
+-- Not enough memory to fork safely, even after waiting. Resumable jobs keep
+-- their checkpoint; others stop cleanly. Never skips or fails a chapter.
+function Downloader:_stopForLowMemory(dl, err)
+    logger.warn("download stopped for low memory:", log_error(err),
+        "resumable=", tostring(dl.resumable == true),
+        "completed=", tostring(dl.completed_count or #(dl.selected or {})),
+        "total=", tostring(dl.total))
+    local message
+    if dl.resumable and dl.workspace then
+        self:_preserveWorkspace(dl, "low_memory")
+        message = _("Download paused: not enough free memory.\n\nCompleted chapters were kept. Close the open book or restart KOReader, then choose Download full book again to continue.")
+    else
+        self:_releaseStandby(dl)
+        self:_cleanupWorkspace(dl)
+        if dl.progress_dialog then
+            dl.progress_dialog:close()
+            dl.progress_dialog = nil
+        end
+        self:_notifyCompletion(dl, false, "low_memory")
+        self:_finishJob(dl)
+        message = _("Download stopped: not enough free memory.\n\nClose the open book or restart KOReader, then try again.")
     end
+    if not dl.prefetch then self.show_info(message) end
 end
 
 function Downloader:_runInterruptible(dl, task)
@@ -717,13 +796,16 @@ function Downloader:start(book, chapters, suffix, options)
                 dl.progress_dialog:close()
                 dl.progress_dialog = nil
             end
+            local low_memory = is_low_memory_error(err_init)
             if type(options.on_complete) == "function" then
-                pcall(options.on_complete, false, err_init)
+                pcall(options.on_complete, false, low_memory and "low_memory" or err_init)
             end
             dl.completion_notified = true
             self:_finishJob(dl)
             if not dl.prefetch then
-                self.show_info(T(_("Download failed:\n%1"), display_error(err_init)))
+                self.show_info(low_memory
+                    and _("Download stopped: not enough free memory.\n\nClose the open book or restart KOReader, then try again.")
+                    or T(_("Download failed:\n%1"), display_error(err_init)))
             end
             return
         end
@@ -775,7 +857,7 @@ function Downloader:_perf(dl, stage, started, ...)
 end
 
 function Downloader:_failChapter(dl, err)
-    if is_low_memory_error(err) then error(err, 0) end
+    if is_low_memory_error(err) then return self:_stopForLowMemory(dl, err) end
     local chapter = dl.chapters[dl.index]
     local uid = tostring(chapter and chapter.chapterUid or dl.index)
     table.insert(dl.failed, uid)
@@ -817,9 +899,12 @@ function Downloader:_skipCompletedChapterBatch(dl)
 end
 
 function Downloader:_retryChapterSource(dl, err)
-    -- Not a chapter problem: stop the job (see _scheduleGuarded), so no chapter
-    -- is skipped and a full-book download keeps its checkpoint.
-    if is_low_memory_error(err) then error(err, 0) end
+    -- Not a chapter problem: stop the job, so no chapter is skipped and a
+    -- full-book download keeps its checkpoint.
+    if is_low_memory_error(err) then
+        self:_stopForLowMemory(dl, err)
+        return false
+    end
     local chapter = dl.chapters[dl.index]
     local uid = tostring(chapter and chapter.chapterUid or dl.index)
     dl.chapter_source_retries = dl.chapter_source_retries or {}
@@ -1037,11 +1122,14 @@ function Downloader:_finishChapter(dl)
             dl.asset_bytes = (dl.asset_bytes or 0) + (tonumber(asset.size) or 0)
         end
     end
+    local mem_available_kb, rss_kb = self:_memorySnapshot()
     logger.info("download assets staged:",
         "chapter=", tostring(dl.index) .. "/" .. tostring(dl.total),
         "chapter_assets=", tostring(#(chapter_assets or {})),
         "total_asset_bytes=", tostring(dl.asset_bytes or 0),
-        "lua_kb=", string.format("%.1f", collectgarbage("count")))
+        "lua_kb=", string.format("%.1f", collectgarbage("count")),
+        "mem_available_kb=", tostring(mem_available_kb or "unknown"),
+        "rss_kb=", tostring(rss_kb or "unknown"))
     dl.current = nil
     dl.annotation = nil
     dl.index = dl.index + 1
