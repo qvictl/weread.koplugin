@@ -19,6 +19,7 @@ local cleanup_count = 0
 local fail_next_save = false
 local rendered_chapters_complete = true
 local save_book_calls = 0
+local css_writes = 0
 
 package.preload["ui/widget/confirmbox"] = function()
     return { new = function(_self, options) return options end }
@@ -119,7 +120,7 @@ package.preload["weread.lib.content"] = function()
         finalize_single_chapter_content = function(_client, _settings, _book, _chapter, xhtml)
             return xhtml, {}
         end,
-        save_full_download_css = function() end,
+        save_full_download_css = function() css_writes = css_writes + 1 end,
         save_full_download_chapter = function(_workspace, chapter, chapter_index, xhtml)
             persisted[chapter_index] = true
             checkpointed[#checkpointed + 1] = {
@@ -192,6 +193,24 @@ expect(type(streamed_bodies) == "table"
     "final EPUB did not stream rendered chapter files")
 expect(checkpoint_checks >= 2,
     "full-book checkpoints were not verified again before packaging")
+expect(css_writes == 0, "unchanged stylesheet was rewritten for a resumed chapter")
+
+-- The stylesheet is written once when it changes, not once per chapter.
+do
+    local css_dl = {
+        book = { book_id = "book" }, chapters = chapters, total = 2, index = 1,
+        selected = {}, bodies = {}, assets = {}, failed = {}, resumable = true,
+        workspace = {}, completed = {}, completed_count = 0,
+        state = { css = "new{}" }, saved_css = nil,
+    }
+    local writes_before = css_writes
+    css_dl.current = { chapter = chapters[1], xhtml = "<p>1</p>", finalized = true }
+    downloader:_finishChapter(css_dl)
+    css_dl.current = { chapter = chapters[2], xhtml = "<p>2</p>", finalized = true }
+    downloader:_finishChapter(css_dl)
+    expect(css_writes == writes_before + 1, "stylesheet was not written exactly once")
+    scheduled = {}
+end
 
 local cleanup_before_failure = cleanup_count
 fail_next_save = true

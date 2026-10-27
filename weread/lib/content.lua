@@ -312,13 +312,47 @@ function Content.full_download_rendered_chapter_path(workspace, chapter, chapter
     return workspace.rendered_text_dir .. "/" .. workspace_chapter_name(chapter, chapter_index)
 end
 
+-- Checkpoint files are written whole by atomic_write and always end with
+-- this tag (see full_download_chapter_xhtml). The marker sits in the first
+-- few hundred bytes.
+local CHECKPOINT_HEAD_BYTES = 512
+local CHECKPOINT_TAIL = "</html>"
+-- Chapters written this close to the newest checkpoint may not have reached
+-- the storage before a crash or hard power-off (FAT keeps their size but not
+-- necessarily their data), so their full digest is checked again.
+local CHECKPOINT_RECENT_SECONDS = 60
+local LAST_WRITTEN_NAME = "last-written"
+
+local function lfs_module()
+    local ok, lfs = pcall(require, "libs/libkoreader-lfs")
+    if not ok or type(lfs) ~= "table" or not lfs.attributes then
+        ok, lfs = pcall(require, "lfs")
+    end
+    if ok and type(lfs) == "table" and lfs.attributes then return lfs end
+end
+
+-- Size plus the head and tail of a file, without reading the whole file.
+local function probe_checkpoint_file(path)
+    local file = path and io.open(path, "rb")
+    if not file then return nil end
+    local size = file:seek("end")
+    local head, tail = "", ""
+    if size then
+        file:seek("set", 0)
+        head = file:read(math.min(size, CHECKPOINT_HEAD_BYTES)) or ""
+        file:seek("set", math.max(0, size - #CHECKPOINT_TAIL))
+        tail = file:read(#CHECKPOINT_TAIL) or ""
+    end
+    local closed = file:close()
+    if not closed then return nil end
+    return size, head, tail
+end
+
 function Content.full_download_rendered_chapter_exists(workspace, chapter, chapter_index)
     local path = Content.full_download_rendered_chapter_path(workspace, chapter, chapter_index)
-    local file = path and io.open(path, "rb")
-    if not file then return false end
-    local xhtml = file:read("*a") or ""
-    local closed = file:close()
-    return closed and xhtml:find(workspace_chapter_marker(chapter), 1, true) ~= nil
+    local size, head, tail = probe_checkpoint_file(path)
+    return size ~= nil and head:find(workspace_chapter_marker(chapter), 1, true) ~= nil
+        and tail == CHECKPOINT_TAIL
 end
 
 local function read_full_download_checkpoint(path)
@@ -334,18 +368,29 @@ local function read_full_download_checkpoint(path)
     return uid, length, digest
 end
 
-function Content.full_download_chapter_exists(workspace, chapter, chapter_index)
+-- A checkpoint is complete when its .meta names this chapter and the chapter
+-- file has the recorded length, the chapter marker and the closing tag. Pass
+-- verify_digest to also re-read the file and compare its SHA-256 (slow on the
+-- device: pure Lua, a few seconds per MB). The .meta format is unchanged
+-- since v1.6.0, so existing workspaces resume as they are.
+function Content.full_download_chapter_exists(workspace, chapter, chapter_index, verify_digest)
     local path = Content.full_download_chapter_path(workspace, chapter, chapter_index)
-    local file = path and io.open(path, "rb")
+    local uid, length, digest = read_full_download_checkpoint(
+        Content.full_download_checkpoint_path(workspace, chapter, chapter_index))
+    if not path or uid ~= basename_safe(chapter and chapter.chapterUid or "unknown") then
+        return false
+    end
+    local marker = workspace_chapter_marker(chapter)
+    if not verify_digest then
+        local size, head, tail = probe_checkpoint_file(path)
+        return size == length and head:find(marker, 1, true) ~= nil
+            and tail == CHECKPOINT_TAIL
+    end
+    local file = io.open(path, "rb")
     if not file then return false end
     local xhtml = file:read("*a") or ""
     local closed = file:close()
-    if not closed or xhtml:find(workspace_chapter_marker(chapter), 1, true) == nil then
-        return false
-    end
-    local uid, length, digest = read_full_download_checkpoint(
-        Content.full_download_checkpoint_path(workspace, chapter, chapter_index))
-    return uid == basename_safe(chapter and chapter.chapterUid or "unknown")
+    return closed and xhtml:find(marker, 1, true) ~= nil
         and length == #xhtml
         and digest == Crypto.sha256_hex(xhtml)
 end
@@ -400,7 +445,12 @@ function Content.save_full_download_chapter(workspace, chapter, chapter_index, x
     local checkpoint_path = Content.full_download_checkpoint_path(workspace, chapter, chapter_index)
     if not path or not checkpoint_path then return nil, "missing full-book workspace" end
     local chapter_xhtml = full_download_chapter_xhtml(chapter, chapter_index, xhtml)
-    local ok, err = atomic_write(path, chapter_xhtml)
+    -- Record which chapter is being written before writing it, so a resume
+    -- re-verifies its digest even if the clock or file times are off.
+    local ok, err = atomic_write(workspace.checkpoint_dir .. "/" .. LAST_WRITTEN_NAME,
+        "index=" .. tostring(tonumber(chapter_index) or 0) .. "\n")
+    if not ok then error(err or "could not checkpoint chapter") end
+    ok, err = atomic_write(path, chapter_xhtml)
     if not ok then error(err or "could not checkpoint chapter") end
     local checkpoint = table.concat({
         "uid=" .. basename_safe(chapter and chapter.chapterUid or "unknown"),
@@ -447,13 +497,65 @@ function Content.load_full_download_css(workspace)
     return css
 end
 
-function Content.full_download_completed_chapters(workspace, chapters)
-    local completed = {}
-    for chapter_index, chapter in ipairs(chapters or {}) do
-        if Content.full_download_chapter_exists(workspace, chapter, chapter_index) then
-            completed[chapter_index] = true
+-- Chapter indexes whose digest must be checked again: the one recorded as
+-- being written last, plus every checkpoint whose .meta changed within
+-- CHECKPOINT_RECENT_SECONDS of the newest one. Returns nil (check them all)
+-- when neither is known, e.g. a v1.6.0 workspace without file times.
+local function recent_full_download_checkpoints(workspace, chapters)
+    local recent, known = {}, false
+    local file = workspace and workspace.checkpoint_dir
+        and io.open(workspace.checkpoint_dir .. "/" .. LAST_WRITTEN_NAME, "rb")
+    if file then
+        local index = tonumber((file:read("*a") or ""):match("index=(%d+)"))
+        file:close()
+        if index then
+            recent[index] = true
+            known = true
         end
     end
+    local lfs = lfs_module()
+    if lfs then
+        local times, newest = {}, nil
+        for chapter_index, chapter in ipairs(chapters or {}) do
+            local ok, modified = pcall(lfs.attributes, Content.full_download_checkpoint_path(
+                workspace, chapter, chapter_index), "modification")
+            modified = ok and tonumber(modified) or nil
+            if modified then
+                times[chapter_index] = modified
+                if not newest or modified > newest then newest = modified end
+            end
+        end
+        if newest then
+            known = true
+            for chapter_index, modified in pairs(times) do
+                if modified >= newest - CHECKPOINT_RECENT_SECONDS then
+                    recent[chapter_index] = true
+                end
+            end
+        end
+    end
+    return known and recent or nil
+end
+
+-- Cheap enough for the UI loop on a large book: one small .meta read and a
+-- head/tail probe per chapter; only recently written chapters are hashed.
+function Content.full_download_completed_chapters(workspace, chapters)
+    local completed = {}
+    local recent = recent_full_download_checkpoints(workspace, chapters)
+    local hashed, count = 0, 0
+    for chapter_index, chapter in ipairs(chapters or {}) do
+        local verify_digest = recent == nil or recent[chapter_index] == true
+        if Content.full_download_chapter_exists(
+            workspace, chapter, chapter_index, verify_digest) then
+            completed[chapter_index] = true
+            count = count + 1
+            if verify_digest then hashed = hashed + 1 end
+        end
+    end
+    logger.info("full-book checkpoints verified:",
+        "chapters=", tostring(#(chapters or {})),
+        "completed=", tostring(count),
+        "digest_checked=", tostring(hashed))
     return completed
 end
 
