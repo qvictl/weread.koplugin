@@ -725,6 +725,8 @@ function M:refreshBookRecord(book, old_view, options)
                     or remote.chapter_idx) or tonumber(book.chapter_idx)
                 book.chapter_offset = tonumber(remote.chapterOffset or remote.chapterPos
                     or remote.offset) or tonumber(book.chapter_offset) or 0
+                -- This is the cloud's position, not one this device reported.
+                book.reported_local = false
             end
             book.book_id = book_id
             book._library_account_key = self.library_db

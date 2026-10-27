@@ -1064,6 +1064,12 @@ function ProgressSync:_pull(options)
     self.pulling = true
     self.state = "pulling"
     local function pull_task()
+        -- Scheduled through run_online, which teardown/on_suspend can't
+        -- cancel: never start network work for a closed or sleeping object.
+        if self.torn_down or self.suspended then
+            self.pulling = false
+            return
+        end
         if not local_position then
             local book_id = tostring(self.detect_book() or "")
             local refresh_ok, refreshed, refresh_error = pcall(
@@ -1290,7 +1296,10 @@ end
 function ProgressSync:on_close_document()
     -- A choice left on screen would float over the next document.
     self:_close_choice("document_closed")
-    local position = self:capture_local() or self.local_position
+    -- Only a verified WeRead book can enqueue an upload; don't scan the
+    -- library to detect a non-WeRead document.
+    local position = self.current_book_id
+        and (self:capture_local() or self.local_position) or nil
     if position and self.verified
         and self:_config().upload_on_close == true
         and not self:_below_floor(position) then
@@ -1328,7 +1337,8 @@ function ProgressSync:on_suspend()
     if self:_close_choice("suspend") then
         self.reask_after_resume = true
     end
-    local position = self:capture_local() or self.local_position
+    local position = self.current_book_id
+        and (self:capture_local() or self.local_position) or nil
     if position and self.local_position
         and not PositionMapper.same_position(position, self.local_position) then
         self.dirty = true
