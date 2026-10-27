@@ -28,6 +28,19 @@ local ANNOTATION_HIDE_CSS =
     ".wr-underline{border-bottom:0 !important;padding-bottom:0 !important;} "
     .. ".wr-thought-link{pointer-events:none !important;text-decoration:none !important;color:inherit !important;}"
 
+-- The unified-annotation state is cached after its first evaluation, but that
+-- evaluation reads SQLite. Reader-open and tap paths must never raise: a busy
+-- database only means "not known to be unified" for this call (not cached).
+local function usesUnifiedAnnotations(plugin)
+    if not plugin._usesUnifiedAnnotations then return false end
+    local ok, active = pcall(plugin._usesUnifiedAnnotations, plugin)
+    if not ok then
+        logger.warn("annotation display state unavailable:", tostring(active))
+        return false
+    end
+    return active == true
+end
+
 -- Apply the initial hidden state before KOReader renders the document. Doing
 -- this from onReaderReady starts partial rerendering; its seamless reload then
 -- creates a new plugin instance and repeats the same rerender forever.
@@ -36,7 +49,7 @@ function M:onReadSettings()
         return
     end
     if self.settings:get("cache").show_annotations ~= false
-        and not (self._usesUnifiedAnnotations and self:_usesUnifiedAnnotations()) then
+        and not usesUnifiedAnnotations(self) then
         return
     end
     local typeset = self.ui.typeset
@@ -83,7 +96,7 @@ function M:applyAnnotationVisibility()
     if styletweak and type(styletweak.getCssText) == "function" then
         tweaks = styletweak:getCssText() or ""
     end
-    if not show or (self._usesUnifiedAnnotations and self:_usesUnifiedAnnotations()) then
+    if not show or usesUnifiedAnnotations(self) then
         tweaks = tweaks .. "\n" .. ANNOTATION_HIDE_CSS
     end
     local ok, err = pcall(function()
@@ -184,9 +197,9 @@ function M:_installLinkFilter()
         if not isThoughtHref(href) then
             return link
         end
-        if (plugin._usesUnifiedAnnotations and plugin:_usesUnifiedAnnotations())
-            or plugin.settings:get("cache").show_annotations == false
-            or isPageTurnEdgeTap(plugin, ges) then
+        if plugin.settings:get("cache").show_annotations == false
+            or isPageTurnEdgeTap(plugin, ges)
+            or usesUnifiedAnnotations(plugin) then
             return nil
         end
         return link
@@ -196,18 +209,19 @@ function M:_installLinkFilter()
     if not self._orig_onTap then
         self._orig_onTap = self.ui.link.onTap
         self.ui.link.onTap = function(link_self, arg, ges)
-            -- When we want to ignore thoughts (edge zone or annotations hidden),
+            -- The tap_link zone overrides the page-turn zones, so this runs for
+            -- every tap: keep it to cheap checks. When we want to ignore
+            -- thoughts (annotations hidden, edge zone or unified overlay),
             -- detect the link with the *original* getter and suppress only our
-            -- current or legacy thought anchors.
-            if (plugin._usesUnifiedAnnotations and plugin:_usesUnifiedAnnotations())
-            or plugin.settings:get("cache").show_annotations == false
-                or isPageTurnEdgeTap(plugin, ges) then
+            -- current or legacy thought anchors. An unknown unified state is
+            -- only resolved once the tap is known to hit a thought anchor.
+            local ignore = plugin.settings:get("cache").show_annotations == false
+                or isPageTurnEdgeTap(plugin, ges)
+            if ignore or plugin._unified_annotations_active ~= false then
                 local link = plugin._orig_getLinkFromGes(link_self, ges)
-                if link then
-                    local href = plugin:_linkHref(link)
-                    if isThoughtHref(href) then
-                        return false
-                    end
+                if link and isThoughtHref(plugin:_linkHref(link))
+                    and (ignore or usesUnifiedAnnotations(plugin)) then
+                    return false
                 end
             end
             return plugin._orig_onTap(link_self, arg, ges)
@@ -569,8 +583,8 @@ function M:_onThoughtTap(ges)
     -- Annotations hidden: _installLinkFilter already made getLinkFromGes return nil
     -- for our anchors, so we normally return above before reaching here. Kept as a
     -- defensive fall-through in case the filter is not active.
-    if (self._usesUnifiedAnnotations and self:_usesUnifiedAnnotations())
-        or self.settings:get("cache").show_annotations == false then
+    if self.settings:get("cache").show_annotations == false
+        or usesUnifiedAnnotations(self) then
         return false
     end
 
