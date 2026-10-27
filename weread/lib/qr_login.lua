@@ -4,7 +4,8 @@ local I18n = require("weread.lib.i18n")
 local InputDialog = require("ui/widget/inputdialog")
 local logger = require("weread.lib.logger").scoped("QRLogin")
 local QRMessage = require("ui/widget/qrmessage")
-local T = require("ffi/util").template
+local FFIUtil = require("ffi/util")
+local T = FFIUtil.template
 local UIManager = require("ui/uimanager")
 local WeRead = require("weread.lib.protocol")
 
@@ -21,6 +22,14 @@ local API_KEY_URL = BASE_URL .. "/api/skills/apikeyGet?only_show=1"
 local LOGIN_SESSION_TIMEOUT_SECONDS = 300
 local POLL_BLOCK_TIMEOUT_SECONDS = 5
 local POLL_TOTAL_TIMEOUT_SECONDS = 8
+-- getLoginInfo is a long poll. It runs in a background process; the UI
+-- loop only checks that process this often (F11).
+local POLL_JOB_CHECK_SECONDS = 0.5
+local POLL_JOB_INTERVAL_SECONDS = 0.5
+-- Without fork support the poll runs on the UI loop: keep each request
+-- short so taps (cancel) and power-button events are not held for long.
+local INLINE_POLL_TIMEOUT = { 2, 3 }
+local INLINE_POLL_INTERVAL_SECONDS = 1.5
 
 local QRLogin = {}
 QRLogin.__index = QRLogin
@@ -71,6 +80,23 @@ local function is_timeout_error(err)
         or text:find("wantread", 1, true) ~= nil
 end
 
+-- Fork helpers (ffi/util), or nil where the platform cannot fork.
+local function make_subprocess_runner()
+    if type(FFIUtil.runInSubProcess) ~= "function"
+        or type(FFIUtil.isSubProcessDone) ~= "function"
+        or type(FFIUtil.readAllFromFD) ~= "function" then
+        return nil
+    end
+    return {
+        run = function(child) return FFIUtil.runInSubProcess(child, true) end,
+        write_all = function(fd, data) return FFIUtil.writeToFD(fd, data, true) end,
+        is_done = function(pid) return FFIUtil.isSubProcessDone(pid) end,
+        read_size = function(fd) return FFIUtil.getNonBlockingReadSize(fd) end,
+        read_all = function(fd) return FFIUtil.readAllFromFD(fd) end,
+        terminate = function(pid) FFIUtil.terminateSubProcess(pid) end,
+    }
+end
+
 local function sleep_seconds(seconds)
     local ok_socket, socket = pcall(require, "socket")
     if ok_socket and socket.sleep then
@@ -78,7 +104,10 @@ local function sleep_seconds(seconds)
     end
 end
 
-function QRLogin:new(host, client, settings)
+function QRLogin:new(host, client, settings, options)
+    options = options or {}
+    local subprocess = options.subprocess
+    if subprocess == nil then subprocess = make_subprocess_runner() end
     return setmetatable({
         host = host,
         client = client,
@@ -88,6 +117,9 @@ function QRLogin:new(host, client, settings)
         qr_dialog = nil,
         programmatic_close = false,
         started_at = nil,
+        subprocess = subprocess or nil,
+        scheduler = options.scheduler or UIManager,
+        now = options.now or os.time,
     }, self)
 end
 
@@ -167,7 +199,7 @@ function QRLogin:_begin_protocol()
     return data.uid
 end
 
-function QRLogin:_poll_protocol(uid, otp)
+function QRLogin:_poll_protocol(uid, otp, timeout)
     if type(uid) ~= "string" or uid == "" then
         error("Missing QR login UID")
     end
@@ -188,7 +220,7 @@ function QRLogin:_poll_protocol(uid, otp)
 
     local data, response_headers, request_error = self:_request_json(url, {
         method = "GET",
-        timeout = { POLL_BLOCK_TIMEOUT_SECONDS, POLL_TOTAL_TIMEOUT_SECONDS },
+        timeout = timeout or { POLL_BLOCK_TIMEOUT_SECONDS, POLL_TOTAL_TIMEOUT_SECONDS },
         headers = headers,
     }, "getLoginInfo")
     if not data then
@@ -320,15 +352,24 @@ function QRLogin:cancel()
     self.generation = self.generation + 1
     self.login_cookies = nil
     self.started_at = nil
+    self:_stop_poll_job()
     self:_close_qr_dialog(true)
 end
 
-function QRLogin:start()
-    if not self.host:isNetworkOnline() then
-        self.host:showOffline(_("QR login"))
-        return
+-- The device is going to sleep and Wi-Fi with it: end the session instead
+-- of polling into the screensaver (F11, F16).
+function QRLogin:on_suspend()
+    if not self.started_at and not self.qr_dialog and not self.poll_job then
+        return false
     end
+    logger.info("QR login cancelled by suspend")
+    self:cancel()
+    return true
+end
 
+function QRLogin:start()
+    -- runOnlineTask checks the network (and reports offline) itself; a
+    -- second check here only doubled the blocking DNS lookup.
     self:cancel()
     local generation = self.generation
     self.started_at = os.time()
@@ -385,13 +426,125 @@ function QRLogin:_show_qr(uid, generation)
 
     UIManager:scheduleIn(0.5, function()
         if generation == self.generation and self.qr_dialog == dialog then
-            self:_poll(uid, generation)
+            if not self:_start_poll_job(uid, generation) then
+                self:_poll(uid, generation)
+            end
         end
     end)
 end
 
+-- Runs the whole getLoginInfo long-poll loop in a forked process until the
+-- server gives a final answer or the QR session expires. The UI loop only
+-- checks the pipe every POLL_JOB_CHECK_SECONDS. Returns false when the
+-- platform cannot fork (or the fork fails); the caller then polls inline.
+function QRLogin:_start_poll_job(uid, generation)
+    local runner = self.subprocess
+    if not runner then return false end
+    local deadline = (self.started_at or self.now()) + LOGIN_SESSION_TIMEOUT_SECONDS
+    local ok_run, pid, read_fd = pcall(runner.run, function(_pid, write_fd)
+        local result
+        while os.time() < deadline do
+            local ok, data = pcall(self._poll_protocol, self, uid, "")
+            if not ok then
+                if not is_timeout_error(data) then
+                    result = { error = error_text(data) }
+                    break
+                end
+            elseif not data.transport_pending then
+                result = { data = data, cookies = self.login_cookies }
+                break
+            end
+            sleep_seconds(POLL_JOB_INTERVAL_SECONDS)
+        end
+        result = result or { expired = true }
+        local ok_encode, encoded = pcall(self.client.json_encode, self.client, result)
+        if not ok_encode or type(encoded) ~= "string" then
+            encoded = '{"error":"failed to serialize login result"}'
+        end
+        runner.write_all(write_fd, encoded)
+    end)
+    if not ok_run or not pid then
+        logger.warn("QR login poll process unavailable, polling inline:",
+            tostring(ok_run and read_fd or pid))
+        return false
+    end
+    local job = { pid = pid, read_fd = read_fd, uid = uid, generation = generation }
+    job.check = function() self:_check_poll_job(job) end
+    self.poll_job = job
+    self.scheduler:scheduleIn(POLL_JOB_CHECK_SECONDS, job.check)
+    return true
+end
+
+function QRLogin:_check_poll_job(job)
+    if self.poll_job ~= job then return end
+    local runner = self.subprocess
+    local done = runner.is_done(job.pid)
+    local readable = job.read_fd and runner.read_size(job.read_fd)
+    if not done and not (readable and readable > 0) then
+        self.scheduler:scheduleIn(POLL_JOB_CHECK_SECONDS, job.check)
+        return
+    end
+    local payload = job.read_fd and runner.read_all(job.read_fd)
+    job.read_fd = nil
+    self.poll_job = nil
+    if not done then self:_reap(job.pid) end
+    if job.generation ~= self.generation then return end
+    local ok, result = pcall(self.client.json_decode, self.client, payload or "")
+    if not ok or type(result) ~= "table" then
+        result = { error = "login poll returned no result" }
+    end
+    self:_handle_poll_result(job.uid, job.generation, result)
+end
+
+-- Kills a running poll process and reaps it in the background.
+function QRLogin:_stop_poll_job()
+    local job = self.poll_job
+    if not job then return end
+    self.poll_job = nil
+    local runner = self.subprocess
+    if self.scheduler.unschedule then self.scheduler:unschedule(job.check) end
+    pcall(runner.terminate, job.pid)
+    if job.read_fd then
+        pcall(runner.read_all, job.read_fd)
+        job.read_fd = nil
+    end
+    self:_reap(job.pid)
+end
+
+function QRLogin:_reap(pid)
+    local runner = self.subprocess
+    local reap
+    reap = function()
+        local ok, done = pcall(runner.is_done, pid)
+        if ok and not done then
+            self.scheduler:scheduleIn(2, reap)
+        end
+    end
+    reap()
+end
+
+function QRLogin:_handle_poll_result(uid, generation, result)
+    if result.expired then
+        self:_close_qr_dialog(true)
+        self:cancel()
+        self.host:showInfo(_("The QR code has expired. Please try again."))
+        return
+    end
+    if result.error then
+        self:_close_qr_dialog(true)
+        self:cancel()
+        logger.err("login polling failed:", error_text(result.error))
+        self.host:showInfo(T(_("QR login failed:\n%1"), error_text(result.error)))
+        return
+    end
+    if type(result.cookies) == "table" then
+        self.login_cookies = result.cookies
+    end
+    self:_handle_login_info(uid, generation, result.data or {})
+end
+
 function QRLogin:_schedule_poll(uid, generation)
-    UIManager:scheduleIn(0.5, function()
+    UIManager:scheduleIn(INLINE_POLL_INTERVAL_SECONDS, function()
         if generation == self.generation and self.qr_dialog then
             self:_poll(uid, generation)
         end
@@ -407,7 +560,7 @@ function QRLogin:_poll(uid, generation, otp)
     end
 
     local ok, result = pcall(function()
-        return self:_poll_protocol(uid, otp or "")
+        return self:_poll_protocol(uid, otp or "", INLINE_POLL_TIMEOUT)
     end)
     if generation ~= self.generation then
         return
@@ -419,7 +572,7 @@ function QRLogin:_poll(uid, generation, otp)
         end
         self:_close_qr_dialog(true)
         self:cancel()
-            logger.err("login polling failed:", error_text(result))
+        logger.err("login polling failed:", error_text(result))
         self.host:showInfo(T(_("QR login failed:\n%1"), error_text(result)))
         return
     end
@@ -427,6 +580,10 @@ function QRLogin:_poll(uid, generation, otp)
         self:_schedule_poll(uid, generation)
         return
     end
+    self:_handle_login_info(uid, generation, result)
+end
+
+function QRLogin:_handle_login_info(uid, generation, result)
     if result.succeed == true then
         self:_close_qr_dialog(true)
         self:_complete(result, generation)

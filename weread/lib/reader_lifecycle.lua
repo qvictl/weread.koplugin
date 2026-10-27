@@ -330,6 +330,8 @@ end
 function M:onSuspend()
     if self._cancelUnifiedAnnotationSync then self:_cancelUnifiedAnnotationSync() end
     self._annotation_pending_prefetch = nil
+    -- A QR login would keep long-polling into the screensaver.
+    if self.qr_login and self.qr_login.on_suspend then self.qr_login:on_suspend() end
     -- O(1) and network-free: the device and its Wi-Fi are going to sleep.
     self.progress_sync:on_suspend()
     self.read_report:on_suspend()

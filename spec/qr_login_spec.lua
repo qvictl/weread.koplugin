@@ -17,7 +17,8 @@ package.preload["ui/widget/inputdialog"] = function() return {} end
 package.preload["weread.lib.logger"] = function()
     return {
         scoped = function()
-            return { warn = function() end, err = function() end }
+            return { warn = function() end, err = function() end,
+                dbg = function() end, info = function() end }
         end,
     }
 end
@@ -25,7 +26,9 @@ package.preload["ui/widget/qrmessage"] = function() return {} end
 package.preload["ffi/util"] = function()
     return { template = function(text) return text end }
 end
-package.preload["ui/uimanager"] = function() return {} end
+package.preload["ui/uimanager"] = function()
+    return { close = function() end, scheduleIn = function() end }
+end
 package.preload["weread.lib.protocol"] = function()
     return {
         urlencode = function(value)
@@ -114,5 +117,67 @@ end
 
 expect(run_login("1234567890") ~= run_login("2345678901"),
     "separate device fingerprints must reach the server independently")
+
+-- F11: the long poll runs in a background process; the UI loop only
+-- checks its pipe.
+do
+    local scheduled = {}
+    local scheduler = {
+        scheduleIn = function(_self, _delay, fn) scheduled[#scheduled + 1] = fn end,
+        unschedule = function() end,
+    }
+    local runner = { forks = 0 }
+    function runner.run(child) runner.forks = runner.forks + 1; runner.child = child; return 42, 7 end
+    function runner.write_all(_fd, data) runner.written = data end
+    function runner.is_done() return runner.done == true end
+    function runner.read_size() return runner.written and #runner.written or 0 end
+    function runner.read_all() local d = runner.written; runner.written = nil; return d end
+    function runner.terminate() runner.terminated = true end
+
+    local stash = {}
+    local poll_count = 0
+    local poll_client = {
+        request = function(_self, opts)
+            poll_count = poll_count + 1
+            if poll_count < 3 then return nil, nil, nil, "timeout" end
+            return "body", 200, { ["set-cookie"] = "wr_poll=1; Path=/" }
+        end,
+        decode_http_json = function() return { succeed = true, webLoginVid = "v" } end,
+        json_encode = function(_self, value) stash[#stash + 1] = value; return "#" .. #stash end,
+        json_decode = function(_self, text) return stash[tonumber(text:sub(2))] end,
+    }
+    local host_calls = {}
+    local host = {
+        showInfo = function(_self, text) host_calls[#host_calls + 1] = text end,
+    }
+    local login = QRLogin:new(host, poll_client, {}, {
+        subprocess = runner, scheduler = scheduler,
+    })
+    local completed
+    login._complete = function(_self, result) completed = result end
+    login.qr_dialog = {}
+    login.started_at = os.time()
+    expect(login:_start_poll_job("uid", login.generation), "poll job starts")
+    expect(poll_count == 0, "no request on the UI loop")
+    runner.child(42, 7)
+    expect(poll_count == 3, "child keeps polling through timeouts")
+    runner.done = true
+    for _i, fn in ipairs(scheduled) do fn() end
+    expect(completed and completed.webLoginVid == "v", "parent completes the login")
+    expect(login.login_cookies and login.login_cookies.wr_poll == "1",
+        "cookies merged in the child reach the parent")
+
+    -- Suspend ends a running session and kills its process.
+    runner.terminated = false
+    runner.done = false
+    login.qr_dialog = nil
+    login.started_at = os.time()
+    expect(login:_start_poll_job("uid", login.generation), "second poll job starts")
+    local generation = login.generation
+    expect(login:on_suspend() == true, "suspend cancels an active session")
+    expect(runner.terminated == true, "poll process killed")
+    expect(login.generation ~= generation and login.poll_job == nil, "session invalidated")
+    expect(login:on_suspend() == false, "nothing to cancel when idle")
+end
 
 print("qr_login_spec: " .. checks .. " checks passed")
