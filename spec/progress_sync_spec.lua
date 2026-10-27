@@ -292,6 +292,110 @@ test("nearby progress within two percent is treated as aligned", function()
     f.drain()
     eq(f.sync:status().verified, true, "nearby position verifies")
     eq(#f.choices, 0, "nearby position does not prompt")
+    eq(#f.jumps, 1, "nearby cloud progress ahead is followed")
+    eq(f.jumps[1], 0.269, "jump to the cloud position")
+    local position = f.sync:position_for_report("book")
+    eq(position.percent >= 26, true, "reports never send the older local position")
+end)
+
+test("nearby local progress ahead is kept without asking", function()
+    local f = fixture({
+        bookId = "book",
+        progress = 23.1,
+        chapterUid = 22,
+        chapterIdx = 2,
+        chapterOffset = 131,
+        updateTime = 10,
+    })
+    f.sync:on_reader_ready()
+    f.drain()
+    eq(f.sync:status().verified, true, "local ahead verifies")
+    eq(#f.choices, 0, "no prompt")
+    eq(#f.jumps, 0, "no jump backwards")
+    eq(f.sync:position_for_report("book").percent, 25, "reports carry local progress")
+end)
+
+test("nearby cloud progress in another chapter file becomes a report floor", function()
+    local f = fixture({
+        bookId = "book",
+        progress = 41,
+        chapterUid = 33,
+        chapterIdx = 3,
+        chapterOffset = 10,
+        updateTime = 10,
+    })
+    local opened = 0
+    f.sync.get_file_context = function() return 2, chapters[2], false end
+    f.sync.open_chapter = function() opened = opened + 1 return true end
+    f.document.page = 99
+    f.sync:on_reader_ready()
+    f.drain()
+    eq(opened, 0, "no chapter file is opened behind the reader's back")
+    eq(#f.choices, 0, "no prompt")
+    eq(f.sync:status().verified, true, "session verified")
+    local position = f.sync:position_for_report("book")
+    eq(position.chapter_uid, 33, "report carries the cloud chapter")
+    eq(position.chapter_offset, 10, "report carries the cloud offset")
+    f.sync:on_close_document()
+    eq(#f.uploads, 0, "close never uploads below the floor")
+end)
+
+test("cloud unchanged since this device wrote it: local far ahead wins quietly", function()
+    local f = fixture({
+        bookId = "book",
+        progress = 25,
+        chapterUid = 22,
+        chapterIdx = 2,
+        chapterOffset = 150,
+        updateTime = 10,
+    })
+    f.values.books.book.last_uploaded_position = {
+        chapter_uid = 22, chapter_offset = 150, percent = 25,
+    }
+    f.document.page = 60
+    f.sync:on_reader_ready()
+    f.drain()
+    eq(#f.choices, 0, "own progress does not prompt")
+    eq(f.sync:status().verified, true, "local kept and verified")
+    eq(f.sync:position_for_report("book").percent, 60, "local progress is reported")
+end)
+
+test("cloud moved elsewhere: local far ahead still asks", function()
+    local f = fixture({
+        bookId = "book",
+        progress = 30,
+        chapterUid = 22,
+        chapterIdx = 2,
+        chapterOffset = 200,
+        updateTime = 10,
+    })
+    f.values.books.book.last_uploaded_position = {
+        chapter_uid = 22, chapter_offset = 150, percent = 25,
+    }
+    f.document.page = 60
+    f.sync:on_reader_ready()
+    f.drain()
+    eq(#f.choices, 1, "foreign cloud change asks")
+    eq(f.choices[1].local_behind_remote, false, "keeping local moves forward")
+end)
+
+test("a dismissed choice reports time with the cloud position", function()
+    local f = fixture({
+        bookId = "book",
+        progress = 50,
+        chapterUid = 33,
+        chapterIdx = 3,
+        chapterOffset = 100,
+        updateTime = 10,
+    })
+    f.sync:on_reader_ready()
+    f.drain()
+    f.choices[1].dismiss()
+    local position, reason, applies = f.sync:position_for_report("book")
+    eq(applies, true, "provider applies")
+    eq(reason, nil, "reporting continues")
+    eq(position.chapter_uid, 33, "cloud chapter is re-sent")
+    eq(position.chapter_offset, 100, "cloud offset is re-sent")
 end)
 
 test("unresolved conflict blocks reports and local choice uploads", function()

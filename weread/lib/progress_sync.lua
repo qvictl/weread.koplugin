@@ -15,7 +15,9 @@ local BUSY_RETRY_SECONDS = 2
 local RESUME_UPLOAD_DELAY_SECONDS = 5
 local RESUME_UPLOAD_MAX_ATTEMPTS = 6
 local BUSY_RETRY_LIMIT = 10
-local SAME_THRESHOLD_PERCENT = 2
+-- Automatic pulls resolve differences up to this (whole-book percent) by
+-- direction, without a dialog. See ProgressSync:_resolve.
+local SILENT_BAND_PERCENT = 2
 -- Positions closer than this (whole-book percent) are the same spot.
 local EXACT_THRESHOLD_PERCENT = 0.3
 local SOURCE_CONFLICT_THRESHOLD_PERCENT = 2
@@ -239,6 +241,7 @@ function ProgressSync:_mark_verified(book_id, reason, local_position, remote)
 end
 
 function ProgressSync:_clear_verified(reason)
+    self.remote_floor = nil
     self.verified = false
     self.verified_at = nil
     self.verified_reason = reason
@@ -300,6 +303,9 @@ function ProgressSync:_apply_remote(remote, context, options)
     if not target then return false, reason end
 
     if target.requires_chapter_open then
+        if options.no_chapter_open then
+            return false, "requires_chapter_open"
+        end
         self:_clear_verified("switching_chapter")
         self.dirty = false
         self.pending_jump = {
@@ -436,21 +442,42 @@ function ProgressSync:_keep_local(local_position, remote, options)
     end
 end
 
+-- Progress policy (F6). Cloud progress is only ever moved backwards by an
+-- explicit button press; everything automatic is monotonic:
+--
+-- 1. Within EXACT_THRESHOLD_PERCENT (or the same chapter/offset) the two
+--    positions are the same spot: verified, nothing to do.
+-- 2. Automatic pulls inside SILENT_BAND_PERCENT resolve by direction
+--    without asking: a cloud position ahead is followed (it is newer reading
+--    elsewhere, following it loses nothing); a local position ahead is kept
+--    and reaches the cloud through later reports/uploads. The band used to
+--    mean "same" in both directions, after which every report re-sent the
+--    older local position and moved the cloud back by up to 2 %.
+-- 3. A local position ahead beyond the band is still kept silently when the
+--    cloud holds exactly what this device last saw or wrote there (nobody
+--    read elsewhere since), so resuming after reading on the Kindle does not
+--    prompt about the Kindle's own progress.
+-- 4. Everything else asks (or follows ask_on_conflict = false as before).
+--    A manual sync asks on any real difference so a reader can still pick
+--    a nearby chapter back.
 function ProgressSync:_resolve(local_position, remote, context, options)
     options = options or {}
     self.local_position = copy(local_position)
     self.remote_position = copy(remote)
+    self.remote_floor = nil
+    self.report_fallback = nil
     local comparison = PositionMapper.compare(
         local_position,
         remote,
-        SAME_THRESHOLD_PERCENT
+        SILENT_BAND_PERCENT
     )
+    local delta = PositionMapper.exact_percent(remote)
+        - PositionMapper.exact_percent(local_position)
+    local manual = options.manual == true
+    local same = PositionMapper.same_position(local_position, remote)
+        or math.abs(delta) <= EXACT_THRESHOLD_PERCENT
 
-    -- Automatic pulls tolerate nearby positions to avoid interrupting chapter
-    -- navigation. Manual sync must still let the reader recover another place.
-    local manual_difference = options.manual == true
-        and not PositionMapper.same_position(local_position, remote)
-    if comparison == "same" and not remote.conflict and not manual_difference then
+    if same and not remote.conflict then
         self.dirty = false
         self:_mark_verified(
             context.book_id,
@@ -458,33 +485,36 @@ function ProgressSync:_resolve(local_position, remote, context, options)
             local_position,
             remote
         )
-        if options.manual then
+        if manual then
             self.notify("already_synced", { position = local_position })
         end
         return
     end
 
-    -- Reading progress from before a suspend is uploaded after resume. If the
-    -- cloud position is still the one we knew before sleeping, nobody read
-    -- elsewhere in the meantime: the local position wins without asking.
-    local resume_pending = options.resume_pending
-    if resume_pending and resume_pending.baseline and not remote.conflict
-        and PositionMapper.same_position(remote, resume_pending.baseline) then
-        self:_keep_local(local_position, remote, {
-            upload_now = true,
-            silent = true,
-            reason = "suspend",
-        })
-        return
+    if not manual and not remote.conflict then
+        if comparison == "same" and delta > 0 then
+            self:_follow_remote_silently(local_position, remote, context)
+            return
+        end
+        if delta < 0 and (comparison == "same"
+            or self:_cloud_unchanged(remote, options.baselines)) then
+            self:_keep_local(local_position, remote, {
+                reason = "local_ahead",
+                upload_now = options.upload_pending == true
+                    and self:_config().upload_on_close == true,
+                silent = true,
+            })
+            return
+        end
     end
 
     local ask = self:_config().ask_on_conflict ~= false
-    if remote.conflict or ask or manual_difference then
+    if remote.conflict or ask or manual then
         self:_offer_choice(local_position, remote, context, options)
         return
     end
 
-    if comparison == "remote_ahead" then
+    if delta > 0 then
         local ok, reason = self:_apply_remote(
             remote, context, { manual = options.manual })
         if not ok then
@@ -500,6 +530,75 @@ function ProgressSync:_resolve(local_position, remote, context, options)
     end
 end
 
+-- Cloud ahead within the silent band: jump there. A per-chapter EPUB whose
+-- cloud position lies in another chapter file is not switched behind the
+-- reader's back; the session is verified with the cloud position as a floor
+-- instead, so no report or upload sends anything behind it.
+function ProgressSync:_follow_remote_silently(local_position, remote, context)
+    local ok, reason = self:_apply_remote(remote, context, {
+        no_chapter_open = true,
+    })
+    if ok then
+        log("info", "followed nearby cloud progress:",
+            "book=", context.book_id,
+            "local=", tostring(PositionMapper.exact_percent(local_position)),
+            "remote=", tostring(remote.percent))
+        return
+    end
+    self.dirty = false
+    self:_mark_verified(context.book_id, "remote_floor", local_position, remote)
+    self.remote_floor = copy(remote)
+    log("info", "kept local position below nearby cloud progress:",
+        "book=", context.book_id, "reason=", tostring(reason))
+end
+
+-- Never upload a position below a cloud floor (see _follow_remote_silently).
+function ProgressSync:_below_floor(position)
+    return self.remote_floor ~= nil and PositionMapper.is_behind(
+        position, self.remote_floor, EXACT_THRESHOLD_PERCENT)
+end
+
+-- True when the cloud position equals one this device last saw or wrote.
+function ProgressSync:_cloud_unchanged(remote, baselines)
+    for _i, baseline in ipairs(baselines or {}) do
+        if PositionMapper.same_spot(remote, baseline) then
+            return true
+        end
+    end
+    return false
+end
+
+-- Cloud positions this device knows about for `book_id`: the last pulled
+-- and uploaded positions and the last position the read report sent (its
+-- context fields). Must be collected before a pull persists its result.
+function ProgressSync:_known_cloud_positions(book_id, extra)
+    local result = {}
+    local function add(position)
+        if type(position) == "table" and (position.chapter_uid ~= nil
+            or position.percent ~= nil) then
+            result[#result + 1] = position
+        end
+    end
+    if self.current_book_id == book_id then
+        add(self.remote_position)
+    end
+    add(self.last_uploaded_position)
+    local ok, book = pcall(self.get_book, book_id)
+    if ok and type(book) == "table" then
+        add(book.last_remote_position)
+        add(book.last_uploaded_position)
+        if book.chapter_uid ~= nil and book.chapter_offset ~= nil then
+            add({
+                chapter_uid = book.chapter_uid,
+                chapter_offset = tonumber(book.chapter_offset),
+                percent = tonumber(book.progress),
+            })
+        end
+    end
+    for _i, position in ipairs(extra or {}) do add(position) end
+    return result
+end
+
 -- Closes a choice dialog that is still on screen without treating it as an
 -- answer (document closed, device suspended). Returns true when one was open.
 function ProgressSync:_close_choice(reason)
@@ -512,6 +611,10 @@ function ProgressSync:_close_choice(reason)
     end
     if self.state == "awaiting_choice" then
         self.state = "unverified"
+    end
+    if type(choice.remote_position) == "table" then
+        self.report_fallback = copy(choice.remote_position)
+        self.report_fallback.chapter_title = nil
     end
     log("info", "progress choice closed without an answer:",
         "book=", tostring(self.current_book_id),
@@ -583,6 +686,9 @@ function ProgressSync:_offer_choice(local_position, remote, context, options)
             if not choice_is_current() then return end
             self.choice = nil
             self.state = "unverified"
+            -- Reading time is still reported, carrying the cloud's own
+            -- position, so neither side moves until the reader decides.
+            self.report_fallback = copy(remote)
             log("info", "progress choice dismissed, nothing uploaded:",
                 "book=", context.book_id)
         end,
@@ -707,6 +813,12 @@ function ProgressSync:_pull(options)
             end
             return
         end
+        -- Collect what this device knew about the cloud before the pull
+        -- result overwrites it (see _resolve rule 3).
+        local extra = options.resume_pending and options.resume_pending.baseline
+            and { options.resume_pending.baseline } or nil
+        options.baselines = self:_known_cloud_positions(context.book_id, extra)
+        if options.resume_pending then options.upload_pending = true end
         self:_persist(context.book_id, {
             last_remote_position = remote,
             last_local_position = local_position,
@@ -796,6 +908,8 @@ function ProgressSync:on_reader_ready()
     self.current_book_id = nil
     self.local_position = nil
     self.remote_position = nil
+    self.remote_floor = nil
+    self.report_fallback = nil
     self.document_context = nil
     self.verified = false
     self.dirty = false
@@ -844,7 +958,8 @@ function ProgressSync:on_close_document()
     self:_close_choice("document_closed")
     local position = self:capture_local() or self.local_position
     if position and self.verified
-        and self:_config().upload_on_close == true then
+        and self:_config().upload_on_close == true
+        and not self:_below_floor(position) then
         if not self.local_position
             or not PositionMapper.same_position(position, self.local_position) then
             self.dirty = true
@@ -858,6 +973,8 @@ function ProgressSync:on_close_document()
     self.verified = false
     self.local_position = nil
     self.remote_position = nil
+    self.remote_floor = nil
+    self.report_fallback = nil
     self.document_context = nil
 end
 
@@ -877,7 +994,8 @@ function ProgressSync:on_suspend()
     -- (and Wi-Fi with it), so a blocking request or settings rewrite can hang
     -- the suspend. Remember what to upload, and do it after resume.
     if position and self.verified and self.dirty
-        and self:_config().upload_on_close == true then
+        and self:_config().upload_on_close == true
+        and not self:_below_floor(position) then
         self.pending_resume_upload = {
             position = copy(position),
             baseline = copy(self.remote_position),
@@ -938,6 +1056,13 @@ function ProgressSync:position_for_report(book_id)
         return nil, nil, false
     end
     if not self.verified then
+        -- An unanswered (dismissed or suspended) choice: report time with
+        -- the cloud's own position so neither side moves.
+        if self.report_fallback and self.state ~= "awaiting_choice" then
+            local fallback = copy(self.report_fallback)
+            fallback.book_id = tostring(book_id)
+            return fallback, nil, true
+        end
         -- Without automatic pulls nothing ever verifies the session, so
         -- gating would drop all reading time. Let the report fall back to
         -- its remote-derived context position instead, unless a manual sync
@@ -957,6 +1082,17 @@ function ProgressSync:position_for_report(book_id)
         self.dirty = true
     end
     self.local_position = position
+    -- The session was verified below a nearby cloud position (another
+    -- chapter file): report the cloud's position until reading passes it.
+    if self.remote_floor then
+        if PositionMapper.is_behind(position, self.remote_floor,
+            EXACT_THRESHOLD_PERCENT) then
+            local floor = copy(self.remote_floor)
+            floor.book_id = tostring(book_id)
+            return floor, nil, true
+        end
+        self.remote_floor = nil
+    end
     return position, nil, true
 end
 
