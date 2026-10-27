@@ -39,6 +39,23 @@ local _ = PluginUtil.tr
 local PADDING_TOP = Size.padding.large
 local PADDING_BOTTOM = Size.padding.large
 local BUTTON_PADDING = Size.padding.default
+-- The title is the quoted underline, which can be a whole paragraph. A
+-- multi-line TitleBar has no line limit, so cap the text and fall back to a
+-- single truncated line when it would still take too much of the window.
+local TITLE_MAX_CHARS = 120
+local TITLE_MAX_HEIGHT_RATIO = 0.3
+
+local function truncate_chars(text, max_chars)
+    local count = 0
+    -- Positions of UTF-8 lead bytes (anything but a continuation byte).
+    for start in text:gmatch("()[^\128-\191]") do
+        count = count + 1
+        if count > max_chars then
+            return text:sub(1, start - 1) .. "…"
+        end
+    end
+    return text
+end
 
 local CenterThoughtPopupWidget = InputContainer:extend{
     items = nil,
@@ -154,11 +171,11 @@ function CenterThoughtPopupWidget:_reopen(opts)
 end
 
 --- Window title: the quoted abstract of the first review item (whitespace
---- collapsed, overflow truncated by TitleBar), or "Thoughts" when absent.
+--- collapsed, capped at TITLE_MAX_CHARS), or "Thoughts" when absent.
 function CenterThoughtPopupWidget:_title()
     local abstract = self.items and self.items[1] and self.items[1].abstract
     if type(abstract) == "string" and abstract ~= "" then
-        return abstract:gsub("%s+", " ")
+        return truncate_chars((abstract:gsub("%s+", " ")), TITLE_MAX_CHARS)
     end
     return _("Thoughts")
 end
@@ -199,18 +216,26 @@ function CenterThoughtPopupWidget:_buildLayout()
     local renderer = self._pages
     renderer:ensureLayout()
 
-    self._titlebar = TitleBar:new{
-        width = self.width,
-        align = "left",
-        with_bottom_line = true,
-        title = self:_title(),
-        title_multilines = true,
-        title_face = Font:getFace("x_smalltfont", 18),
-        close_callback = function()
-            self:onClose()
-        end,
-        show_parent = self,
-    }
+    local ratio_h = math.floor(Screen:getHeight() * self.height_ratio)
+    local function make_titlebar(multilines)
+        return TitleBar:new{
+            width = self.width,
+            align = "left",
+            with_bottom_line = true,
+            title = self:_title(),
+            title_multilines = multilines,
+            title_face = Font:getFace("x_smalltfont", 18),
+            close_callback = function()
+                self:onClose()
+            end,
+            show_parent = self,
+        }
+    end
+    self._titlebar = make_titlebar(true)
+    if self._titlebar:getHeight() > math.floor(ratio_h * TITLE_MAX_HEIGHT_RATIO) then
+        self._titlebar:free()
+        self._titlebar = make_titlebar(false)
+    end
 
     local text_w = renderer.text_w
 
@@ -224,7 +249,6 @@ function CenterThoughtPopupWidget:_buildLayout()
     local chrome = self._titlebar:getHeight()
         + self._button_table:getSize().h
         + PADDING_TOP + PADDING_BOTTOM
-    local ratio_h = math.floor(Screen:getHeight() * self.height_ratio)
     local blank_tolerance = math.ceil((self.doc_font_size or Screen:scaleBySize(18)) * 1.2)
 
     local viewport_h
