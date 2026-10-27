@@ -28,8 +28,10 @@ package.preload["weread.ui.thought_popup"] = function()
 end
 package.preload["weread.ui.thought_popup.popup_config"] = function() return {} end
 package.preload["ui/time"] = function() return { now = function() return 0 end } end
+local dirty_targets = {}
 package.preload["ui/uimanager"] = function()
-    return { setDirty = function() end, nextTick = function() end }
+    return { setDirty = function(_self, target) dirty_targets[#dirty_targets + 1] = target or false end,
+        nextTick = function() end }
 end
 package.preload["weread.lib.plugin_util"] = function()
     return {
@@ -168,5 +170,12 @@ host._prepareAnnotationContext = function()
 end
 local ready_ok, ready_err = pcall(host.onUnifiedAnnotationsReady, host)
 expect(ready_ok, "a locked database crashed reader-ready: " .. tostring(ready_err))
+
+-- Overlay/highlight changes must repaint the reader view itself: the plugin
+-- has no "dialog" widget, and setDirty(nil) refreshes without repainting.
+dirty_targets = {}
+host._thought_highlight_active = true
+host:_clearThoughtHighlight({ highlightXPointer = function() end })
+expect(dirty_targets[1] == host.ui, "clearing the thought highlight did not repaint ReaderUI")
 
 print(("annotation_tap_cost_spec: %d checks"):format(checks))

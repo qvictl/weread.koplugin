@@ -522,7 +522,7 @@ function M:_runAnnotationJob(context, options)
             end
             context.generation = (context.generation or 0) + 1
             self:_refreshAnnotationOverlay()
-            UIManager:setDirty(self.dialog, "ui")
+            UIManager:setDirty(self.ui, "ui")
         end,
         fetch_source = function(chapter)
             local html, format = request.job:callNetwork(function()
@@ -552,7 +552,7 @@ function M:_runAnnotationJob(context, options)
                 end
                 self:_refreshAnnotationOverlay()
                 if activate then self:applyAnnotationVisibility() end
-                UIManager:setDirty(self.dialog, "ui")
+                UIManager:setDirty(self.ui, "ui")
             end
         end,
     }
@@ -940,7 +940,7 @@ function M:_saveAnnotationChapterMatch(context, node, uid)
         self._xpointer_overlay:setRecords({})
     end
     self:_refreshAnnotationOverlay()
-    UIManager:setDirty(self.dialog, "ui")
+    UIManager:setDirty(self.ui, "ui")
     return updated
 end
 

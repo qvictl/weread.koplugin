@@ -81,7 +81,7 @@ function M:applyAnnotationVisibility()
     if self._xpointer_overlay then
         self._xpointer_overlay:setEnabled(show)
         if show and self._refreshAnnotationOverlay then self:_refreshAnnotationOverlay() end
-        UIManager:setDirty(self.dialog, "ui")
+        UIManager:setDirty(self.ui, "ui")
     end
     if not self:detectWeReadBook() then
         return
@@ -308,7 +308,7 @@ function M:_clearThoughtHighlight(document)
         document:highlightXPointer()
     end)
     self._thought_highlight_active = nil
-    UIManager:setDirty(self.dialog, "ui")
+    UIManager:setDirty(self.ui, "ui")
 end
 
 function M:_showThoughtPopup(pages, link, session_gen, tap_started)
@@ -332,7 +332,7 @@ function M:_showThoughtPopup(pages, link, session_gen, tap_started)
         thought_perf("highlight", highlight_started, "ok=", tostring(ok))
         if ok then
             self._thought_highlight_active = true
-            UIManager:setDirty(self.dialog, "partial")
+            UIManager:setDirty(self.ui, "partial")
         end
     end
 
@@ -345,7 +345,7 @@ function M:_showThoughtPopup(pages, link, session_gen, tap_started)
                 if self._thought_highlight_active then
                     self._thought_highlight_active = nil
                     document:highlightXPointer()
-                    UIManager:setDirty(self.dialog, "ui")
+                    UIManager:setDirty(self.ui, "ui")
                 end
             end,
         }))
