@@ -404,7 +404,7 @@ def main() -> int:
     sub = parser.add_subparsers(dest="command", required=True)
     p = sub.add_parser("merge")
     p.add_argument("--out", required=True)
-    p.add_argument("--all-files", action="store_true", help="count untested plugin files as 0%")
+    p.add_argument("--all-files", action="store_true", help="count untested plugin files as 0%%")
     p.add_argument("inputs", nargs="*")
     p = sub.add_parser("report")
     p.add_argument("stats")
