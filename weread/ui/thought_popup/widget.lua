@@ -54,6 +54,8 @@ local ThoughtPopupWidget = InputContainer:extend{
 
     _pages = nil,
     _scroll_container = nil,
+    -- False from (re)layout until the first paint; see handleEvent.
+    _painted = false,
 
     covers_footer = true,
 }
@@ -135,6 +137,7 @@ end
 
 function ThoughtPopupWidget:_buildLayout()
     self:clear()
+    self._painted = false
 
     local item_width = math.min(math.ceil(self.doc_margins.right * 2 / 5), Screen:scaleBySize(10))
     local text_w = self._pages.text_w
@@ -193,6 +196,21 @@ function ThoughtPopupWidget:_buildLayout()
         dimen = Screen:getSize(),
         self.container
     }
+end
+
+function ThoughtPopupWidget:paintTo(bb, x, y)
+    InputContainer.paintTo(self, bb, x, y)
+    self._painted = true
+end
+
+--- Taps queued in the input batch that opened this popup arrive before its
+--- first paint, while container/scroll dimens are still unset. They were made
+--- before the popup was visible, so drop them (see center_widget.lua).
+function ThoughtPopupWidget:handleEvent(event)
+    if not self._painted and event and event.handler == "onGesture" then
+        return true
+    end
+    return InputContainer.handleEvent(self, event)
 end
 
 function ThoughtPopupWidget:onCloseWidget()

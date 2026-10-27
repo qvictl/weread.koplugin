@@ -64,6 +64,8 @@ local CenterThoughtPopupWidget = InputContainer:extend{
     _button_table = nil,
     _viewport = nil,
     container = nil,
+    -- False from (re)layout until the first paint; see handleEvent.
+    _painted = false,
 }
 
 function CenterThoughtPopupWidget:init()
@@ -192,6 +194,7 @@ end
 function CenterThoughtPopupWidget:_buildLayout()
     self:clear()
     self.page_index = 1
+    self._painted = false
 
     local renderer = self._pages
     renderer:ensureLayout()
@@ -307,6 +310,24 @@ function CenterThoughtPopupWidget:_syncButtons()
             tostring(self.page_index) .. " / " .. tostring(total),
             position_btn.width)
     end
+end
+
+function CenterThoughtPopupWidget:paintTo(bb, x, y)
+    InputContainer.paintTo(self, bb, x, y)
+    self._painted = true
+end
+
+--- KOReader dispatches a whole input batch before repainting. When the UI
+--- thread was busy, taps queued behind the one that opened (or reopened) this
+--- popup reach it before its first paint: the new title-bar icon and buttons
+--- still have placeholder (0, 0) gesture ranges and no painted dimen, and
+--- their tap feedback crashes in UIManager:widgetInvert. Such taps were made
+--- before the user could see the popup, so drop them until it is painted.
+function CenterThoughtPopupWidget:handleEvent(event)
+    if not self._painted and event and event.handler == "onGesture" then
+        return true
+    end
+    return InputContainer.handleEvent(self, event)
 end
 
 function CenterThoughtPopupWidget:onCloseWidget()

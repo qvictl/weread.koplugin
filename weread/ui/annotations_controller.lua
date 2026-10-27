@@ -254,6 +254,7 @@ function M:_teardownThoughtInterception()
         self._thought_db_book_id = nil
     end
     self._thought_popup_open = nil
+    self._thought_popup_pending = nil
     self._current_thought_popup = nil
     self._thought_page_cache = nil
     self._thought_page_cache_n = nil
@@ -485,6 +486,12 @@ function M:_queueThoughtPopup(pages, link, tap_started)
         return true
     end
 
+    -- A popup is already queued for the next tick: further taps from the same
+    -- input batch (queued while the UI thread was busy) must not queue another
+    -- one or reach a popup that has not been painted yet.
+    if self._thought_popup_pending then
+        return true
+    end
     -- Guard against a stale flag: if we believe a popup is open but it is not
     -- actually on screen, reset instead of swallowing every tap forever.
     if self._thought_popup_open then
@@ -495,9 +502,11 @@ function M:_queueThoughtPopup(pages, link, tap_started)
     end
 
     self._thought_popup_open = true
+    self._thought_popup_pending = true
     local session_gen = self._reader_session_gen or 0
     local scheduled_at = time.now()
     UIManager:nextTick(function()
+        self._thought_popup_pending = nil
         thought_perf("next_tick_delay", scheduled_at)
         if session_gen ~= self._reader_session_gen then
             self._thought_popup_open = nil
@@ -507,7 +516,7 @@ function M:_queueThoughtPopup(pages, link, tap_started)
             self._thought_popup_open = nil
             return
         end
-        self:_showThoughtPopup(pages, link, session_gen, tap_started)
+        self:_showThoughtPopup(pages, link or {}, session_gen, tap_started)
     end)
     return true
 end
