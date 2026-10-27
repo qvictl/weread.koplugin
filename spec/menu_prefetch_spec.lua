@@ -23,11 +23,22 @@ for _, name in ipairs({
         return { new = function(_self, options) return options end }
     end
 end
+local ticks = {}
 package.preload["ui/uimanager"] = function()
     return {
         show = function(_self, widget) shown_widget = widget end,
         scheduleIn = function(_self, _delay, callback) callback() end,
+        nextTick = function(_self, callback) ticks[#ticks + 1] = callback end,
     }
+end
+local collections_shown = {}
+package.preload["apps/filemanager/filemanager"] = function()
+    return { instance = { collections = {
+        onShowColl = function(_self, name) collections_shown[#collections_shown + 1] = name end,
+    } } }
+end
+package.preload["readcollection"] = function()
+    return { coll = { weread = {} } }
 end
 package.preload["weread.lib.logger"] = function()
     return { info = function() end }
@@ -415,6 +426,23 @@ expect(popup_items[5] and popup_items[5].text_func()
 expect(popup_items[6] and popup_items[6].text == "Tap left/right to turn pages"
         and not popup_items[6].checked_func(),
     "tap-to-page entry is present and off by default")
+
+-- The local-bookshelf gesture only schedules the collection; repeated
+-- gestures before it opened collapse into one.
+do
+    local opener = { settings = { collection_name = "weread" } }
+    for key, value in pairs(Menu) do opener[key] = value end
+    ticks = {}
+    opener:showWereadCollection()
+    opener:showWereadCollection()
+    expect(#collections_shown == 0 and #ticks == 1,
+        "local bookshelf opened inside the gesture handler or twice")
+    ticks[1]()
+    expect(#collections_shown == 1 and collections_shown[1] == "weread",
+        "deferred local bookshelf did not open the WeRead collection")
+    opener:showWereadCollection()
+    expect(#ticks == 2, "local bookshelf could not be opened again")
+end
 
 print(string.format(
     "menu_prefetch_spec: %d checks, %d failure(s)", checks, failures))

@@ -1,4 +1,5 @@
 -- Cache settings, directory selection, scanning, and cleanup UI.
+local BookRecords = require("weread.lib.book_records")
 local ButtonDialog = require("ui/widget/buttondialog")
 local ConfirmBox = require("ui/widget/confirmbox")
 local Content = require("weread.lib.content")
@@ -16,6 +17,81 @@ local display_error = PluginUtil.display_error
 local file_exists = PluginUtil.file_exists
 
 local M = {}
+
+-- Deleting or moving a book's directory under a running download makes the
+-- job write into a stale path, and its completion brings the record back.
+-- A background prefetch has no cancel button, so stop it here; the user can
+-- retry as soon as its worker has exited.
+function M:refuseWhileDownloading()
+    local downloader = self.downloader
+    if downloader and downloader._active_job then
+        if downloader._active_job.prefetch and downloader.cancelPrefetch then
+            downloader:cancelPrefetch("cache_cleanup")
+        end
+        self:showInfo(_("A download is in progress. Cancel it or wait for it to finish first."))
+        return true
+    end
+    return false
+end
+
+-- POSIX single-quote a shell argument. string.format("%q") is Lua quoting,
+-- not shell quoting: "$" and backticks still expand inside its double quotes.
+local function shell_quote(value)
+    return "'" .. tostring(value):gsub("'", "'\\''") .. "'"
+end
+
+local function normalize_dir(path)
+    return (tostring(path or ""):gsub("/+$", ""))
+end
+
+-- Delete `path` recursively without a shell. Symbolic links are removed
+-- themselves and never followed, so a link inside a book directory cannot
+-- take files outside it along.
+local function delete_tree(lfs, path)
+    local stat = lfs.symlinkattributes or lfs.attributes
+    local attr = stat(path)
+    if not attr then return true end
+    if attr.mode ~= "directory" then
+        local ok, err = os.remove(path)
+        return ok ~= nil, err
+    end
+    local ok_iter, iter, dir_obj = pcall(lfs.dir, path)
+    if not ok_iter then return false, iter end
+    local failure
+    for entry in iter, dir_obj do
+        if entry ~= "." and entry ~= ".." then
+            local ok, err = delete_tree(lfs, path .. "/" .. entry)
+            if not ok then failure = failure or err or "delete failed" end
+        end
+    end
+    local removed, err = (lfs.rmdir or os.remove)(path)
+    if not removed then return false, failure or err end
+    return failure == nil, failure
+end
+
+-- Remove a book's cache directory. The directory is resolved from stored
+-- paths and may be anything a record points at, so only a per-book directory
+-- is deleted: it must be named after the book id, must not be a download
+-- root, and must not contain relative components. A record whose files sit
+-- directly in the download root or in a user library folder is left alone.
+function M:removeBookDir(book_id, book)
+    local dir = normalize_dir(Content.book_resolved_dir(self.settings, book_id, book))
+    local name = dir:match("([^/]+)$")
+    local is_root = dir == normalize_dir(self.settings.cache_dir)
+        or (self.settings.default_cache_dir ~= nil
+            and dir == normalize_dir(self.settings.default_cache_dir))
+    if dir == "" or dir:sub(1, 1) ~= "/" or is_root
+        or name ~= Content.book_dir_name(book_id)
+        or dir:find("/%.%.?/") then
+        logger.warn("book cache not removed: not a per-book directory:", dir)
+        return false
+    end
+    local lfs = require("libs/libkoreader-lfs")
+    if lfs.attributes(dir, "mode") ~= "directory" then return true end
+    local ok, err = delete_tree(lfs, dir)
+    if not ok then logger.warn("book cache not fully removed:", dir, tostring(err)) end
+    return ok
+end
 
 function M:setMPImageDownload(enabled)
     local cache = self.settings:get("cache")
@@ -36,7 +112,7 @@ function M:validateDownloadDir(path)
         return false, _("Invalid path.")
     end
     if not lfs.attributes(path, "mode") then
-        os.execute("mkdir -p " .. string.format("%q", path))
+        os.execute("mkdir -p " .. shell_quote(path))
         if not lfs.attributes(path, "mode") then
             return false, _("Directory does not exist and could not be created.")
         end
@@ -84,7 +160,7 @@ function M:offerMoveBooksToNewDir(old_dir, new_dir)
         return
     end
     local lfs = require("libs/libkoreader-lfs")
-    local books = self.settings:get_books()
+    local books = BookRecords.all(self.settings)
     local movable = {}
     for book_id, book in pairs(books) do
         local src = Content.book_resolved_dir(self.settings, book_id, book)
@@ -114,9 +190,10 @@ function M:offerMoveBooksToNewDir(old_dir, new_dir)
 end
 
 function M:moveBooksToNewDir(movable, new_dir)
+    if self:refuseWhileDownloading() then return end
     self:showBusy(_("Moving cached books..."))
     UIManager:scheduleIn(0.1, function()
-        local books = self.settings:get_books()
+        local books = BookRecords.all(self.settings)
         local moved, skipped, failed = 0, 0, 0
         local collection_updates = {}
         for _i, m in ipairs(movable) do
@@ -170,11 +247,7 @@ function M:moveBooksToNewDir(movable, new_dir)
                 ReadCollection:write({ [name] = true })
             end)
         end
-        for _i, m in ipairs(movable) do
-            if books[m.book_id] then
-                self.settings:put_book(m.book_id, books[m.book_id])
-            end
-        end
+        BookRecords.put_many(self.settings, books)
         self.settings:flush()
         self:closeBusy()
         local message
@@ -203,9 +276,9 @@ function M:moveBookDir(src, dst)
     end
     local parent = dst:match("^(.*)/[^/]+$")
     if parent then
-        os.execute("mkdir -p " .. string.format("%q", parent))
+        os.execute("mkdir -p " .. shell_quote(parent))
     end
-    local status = os.execute("mv -f " .. string.format("%q", src) .. " " .. string.format("%q", dst))
+    local status = os.execute("mv -f " .. shell_quote(src) .. " " .. shell_quote(dst))
     if status == true or status == 0 then
         return true
     end
@@ -232,15 +305,6 @@ local SHELF_SORT_OPTIONS = {
     { key = "name_asc",  label = _("Title A-Z"), short = "A–Z" },
     { key = "name_desc", label = _("Title Z-A"), short = "Z–A" },
 }
-
-local function shelfSortLabel(sort_key)
-    for _i, opt in ipairs(SHELF_SORT_OPTIONS) do
-        if opt.key == sort_key then
-            return opt.label
-        end
-    end
-    return SHELF_SORT_OPTIONS[1].label
-end
 
 function M:shelfSortSummary()
     local sort_key = self.settings:get("shelf").sort_order
@@ -397,7 +461,7 @@ function M:isBookDownloaded(book, saved_books, downloaded_cache)
     if saved_books then
         record = saved_books[book_id]
     else
-        record = self.settings:get_book(book_id)
+        record = BookRecords.get(self.settings, book_id)
     end
     local is_downloaded = self:bookRecordHasDownload(record)
     if downloaded_cache then
@@ -406,33 +470,38 @@ function M:isBookDownloaded(book, saved_books, downloaded_cache)
     return is_downloaded
 end
 
-function M:shelfToolbarItems(with_filters, refresh)
-    local sort_order = self.settings:get("shelf").sort_order
-    local items = {
-        {
-            text = _("Sort"),
-            mandatory = T(_("%1 \u{25BE}"), shelfSortLabel(sort_order)),
-            callback = self:safeCallback(_("Sort"), function()
-                self:showShelfSortOptions(refresh)
-            end),
-        },
-    }
-    if with_filters then
-        table.insert(items, {
-            text = _("Filter"),
-            mandatory = T(_("%1 \u{25BE}"), self:shelfFilterSummary()),
-            callback = self:safeCallback(_("Filter"), function()
-                self:showShelfFilterOptions(refresh)
-            end),
-        })
-    end
-    items[#items].separator = true -- divide the toolbar rows from the book list
-    return items
+-- Monotonic seconds for time-slicing long cache walks; nil when KOReader's
+-- clock is unavailable (slices then fall back to a fixed number of books).
+local function monotonic_seconds()
+    local ok, time = pcall(require, "ui/time")
+    if not ok or type(time) ~= "table" or not time.now or not time.to_s then return nil end
+    return time.to_s(time.now())
 end
 
+local CACHE_SCAN_SLICE_SECONDS = 0.25
+local CACHE_SCAN_SLICE_BOOKS = 8
+
+-- Run a slow cache operation after a busy message has been painted.
+function M:runCacheTask(text, task)
+    self:showBusy(text)
+    UIManager:scheduleIn(0.1, function()
+        local ok, err = pcall(task)
+        self:closeBusy()
+        if not ok then
+            logger.warn("cache task failed:", log_error(err))
+            self:showInfo(T(_("%1 failed:\n%2"), text, display_error(err)))
+        end
+    end)
+end
+
+-- Measuring the cache walks every file of every book. With hundreds of
+-- books (and hundreds of chapter files each) that froze the UI before the
+-- page appeared, so walk the books in time-limited slices behind a busy
+-- message and show the page when done.
 function M:showCacheManagement()
+    if self._cache_scan then return end
     local lfs = require("libs/libkoreader-lfs")
-    local books = self.settings:get_books()
+    local books = BookRecords.all(self.settings)
     local items = {}
     local entries = {}
     local seen_dirs = {}
@@ -489,74 +558,115 @@ function M:showCacheManagement()
     -- Only list plugin-owned entries tracked in the books table. Scanning the
     -- filesystem would list unrelated subfolders when cache_dir is a user-selected
     -- library directory, and deleting one would rm -rf a non-WeRead folder.
+    local queue = {}
     for book_id, book in pairs(books) do
-        add_cache_entry(book_id, book.title, Content.book_resolved_dir(self.settings, book_id, book))
+        queue[#queue + 1] = { book_id = book_id, book = book }
     end
+    local scan = { index = 1 }
+    self._cache_scan = scan
 
-    table.sort(entries, function(a, b)
-        if a.is_mp ~= b.is_mp then
-            return a.is_mp
+    local finish
+    local function step()
+        if self._cache_scan ~= scan then return end
+        local started = monotonic_seconds()
+        local processed = 0
+        while scan.index <= #queue do
+            local item = queue[scan.index]
+            scan.index = scan.index + 1
+            add_cache_entry(item.book_id, item.book.title,
+                Content.book_resolved_dir(self.settings, item.book_id, item.book))
+            processed = processed + 1
+            local now = started and monotonic_seconds()
+            if scan.index <= #queue and ((now and now - started >= CACHE_SCAN_SLICE_SECONDS)
+                    or (not now and processed >= CACHE_SCAN_SLICE_BOOKS)) then
+                UIManager:scheduleIn(0.1, step)
+                return
+            end
         end
-        return tostring(a.title):lower() < tostring(b.title):lower()
-    end)
+        self._cache_scan = nil
+        self:closeBusy()
+        finish()
+    end
+    self:showBusy(_("Calculating cache size..."))
+    UIManager:scheduleIn(0.1, step)
 
-    local total_str = total_size < 1024 * 1024
-        and string.format("%.0f KB", total_size / 1024)
-        or string.format("%.1f MB", total_size / 1024 / 1024)
-    local mp_total_str = mp_total_size < 1024 * 1024
-        and string.format("%.0f KB", mp_total_size / 1024)
-        or string.format("%.1f MB", mp_total_size / 1024 / 1024)
-    table.insert(items, {
-        text = T(_("[Cleanup] Clear all public account cache (%1)"), mp_total_str),
-        callback = self:safeCallback(_("Clear all public account cache"), function()
-            UIManager:show(ConfirmBox:new{
-                text = _("Clear all public account cache? Downloaded articles and cached article lists will be deleted."),
-                ok_text = _("Clear"),
-                ok_callback = function()
-                    self:clearAllMPCache()
-                    self:refreshCacheManagement(_("Public account cache cleared"))
-                end,
-            })
-        end),
-    })
-    table.insert(items, {
-        text = T(_("[Cleanup] Clear all cache (%1)"), total_str),
-        separator = true,
-        callback = self:safeCallback(_("Clear all cache"), function()
-            UIManager:show(ConfirmBox:new{
-                text = _("Clear all cache? Downloaded books and articles, underlines, thoughts, and matching progress will be deleted."),
-                ok_text = _("Clear"),
-                ok_callback = function()
-                    self:clearAllCache()
-                    self:refreshCacheManagement(_("Cache cleared"))
-                end,
-            })
-        end),
-    })
+    finish = function()
 
-    for entry_index, entry in ipairs(entries) do
-        local size_str = entry.size < 1024 * 1024
-            and string.format("%.0f KB", entry.size / 1024)
-            or string.format("%.1f MB", entry.size / 1024 / 1024)
+        table.sort(entries, function(a, b)
+            if a.is_mp ~= b.is_mp then
+                return a.is_mp
+            end
+            return tostring(a.title):lower() < tostring(b.title):lower()
+        end)
+
+        local total_str = total_size < 1024 * 1024
+            and string.format("%.0f KB", total_size / 1024)
+            or string.format("%.1f MB", total_size / 1024 / 1024)
+        local mp_total_str = mp_total_size < 1024 * 1024
+            and string.format("%.0f KB", mp_total_size / 1024)
+            or string.format("%.1f MB", mp_total_size / 1024 / 1024)
         table.insert(items, {
-            text = entry.title,
-            post_text = T(_("%1 files, %2"), tostring(entry.file_count), size_str),
-            mandatory = entry.is_mp and _("Public Account") or "",
-            callback = self:safeCallback(entry.title, function()
-                self:confirmClearBookCache(entry.book_id, entry.title)
+            text = T(_("[Cleanup] Clear all public account cache (%1)"), mp_total_str),
+            callback = self:safeCallback(_("Clear all public account cache"), function()
+                UIManager:show(ConfirmBox:new{
+                    text = _("Clear all public account cache? Downloaded articles and cached article lists will be deleted."),
+                    ok_text = _("Clear"),
+                    ok_callback = function()
+                        if self:refuseWhileDownloading() then return end
+                        self:runCacheTask(_("Clearing cache..."), function()
+                            if not self:clearAllMPCache() then return end
+                            self:refreshCacheManagement(_("Public account cache cleared"))
+                        end)
+                    end,
+                })
             end),
         })
-    end
+        table.insert(items, {
+            text = T(_("[Cleanup] Clear all cache (%1)"), total_str),
+            separator = true,
+            callback = self:safeCallback(_("Clear all cache"), function()
+                UIManager:show(ConfirmBox:new{
+                    text = _("Clear all cache? Downloaded books and articles, underlines, thoughts, and matching progress will be deleted."),
+                    ok_text = _("Clear"),
+                    ok_callback = function()
+                        if self:refuseWhileDownloading() then return end
+                        self:runCacheTask(_("Clearing cache..."), function()
+                            if not self:clearAllCache() then return end
+                            self:refreshCacheManagement(_("Cache cleared"))
+                        end)
+                    end,
+                })
+            end),
+        })
 
-    self.cache_menu = self:showList(_("Cache management"), items, _("No cached items"))
+        for entry_index, entry in ipairs(entries) do
+            local size_str = entry.size < 1024 * 1024
+                and string.format("%.0f KB", entry.size / 1024)
+                or string.format("%.1f MB", entry.size / 1024 / 1024)
+            table.insert(items, {
+                text = entry.title,
+                post_text = T(_("%1 files, %2"), tostring(entry.file_count), size_str),
+                mandatory = entry.is_mp and _("Public Account") or "",
+                callback = self:safeCallback(entry.title, function()
+                    self:confirmClearBookCache(entry.book_id, entry.title)
+                end),
+            })
+        end
+
+        self.cache_menu = self:showTrackedList(_("Cache management"), items, _("No cached items"))
+    end
 end
 
+-- Rebuild the cache management page if it is open. A scan or cleanup run
+-- from elsewhere (the settings menu) only reports its result: it must not
+-- open a page the user never asked for.
 function M:refreshCacheManagement(message)
-    if self.cache_menu then
-        UIManager:close(self.cache_menu)
-        self.cache_menu = nil
+    local menu = self.cache_menu
+    self.cache_menu = nil
+    if menu and UIManager:isWidgetShown(menu) then
+        UIManager:close(menu)
+        self:showCacheManagement()
     end
-    self:showCacheManagement()
     if message then
         self:showTransientInfo(message)
     end
@@ -568,7 +678,7 @@ end
 -- never be registered and later removed by cache cleanup.
 function M:scanLocalCache(root, allowed, dry_run)
     local lfs = require("libs/libkoreader-lfs")
-    local books = self.settings:get_books()
+    local books = BookRecords.all(self.settings)
     local added, updated = Scan.scan_root({
         root = root,
         fs = lfs,
@@ -578,10 +688,8 @@ function M:scanLocalCache(root, allowed, dry_run)
         dry_run = dry_run,
         now = os.time(),
     })
-    if not dry_run then
-        for book_id, book in pairs(books) do
-            self.settings:put_book(book_id, book)
-        end
+    if not dry_run and (added or 0) + (updated or 0) > 0 then
+        BookRecords.put_many(self.settings, books)
         self.settings:flush()
     end
     return added, updated
@@ -639,7 +747,7 @@ end
 -- or network the scan is silently skipped; it can be run later from Cache
 -- management.
 function M:offerScanNewDir(new_dir, base_message)
-    if not self.settings:is_api_configured() or not self:isNetworkOnline() then
+    if not self.settings:is_api_configured() or not self:isNetworkConnected() then
         self:showInfo(base_message)
         return
     end
@@ -678,13 +786,16 @@ function M:confirmClearBookCache(book_id, title, on_cleared)
         text = T(_("Clear cache for \"%1\"?\nDownloaded files, underlines, thoughts, and matching progress will be deleted."), title),
         ok_text = _("Clear"),
         ok_callback = function()
-            self:clearBookCache(book_id)
-            if on_cleared then
-                on_cleared()
-                self:showTransientInfo(_("Cache cleared"))
-            else
-                self:refreshCacheManagement(_("Cache cleared"))
-            end
+            if self:refuseWhileDownloading() then return end
+            self:runCacheTask(_("Clearing cache..."), function()
+                if not self:clearBookCache(book_id) then return end
+                if on_cleared then
+                    on_cleared()
+                    self:showTransientInfo(_("Cache cleared"))
+                else
+                    self:refreshCacheManagement(_("Cache cleared"))
+                end
+            end)
         end,
     })
 end
@@ -746,13 +857,13 @@ function M:clearBookAnnotationData(book_id, book)
 end
 
 function M:clearBookCache(book_id)
-    local book = self.settings:get_book(book_id)
+    if self:refuseWhileDownloading() then return false end
+    local book = BookRecords.get(self.settings, book_id)
     local path_to_remove = book and (book.cached_full_book or book.cached_file)
-    local cache_dir = Content.book_resolved_dir(self.settings, book_id, book)
     self:clearBookAnnotationData(book_id, book)
-    os.execute("rm -rf " .. string.format("%q", cache_dir))
+    self:removeBookDir(book_id, book)
     if book then
-        self.settings:delete_book(book_id)
+        BookRecords.delete(self.settings, book_id)
         self.settings:flush()
     end
     if path_to_remove then
@@ -766,13 +877,15 @@ function M:clearBookCache(book_id)
         end)
     end
     self:refreshShelfCacheIndicators()
+    return true
 end
 
 function M:clearAllMPCache()
+    if self:refuseWhileDownloading() then return false end
     -- Delete each MP book's real directory (which may sit under an old download
     -- root) rather than scanning only the current cache_dir, and only touch
     -- plugin-owned entries tracked in the books table.
-    local books = self.settings:get_books()
+    local books = BookRecords.all(self.settings)
     pcall(function()
         local ReadCollection = require("readcollection")
         local name = self.settings.collection_name or "weread"
@@ -789,18 +902,24 @@ function M:clearAllMPCache()
         end
         ReadCollection:write({ [name] = true })
     end)
+    local deleted = {}
     for book_id, book in pairs(books) do
         if WeRead.is_mp_book(book_id) then
-            os.execute("rm -rf " .. string.format("%q", Content.book_resolved_dir(self.settings, book_id, book)))
-            self.settings:delete_book(book_id)
+            self:removeBookDir(book_id, book)
+            deleted[#deleted + 1] = book_id
         end
+    end
+    for _i, book_id in ipairs(deleted) do
+        BookRecords.delete(self.settings, book_id)
     end
     self.settings:flush()
     self:refreshShelfCacheIndicators()
+    return true
 end
 
 function M:clearAllCache()
-    local books = self.settings:get_books()
+    if self:refuseWhileDownloading() then return false end
+    local books = BookRecords.all(self.settings)
     pcall(function()
         local ReadCollection = require("readcollection")
         local name = self.settings.collection_name or "weread"
@@ -819,13 +938,14 @@ function M:clearAllCache()
     end)
     for book_id, book in pairs(books) do
         self:clearBookAnnotationData(book_id, book)
-        os.execute("rm -rf " .. string.format("%q", Content.book_resolved_dir(self.settings, book_id, book)))
+        self:removeBookDir(book_id, book)
     end
-    for book_id in pairs(books) do
-        self.settings:delete_book(book_id)
-    end
+    local ids = {}
+    for book_id in pairs(books) do ids[#ids + 1] = book_id end
+    BookRecords.put_many(self.settings, {}, ids)
     self.settings:flush()
     self:refreshShelfCacheIndicators()
+    return true
 end
 
 return M

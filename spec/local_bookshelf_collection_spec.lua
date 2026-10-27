@@ -86,9 +86,14 @@ package.preload["weread.lib.content"] = function()
         book_resolved_dir = function(_settings, book_id, _book)
             return "/cache/" .. tostring(book_id)
         end,
+        book_dir_name = function(book_id) return tostring(book_id) end,
     }
 end
 package.preload["weread.ui.download_dialog"] = function() return {} end
+-- Book directories are absent: cache cleanup has nothing to delete on disk.
+package.preload["libs/libkoreader-lfs"] = function()
+    return { attributes = function() return nil end }
+end
 package.preload["weread.lib.i18n"] = function()
     return { tr = function(text) return text end }
 end
@@ -281,6 +286,38 @@ local function make_cache_host(books)
         host[key] = value
     end
     return host
+end
+
+-- Cache operations are refused while a download runs.
+do
+    local before_removes = #coll_removes
+    local host = make_cache_host({ book = { cached_file = "/cache/book/full.epub" } })
+    local shown
+    host.downloader = { _active_job = {} }
+    host.showInfo = function(_self, text) shown = text end
+    eq(host:clearBookCache("book"), false, "clearBookCache reported success under a download")
+    eq(host:clearAllCache(), false, "clearAllCache reported success under a download")
+    eq(host:clearAllMPCache(), false, "clearAllMPCache reported success under a download")
+    eq(#coll_removes, before_removes, "cache cleared under a running download")
+    eq(shown ~= nil, true, "user told why nothing happened")
+
+    -- A background prefetch has no cancel button: it is stopped for a retry.
+    local cancelled
+    host.downloader = {
+        _active_job = { prefetch = true },
+        cancelPrefetch = function(_self, reason) cancelled = reason end,
+    }
+    eq(host:clearBookCache("book"), false, "clearBookCache ran under a prefetch")
+    eq(cancelled, "cache_cleanup", "running prefetch was not cancelled for the cleanup")
+
+    -- The confirmation only reports success when the cache was cleared.
+    host.downloader = { _active_job = {} }
+    local confirm, cleared_callback
+    package.loaded["ui/uimanager"].show = function(_self, dialog) confirm = dialog end
+    host:confirmClearBookCache("book", "Book", function() cleared_callback = true end)
+    confirm.ok_callback()
+    package.loaded["ui/uimanager"].show = function() end
+    eq(cleared_callback, nil, "refused cleanup still ran the cleared callback")
 end
 
 -- clearBookCache removes the full-book path from the collection.

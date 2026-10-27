@@ -781,10 +781,23 @@ function M:getMockMenuItems()
 end
 
 -- Open the local WeRead collection.
+-- Gesture (Dispatcher) and menu handlers only schedule it: building the
+-- collection reads and may write the collection file, and from the reader
+-- it closes the document, none of which belongs inside an input handler.
+-- Repeated triggers before it ran open it once.
+function M:showWereadCollection()
+    if self._collection_open_pending then return end
+    self._collection_open_pending = true
+    UIManager:nextTick(function()
+        self._collection_open_pending = nil
+        self:openWereadCollectionNow()
+    end)
+end
+
 -- From FileManager: open in place. From the reader: leave the book first and
 -- open via FileManager — showing the collection on top of ReaderUI leaves the
 -- document underneath, so navigating up/closing the shelf drops back into it.
-function M:showWereadCollection()
+function M:openWereadCollectionNow()
     local COLLECTION_NAME = self.settings.collection_name or "weread"
     local FileManager = require("apps/filemanager/filemanager")
     local ReadCollection = require("readcollection")

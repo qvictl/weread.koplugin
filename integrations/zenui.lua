@@ -31,6 +31,20 @@ function Integration:_openBookshelf()
     return true
 end
 
+-- Open the bookshelf from a tap: return from the gesture handler first and
+-- open on the next tick (loading the shelf is heavy), once per tap burst.
+function Integration:_scheduleOpenBookshelf()
+    local plugin = self:_livePlugin()
+    if not plugin or type(plugin.openBookshelf) ~= "function" then return false end
+    if self._open_pending then return true end
+    self._open_pending = true
+    require("ui/uimanager"):nextTick(function()
+        self._open_pending = nil
+        self:_openBookshelf()
+    end)
+    return true
+end
+
 function Integration:_installIcon()
     if not icon_path then return false end
     local ok, result = pcall(function()
@@ -121,19 +135,26 @@ function Integration:_buildWidget(ctx)
         },
         body,
     }
+    -- The gesture ranges cover the whole screen and are narrowed to the
+    -- widget's dimen, whose position is only known after the first paint:
+    -- before that it sits at (0, 0) and would catch taps meant for whatever
+    -- is shown in the top-left corner of the Home screen.
+    local paint = tap.paintTo
+    tap.paintTo = function(tap_self, bb, x, y)
+        tap_self._painted = true
+        return paint(tap_self, bb, x, y)
+    end
+    local function hits(tap_self, ges)
+        return tap_self._painted == true and tap_self.dimen and ges and ges.pos
+            and tap_self.dimen:contains(ges.pos)
+    end
     tap.onTapWeRead = function(tap_self, _arg, ges)
-        if not (tap_self.dimen and ges and ges.pos
-                and tap_self.dimen:contains(ges.pos)) then
-            return false
-        end
+        if not hits(tap_self, ges) then return false end
         if ctx and ctx.openTopMenu and ctx.openTopMenu(ges) then return true end
-        return self:_openBookshelf()
+        return self:_scheduleOpenBookshelf()
     end
     tap.onHoldWeRead = function(tap_self, _arg, ges)
-        if not (tap_self.dimen and ges and ges.pos
-                and tap_self.dimen:contains(ges.pos)) then
-            return false
-        end
+        if not hits(tap_self, ges) then return false end
         if ctx and ctx.editMode and ctx.openWidgetSettings then
             return ctx.openWidgetSettings()
         end

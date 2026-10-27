@@ -20,6 +20,8 @@ local ScrollableContainer = require("ui/widget/container/scrollablecontainer")
 local Size = require("ui/size")
 local TextWidget = require("ui/widget/textwidget")
 local UIManager = require("ui/uimanager")
+local TapFeedback = require("weread.ui.tap_feedback")
+local WindowRegistry = require("weread.ui.window_registry")
 local VerticalGroup = require("ui/widget/verticalgroup")
 local VerticalSpan = require("ui/widget/verticalspan")
 local Widget = require("ui/widget/widget")
@@ -292,6 +294,15 @@ end
 
 LeftAlignedTitle.onCloseWidget = LeftAlignedTitle.free
 
+-- MuPDF returns color covers as RGB32 (four bytes per pixel), about 1 MB for
+-- a 9-cover shelf page on a high-DPI screen. A grayscale screen cannot show
+-- the extra data, so keep the thumbnails in 8-bit gray there.
+local function cover_buffer_type(source_type)
+    local ok, color = pcall(function() return Screen:isColorEnabled() end)
+    if ok and color then return source_type end
+    return Blitbuffer.TYPE_BB8 or source_type
+end
+
 local function build_center_cropped_cover(path, width, height)
     -- Keep image preparation independent from ImageWidget's "fit" and
     -- "stretch" modes: neither offers a cover-fill mode for raster files.
@@ -310,7 +321,7 @@ local function build_center_cropped_cover(path, width, height)
         -- Scale through KOReader's MuPDF path: a shelf turn can rebuild a
         -- dozen covers, and the per-pixel Lua fallback is far too slow for it.
         local filled = RenderImage:scaleBlitBuffer(source, crop.width, crop.height, true)
-        local output = Blitbuffer.new(width, height, filled:getType())
+        local output = Blitbuffer.new(width, height, cover_buffer_type(filled:getType()))
         output:blitFrom(filled, 0, 0, crop.offset_x, crop.offset_y, width, height)
         filled:free()
         return output
@@ -339,7 +350,7 @@ local function build_center_contained_cover(path, width, height, inset)
         local target_width = math.max(1, math.floor(source_width * factor + 0.5))
         local target_height = math.max(1, math.floor(source_height * factor + 0.5))
         local scaled = RenderImage:scaleBlitBuffer(source, target_width, target_height, true)
-        local output = Blitbuffer.new(width, height, scaled:getType())
+        local output = Blitbuffer.new(width, height, cover_buffer_type(scaled:getType()))
         output:paintRect(0, 0, width, height, Blitbuffer.COLOR_WHITE)
         output:blitFrom(scaled,
             math.floor((width - target_width) / 2),
@@ -436,14 +447,7 @@ end
 
 function ShelfRow:onTapShelfRow()
     if not self.callback then return true end
-    self.frame.invert = true
-    UIManager:widgetRepaint(self.frame, self.frame.dimen.x, self.frame.dimen.y)
-    UIManager:forceRePaint()
-    self.frame.invert = false
-    UIManager:widgetRepaint(self.frame, self.frame.dimen.x, self.frame.dimen.y)
-    UIManager:setDirty(nil, "fast", self.frame.dimen)
-    self.callback()
-    return true
+    return TapFeedback.run(self.frame, self.callback)
 end
 
 function ShelfRow:onFocus()
@@ -644,8 +648,22 @@ function CoverCell:init()
 end
 
 function CoverCell:onTapCoverCell()
-    if self.callback then self.callback() end
-    return true
+    if not self.callback then return true end
+    -- Flash like the list rows; an unpainted cell lets the tap propagate.
+    return TapFeedback.run(self.frame, self.callback)
+end
+
+-- Rebuild this cell in place once its cover finished loading (or failed),
+-- without rebuilding the page or re-showing the view. `path` nil turns a
+-- loading placeholder into the "No cover" one.
+function CoverCell:setCover(path)
+    local old_frame = self.frame
+    local focused = old_frame and old_frame.invert
+    self.cover_path = path
+    self.cover_loading = false
+    self:init()
+    self.frame.invert = focused
+    if old_frame and old_frame.free then old_frame:free() end
 end
 
 function CoverCell:onFocus()
@@ -689,11 +707,37 @@ local LibraryView = FocusManager:extend{
     cover_paths = nil,
     cover_loading = nil,
     on_page_changed = nil,
+    on_closed = nil,
 }
 
 -- Defer destructive callbacks until Button has finished repainting its feedback.
 local function after_tap(callback)
     return function() UIManager:nextTick(callback) end
+end
+
+-- Opening a book and turning a page do heavy synchronous work. Run it after
+-- the tap feedback has painted, and drop further requests until it ran:
+-- taps and swipes queued while the UI was busy must not each open a book or
+-- rebuild the page again.
+function LibraryView:selectItem(book)
+    if self._select_pending or not self.on_select then return end
+    self._select_pending = true
+    UIManager:nextTick(function()
+        self._select_pending = nil
+        if UIManager:isWidgetShown(self) then self.on_select(book, self.mode) end
+    end)
+end
+
+function LibraryView:requestPage(page)
+    if not self.paged or not self.on_page_changed then return false end
+    if page < 1 or page > (self.page_count or 1) or page == self.page then return false end
+    if self._page_change_pending then return true end
+    self._page_change_pending = true
+    UIManager:nextTick(function()
+        self._page_change_pending = nil
+        if UIManager:isWidgetShown(self) then self.on_page_changed(page) end
+    end)
+    return true
 end
 
 function LibraryView:headerBar()
@@ -972,9 +1016,7 @@ function LibraryView:content()
                 width = width,
                 height = math.max(1, height),
                 show_parent = self,
-                callback = function()
-                    if self.on_select then self.on_select(book, self.mode) end
-                end,
+                callback = function() self:selectItem(book) end,
             }
             self._item_rows[#self._item_rows + 1] = cover_cell
             grid_row[#grid_row + 1] = cover_cell
@@ -988,9 +1030,7 @@ function LibraryView:content()
                 width = self.list_width,
                 font_size = self.mode == "books" and 20 or 22,
                 show_parent = self,
-                callback = function()
-                    if self.on_select then self.on_select(book, self.mode) end
-                end,
+                callback = function() self:selectItem(book) end,
             }
             self._item_rows[#self._item_rows + 1] = shelf_row
             self._focus_item_rows[#self._focus_item_rows + 1] = { shelf_row }
@@ -1015,11 +1055,7 @@ function LibraryView:pageBar()
         text = _("Previous"), width = cell_w, height = button_height,
         text_font_size = 22, text_font_bold = true, radius = 0, margin = 0, padding = 0,
         bordersize = 0, enabled = self.page > 1, show_parent = self,
-        callback = after_tap(function()
-            if self.page > 1 and self.on_page_changed then
-                self.on_page_changed(self.page - 1)
-            end
-        end),
+        callback = function() self:requestPage(self.page - 1) end,
     }
     local page_text = Button:new{
         text = T(_("%1/%2 pages"), tostring(self.page), tostring(self.page_count)),
@@ -1032,11 +1068,7 @@ function LibraryView:pageBar()
         height = button_height, text_font_size = 22, text_font_bold = true,
         radius = 0, margin = 0, bordersize = 0, padding = 0,
         enabled = self.page < self.page_count, show_parent = self,
-        callback = after_tap(function()
-            if self.page < self.page_count and self.on_page_changed then
-                self.on_page_changed(self.page + 1)
-            end
-        end),
+        callback = function() self:requestPage(self.page + 1) end,
     }
     self._page_buttons = { previous, page_text, next_page }
     return HorizontalGroup:new{ previous, page_text, next_page }
@@ -1101,15 +1133,11 @@ function LibraryView:init()
     end
     if self.paged and Device:hasKeys() then
         self.onNextPage = function(view)
-            if view.page < view.page_count and view.on_page_changed then
-                view.on_page_changed(view.page + 1)
-            end
+            view:requestPage(view.page + 1)
             return true
         end
         self.onPrevPage = function(view)
-            if view.page > 1 and view.on_page_changed then
-                view.on_page_changed(view.page - 1)
-            end
+            view:requestPage(view.page - 1)
             return true
         end
     end
@@ -1119,8 +1147,7 @@ function LibraryView:onShelfSwipe(_, ges)
     if not self.paged then return false end
     local delta = ges.direction == "west" and 1 or ges.direction == "east" and -1
     if not delta then return false end
-    local page = self.page + delta
-    if page >= 1 and page <= self.page_count and self.on_page_changed then self.on_page_changed(page) end
+    self:requestPage(self.page + delta)
     return true
 end
 
@@ -1129,8 +1156,30 @@ function LibraryView:onShow()
     return true
 end
 
+-- Swap in covers that a background batch finished after the page was built.
+-- `path_for(book)` returns the cached thumbnail or nil. Only cells still
+-- showing a placeholder are touched; returns true when anything changed.
+-- Safe while another widget covers the shelf: UIManager repaints the shelf
+-- with the new cells once it is uncovered.
+function LibraryView:updateCovers(path_for)
+    if not self.cover_mode then return false end
+    local updated = false
+    for _i, cell in ipairs(self._item_rows or {}) do
+        if cell.setCover and not cell._has_cover then
+            local path = path_for(cell.book)
+            if path or cell.cover_loading then
+                cell:setCover(path)
+                updated = true
+            end
+        end
+    end
+    if updated then UIManager:setDirty(self, "ui") end
+    return updated
+end
+
 function LibraryView:onCloseWidget()
     UIManager:setDirty(nil, function() return "ui", self.dimen end)
+    if self.on_closed then self.on_closed(self) end
 end
 
 function LibraryView:onClose()
@@ -1197,9 +1246,10 @@ function M.show(data, callbacks)
         on_filter = callbacks.on_filter,
         on_select = callbacks.on_select,
         on_page_changed = callbacks.on_page_changed,
+        on_closed = callbacks.on_closed,
     }
     UIManager:show(view)
-    return view
+    return WindowRegistry.track(view)
 end
 
 return M

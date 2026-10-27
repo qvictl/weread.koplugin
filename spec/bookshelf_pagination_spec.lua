@@ -7,10 +7,17 @@ local function expect(condition, message)
 end
 
 local dialogs = {}
+local closed_views = {}
 package.preload["ui/uimanager"] = function()
     return {
         show = function(_self, dialog) dialogs[#dialogs + 1] = dialog end,
-        close = function() end,
+        close = function(_self, widget)
+            if widget then
+                closed_views[widget] = true
+                if widget.on_closed then widget.on_closed(widget) end
+            end
+        end,
+        isWidgetShown = function(_self, widget) return not closed_views[widget] end,
         nextTick = function(_self, callback) callback() end,
         scheduleIn = function(_self, _delay, callback) callback() end,
     }
@@ -98,15 +105,25 @@ package.preload["weread.ui.library_view"] = function()
             return { page_size = 10 }
         end,
         show = function(data, callbacks)
-            shown[#shown + 1] = { data = data, callbacks = callbacks }
+            local entry = { data = data, callbacks = callbacks }
+            shown[#shown + 1] = entry
             local source = data.mode == "public_account" and data.accounts or data.books
             local page_count = math.max(1, math.ceil(#source / data.page_size))
             local page = math.max(1, math.min(data.page or 1, page_count))
-            return { page = page, page_count = page_count, page_size = data.page_size,
+            entry.view = { page = page, page_count = page_count, page_size = data.page_size,
                 on_refresh = callbacks.on_refresh,
+                on_closed = callbacks.on_closed,
+                cover_updates = {},
+                updateCovers = function(self, path_for)
+                    for _i, book in ipairs(source) do
+                        self.cover_updates[book] = path_for(book)
+                    end
+                    return true
+                end,
                 setRefreshing = function(self, busy) self.refreshing = busy end,
                 getScrollOffset = function() return { x = 0, y = 125 } end,
             }
+            return entry.view
         end,
     }
 end
@@ -122,6 +139,7 @@ local shelf = {}
 for index = 1, 1000 do
     shelf[index] = { bookId = tostring(index), title = "Book " .. tostring(index) }
 end
+local books_reads = 0
 local shelf_settings = { sort_order = "time_desc", paginated = true, view_mode = "list" }
 local host = {
     shelf_regular = shelf,
@@ -129,6 +147,10 @@ local host = {
     settings = require("spec.helpers.book_settings").install({
         set = function() end, flush = function() end,
         get = function(_self, key, default)
+            if key == "books" then
+                books_reads = books_reads + 1
+                return {}
+            end
             if key == "shelf" then return shelf_settings end
             return default
         end,
@@ -139,7 +161,9 @@ local host = {
     shelfFilterSummary = function() return "All" end,
     showShelfSortOptions = function() end,
     showShelfFilterOptions = function() end,
-    isNetworkOnline = function() return false end,
+    isNetworkConnected = function() return false end,
+    -- Rendering must never run the blocking DNS-based online check.
+    isNetworkOnline = function() error("blocking online check during shelf render") end,
     safeCallback = function(_self, _label, callback) return callback end,
 }
 for key, value in pairs(Library) do
@@ -152,7 +176,9 @@ expect(shown[1].data.page_size == 10, "bookshelf used the wrong page size")
 expect(#shown[1].data.books == 1000, "pagination discarded full shelf search data")
 
 local prepared_books = shown[1].data.books
+expect(books_reads == 1, "first shelf render did not load book records exactly once")
 shown[1].callbacks.on_page_changed(7)
+expect(books_reads == 1, "page turn reloaded every book record")
 expect(shown[2].data.page == 7, "bookshelf page change was not retained")
 expect(shown[2].data.books == prepared_books,
     "page change recomputed the prepared bookshelf")
@@ -209,7 +235,7 @@ expect(shown[8].data.cover_mode == true and shown[8].data.paged == true
 
 local cover_requests = {}
 for index = 1, 12 do shelf[index].cover = "https://cdn.example/" .. tostring(index) end
-host.isNetworkOnline = function() return true end
+host.isNetworkConnected = function() return true end
 host.client = {
     get_binary = function(_self, url, options)
         cover_requests[#cover_requests + 1] = { url = url, options = options }
@@ -229,10 +255,26 @@ expect(subprocess_runs == 9,
 expect(cover_requests[1].options.skip_cookie == true
         and cover_requests[1].options.persist_response_cookies == false,
     "public cover request did not suppress account credentials")
-expect(#shown == 10 and shown[10].data.cover_paths[shelf[1]] ~= nil,
-    "cover batch did not refresh the page once with cached paths")
-expect(shown[10].data.cover_loading[shelf[1]] ~= true,
-    "cached cover incorrectly remained in its loading state")
+expect(#shown == 9, "cover batch re-showed the shelf instead of updating it in place")
+expect(shown[9].view.cover_updates[shelf[1]] ~= nil,
+    "cover batch did not update the visible cells with cached paths")
+
+-- A batch that finishes after the shelf was closed must not touch it or
+-- bring it back.
+for index = 13, 21 do shelf[index].cover = "https://cdn.example/" .. tostring(index) end
+local deferred_polls = {}
+local uimanager = package.loaded["ui/uimanager"]
+local immediate_schedule = uimanager.scheduleIn
+uimanager.scheduleIn = function(_self, _delay, callback) deferred_polls[#deferred_polls + 1] = callback end
+shown[9].callbacks.on_page_changed(2)
+local closing_view = shown[10].view
+expect(host.shelf_view == closing_view, "page turn did not register the new shelf")
+uimanager:close(closing_view)
+expect(host.shelf_view == nil, "closed shelf stayed registered")
+uimanager.scheduleIn = immediate_schedule
+for _i, poll in ipairs(deferred_polls) do poll() end
+expect(#shown == 10 and next(closing_view.cover_updates) == nil,
+    "cover batch updated or re-opened a closed shelf")
 
 local requests_before_unsafe_url = #cover_requests
 local unsafe_view = { page = 1 }
@@ -267,7 +309,7 @@ local archives = {
 }
 shelf_settings.view_mode = "list"
 shelf_settings.paginated = true
-host.isNetworkOnline = function() return false end
+host.isNetworkConnected = function() return false end
 host:applyShelfSnapshot(grouped_books, archives)
 host:showShelfView("books")
 local groups = host.shelf_groups
@@ -289,11 +331,11 @@ shown[#shown].callbacks.on_select_group("__ungrouped__")
 expect(#shown[#shown].data.books == 10, "uncategorized group has wrong membership")
 shown[#shown].callbacks.on_select_group("archive:7")
 for index = 1, 12 do grouped_books[index].cover = "https://cdn.example/group-" .. index end
-host.isNetworkOnline = function() return true end
+host.isNetworkConnected = function() return true end
 shown[#shown].callbacks.on_display_change("view_mode", "cover")
 expect(shown[#shown].data.cover_mode and shown[#shown].data.group_key == "archive:7",
     "display mode change discarded the group")
-host.isNetworkOnline = function() return false end
+host.isNetworkConnected = function() return false end
 shown[#shown].callbacks.on_display_change("view_mode", "list")
 shown[#shown].callbacks.on_page_changed(2)
 
@@ -322,6 +364,16 @@ expect(fetches == 1 and written_archives[2].archiveId == 7 and not host.shelf_re
 expect(shown[#shown].data.page == 2 and shown[#shown].data.group_key == "archive:7"
         and shown[#shown].data.scroll_offset.y == 125,
     "refresh lost group, page or scroll position after archive reorder")
+
+-- A refresh that finishes after the user left the shelf keeps the snapshot
+-- but does not re-open the shelf.
+local before_left = #shown
+shown[#shown].callbacks.on_refresh()
+uimanager:close(shown[#shown].view)
+pending()
+expect(#shown == before_left and not host.shelf_refreshing,
+    "refresh re-opened a shelf the user had closed")
+closed_views[shown[#shown].view] = nil
 
 host.client.get_shelf = function() return { books = grouped_books, archive = {} } end
 shown[#shown].callbacks.on_refresh()

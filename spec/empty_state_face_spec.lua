@@ -40,10 +40,12 @@ end
 
 local shown = {}
 local has_keys = false
+local created_cover_types = {}
 package.preload["ffi/blitbuffer"] = function()
-    return { COLOR_WHITE = 0, COLOR_BLACK = 1, COLOR_GRAY = 2,
+    return { COLOR_WHITE = 0, COLOR_BLACK = 1, COLOR_GRAY = 2, TYPE_BB8 = "bb8",
         gray = function() return 2 end,
         new = function(width, height, btype)
+            created_cover_types[#created_cover_types + 1] = btype
             return { blitFrom = function() end, paintRect = function() end,
                 free = function() end, getType = function() return btype end }
         end,
@@ -97,6 +99,7 @@ package.preload["ui/uimanager"] = function()
         close = function() end,
         nextTick = function(_self, callback) callback() end,
         setDirty = function() end,
+        isWidgetShown = function() return true end,
     }
 end
 package.preload["ui/widget/textwidget"] = function()
@@ -413,6 +416,8 @@ local scaled_view = LibraryView.show({
 }, {})
 expect(scaled_view._item_rows[1]._has_cover == true,
     "mocked cover pipeline did not produce a cover widget")
+expect(created_cover_types[#created_cover_types] == "bb8",
+    "grayscale screen kept the decoder's color buffer type for a thumbnail")
 expect(scale_calls > 0 and lua_scale_calls == 0,
     "cover preparation used the per-pixel Lua scaler: lua=" .. lua_scale_calls
         .. " c=" .. scale_calls)
@@ -552,6 +557,176 @@ if native_widgets then
     expect(native_list.scroll[1]:getSize().h <= native_list.scroll.dimen.h,
         "native list rows require scrolling in page mode")
     print("native bookshelf geometry: real KOReader Button and layout containers passed")
+end
+
+-- Covers that finish loading are swapped into the existing cells in place;
+-- covers that failed turn their loading placeholder into "No cover".
+do
+    local update_books = {
+        { bookId = "u1", title = "U1" }, { bookId = "u2", title = "U2" },
+        { bookId = "u3", title = "U3" },
+    }
+    local closed_with
+    local update_view = LibraryView.show({
+        mode = "books", books = update_books, accounts = {},
+        paged = true, page = 1, page_size = 6,
+        cover_mode = true, cover_columns = 3,
+        cover_paths = {},
+        cover_loading = { [update_books[1]] = true, [update_books[2]] = true },
+    }, { on_closed = function(view) closed_with = view end })
+    local cells = { update_view._item_rows[1], update_view._item_rows[2], update_view._item_rows[3] }
+    local focus_row = update_view._focus_item_rows[1]
+    cells[1].frame.invert = true
+    expect(update_view:updateCovers(function(book)
+        return book == update_books[1] and "/covers/u1.jpg" or nil
+    end), "finished covers did not update the shelf")
+    expect(update_view._item_rows[1] == cells[1] and focus_row[1] == cells[1],
+        "cover update replaced the focusable cell")
+    expect(cells[1]._has_cover == true and cells[1].frame.invert == true,
+        "loaded cover was not shown or lost the focus highlight")
+    expect(cells[2]._has_cover == false and cells[2].cover_loading == false,
+        "failed cover kept its loading placeholder")
+    expect(not update_view:updateCovers(function() return nil end),
+        "a second update without new covers rebuilt cells")
+    update_view:onCloseWidget()
+    expect(closed_with == update_view, "closing the shelf did not notify its owner")
+end
+
+-- Taps and swipes are handled after their feedback, once per burst.
+do
+    local uimanager = package.loaded["ui/uimanager"]
+    local ticks = {}
+    local immediate = uimanager.nextTick
+    local selections, pages = {}, {}
+    local tap_books = {}
+    for index = 1, 30 do tap_books[index] = { bookId = "t" .. index, title = "T" .. index } end
+    local tap_view = LibraryView.show({
+        mode = "books", books = tap_books, accounts = {}, paged = true, page = 1, page_size = 10,
+    }, {
+        on_select = function(book) selections[#selections + 1] = book end,
+        on_page_changed = function(page) pages[#pages + 1] = page end,
+    })
+    uimanager.nextTick = function(_self, callback) ticks[#ticks + 1] = callback end
+    tap_view._item_rows[1].callback()
+    tap_view._item_rows[2].callback()
+    expect(#selections == 0 and #ticks == 1, "book tap ran synchronously or was not debounced")
+    ticks[1]()
+    expect(#selections == 1 and selections[1] == tap_books[1], "deferred book tap did not open the book")
+    ticks = {}
+    tap_view:onShelfSwipe(nil, { direction = "west" })
+    tap_view:onShelfSwipe(nil, { direction = "west" })
+    tap_view._page_buttons[3].callback()
+    expect(#pages == 0 and #ticks == 1, "queued page turns were not collapsed")
+    ticks[1]()
+    expect(#pages == 1 and pages[1] == 2, "deferred page turn went to the wrong page")
+    uimanager.nextTick = immediate
+
+    -- A cover cell that was never painted ignores the tap instead of acting
+    -- on its (0, 0) placeholder range.
+    local cover_tap_view = LibraryView.show({
+        mode = "books", books = tap_books, accounts = {}, paged = true, page = 1, page_size = 6,
+        cover_mode = true, cover_columns = 3,
+    }, { on_select = function(book) selections[#selections + 1] = book end })
+    local cell = cover_tap_view._item_rows[1]
+    cell.frame.dimen = nil
+    local before = #selections
+    expect(cell:onTapCoverCell() == false and #selections == before,
+        "unpainted cover cell handled a tap")
+end
+
+-- Book page footer actions run deferred, once per burst of taps.
+do
+    package.preload["ui/widget/textboxwidget"] = package.preload["ui/widget/textboxwidget"] or widget_module
+    local BookDetailView = require("weread.ui.book_detail_view")
+    local uimanager = package.loaded["ui/uimanager"]
+    local ticks, runs = {}, 0
+    local detail = BookDetailView.show({
+        title = "Book", refresh_label = "Refresh", refresh_date = "never", metadata = {},
+        bottom_actions = { { text = "Chapter list", callback = function() runs = runs + 1 end } },
+    }, {})
+    local immediate = uimanager.nextTick
+    uimanager.nextTick = function(_self, callback) ticks[#ticks + 1] = callback end
+    detail._footer_actions[1].callback()
+    detail._footer_actions[1].callback()
+    uimanager.nextTick = immediate
+    expect(runs == 0 and #ticks == 1, "footer action ran synchronously or twice")
+    ticks[1]()
+    expect(runs == 1, "deferred footer action did not run")
+end
+
+-- A long catalog builds only the rows of its current page, computes row
+-- status lazily for those rows, and turns pages in place.
+do
+    local ChapterListView = require("weread.ui.chapter_list_view")
+    local status_reads = 0
+    local rows = {}
+    for index = 1, 811 do
+        rows[index] = setmetatable({ title = "Chapter " .. index, source = { chapterUid = index } }, {
+            __index = function(row, key)
+                if key ~= "status" then return nil end
+                status_reads = status_reads + 1
+                rawset(row, "status", "words")
+                return "words"
+            end,
+        })
+    end
+    local selected
+    local view = ChapterListView.show({ title = "Long", chapters = rows, focus_index = 400 }, {
+        on_select = function(chapter) selected = chapter end,
+    })
+    local per_page = view.page_size
+    expect(per_page > 1 and per_page < 60, "chapter page size was not derived from the screen")
+    expect(#view._chapter_rows == per_page, "chapter list built rows outside the current page")
+    expect(status_reads == per_page, "chapter status was computed for invisible rows")
+    expect(view.page_count == math.ceil(811 / per_page), "chapter page count is wrong")
+    local expected_page = math.floor(399 / per_page) + 1
+    expect(view.page == expected_page, "chapter list did not open on the reading chapter's page")
+    expect(view._page_buttons and view._page_buttons[2].text
+            == expected_page .. "/" .. view.page_count .. " pages",
+        "chapter page indicator is missing or wrong")
+    view._chapter_rows[1].callback()
+    expect(selected == rows[(expected_page - 1) * per_page + 1].source,
+        "chapter row on a later page opened the wrong chapter")
+
+    view._page_buttons[3].callback()
+    expect(view.page == expected_page + 1 and #view._chapter_rows == per_page,
+        "next-page button did not rebuild the following page in place")
+    expect(view:onChapterPageSwipe(nil, { direction = "east" }) and view.page == expected_page,
+        "right swipe did not return to the previous page")
+    expect(not view:onChapterPageSwipe(nil, { direction = "north" }), "chapter list captured vertical swipes")
+
+    -- Queued page requests collapse into one rebuild.
+    local uimanager = package.loaded["ui/uimanager"]
+    local ticks = {}
+    local immediate = uimanager.nextTick
+    uimanager.nextTick = function(_self, callback) ticks[#ticks + 1] = callback end
+    view:goToPage(view.page + 1)
+    view:goToPage(view.page + 1)
+    view:onChapterPageSwipe(nil, { direction = "west" })
+    uimanager.nextTick = immediate
+    expect(#ticks == 1, "queued page turns each scheduled a rebuild")
+    ticks[1]()
+    expect(view.page == expected_page + 1, "deferred page turn did not apply")
+
+    view:goToPage(view.page_count)
+    expect(#view._chapter_rows == 811 - (view.page_count - 1) * per_page,
+        "last chapter page was not sliced correctly")
+    expect(not view:goToPage(view.page_count + 1), "chapter list paged beyond the end")
+
+    local current_page = view.page
+    local refreshed = {}
+    for index = 1, 811 do refreshed[index] = { title = "R" .. index, status = "Cached", source = {} } end
+    view:setChapters(refreshed)
+    expect(view.page == current_page and view.chapters == refreshed
+            and #view._chapter_rows == 811 - (view.page_count - 1) * per_page,
+        "in-place catalog refresh lost the current page")
+    view:setChapters({ refreshed[1] })
+    expect(view.page == 1 and view.page_count == 1 and #view._chapter_rows == 1,
+        "shrunken catalog was not clamped to its last page")
+
+    local short = ChapterListView.show({ title = "Short", chapters = { rows[1], rows[2] } }, {})
+    expect(short.page_count == 1 and short._page_buttons == nil and #short._chapter_rows == 2,
+        "short catalog created page controls")
 end
 
 print(("empty_state_face_spec: %d checks"):format(checks))

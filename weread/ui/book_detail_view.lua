@@ -19,6 +19,8 @@ local TextBoxWidget = require("ui/widget/textboxwidget")
 local TextWidget = require("ui/widget/textwidget")
 local TitleBar = require("ui/widget/titlebar")
 local UIManager = require("ui/uimanager")
+local TapFeedback = require("weread.ui.tap_feedback")
+local WindowRegistry = require("weread.ui.window_registry")
 local VerticalGroup = require("ui/widget/verticalgroup")
 local VerticalSpan = require("ui/widget/verticalspan")
 local Screen = Device.screen
@@ -81,14 +83,7 @@ end
 
 function FooterAction:onTapFooterAction()
     if not self.enabled or not self.callback then return true end
-    self.frame.invert = true
-    UIManager:widgetRepaint(self.frame, self.frame.dimen.x, self.frame.dimen.y)
-    UIManager:forceRePaint()
-    self.frame.invert = false
-    UIManager:widgetRepaint(self.frame, self.frame.dimen.x, self.frame.dimen.y)
-    UIManager:setDirty(nil, "fast", self.frame.dimen)
-    self.callback()
-    return true
+    return TapFeedback.run(self.frame, self.callback)
 end
 
 function FooterAction:onFocus()
@@ -104,6 +99,7 @@ end
 local BookDetailView = FocusManager:extend{
     data = nil,
     on_refresh = nil,
+    on_closed = nil,
 }
 
 function BookDetailView:sectionTitle(text)
@@ -193,6 +189,17 @@ function BookDetailView:actionBlock(actions)
     return group
 end
 
+-- Footer actions open full-screen views or start downloads. Run them after
+-- the tap feedback painted, and only once per burst of queued taps.
+function BookDetailView:runAction(callback)
+    if self._action_pending then return end
+    self._action_pending = true
+    UIManager:nextTick(function()
+        self._action_pending = nil
+        if UIManager:isWidgetShown(self) then callback() end
+    end)
+end
+
 function BookDetailView:footer()
     local actions = self.data.bottom_actions or {}
     local count = math.max(1, #actions)
@@ -209,7 +216,7 @@ function BookDetailView:footer()
             height = footer_height,
             enabled = action.enabled ~= false,
             show_parent = self,
-            callback = action.callback,
+            callback = action.callback and function() self:runAction(action.callback) end,
         }
         self._footer_actions[#self._footer_actions + 1] = footer_action
         table.insert(row, footer_action)
@@ -367,6 +374,7 @@ end
 
 function BookDetailView:onCloseWidget()
     UIManager:setDirty(nil, function() return "ui", self.dimen end)
+    if self.on_closed then self.on_closed(self) end
 end
 
 function BookDetailView:onClose()
@@ -380,9 +388,10 @@ function M.show(data, callbacks)
     local view = BookDetailView:new{
         data = data,
         on_refresh = callbacks.on_refresh,
+        on_closed = callbacks.on_closed,
     }
     UIManager:show(view)
-    return view
+    return WindowRegistry.track(view)
 end
 
 return M

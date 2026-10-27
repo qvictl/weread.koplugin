@@ -1,4 +1,5 @@
 -- Bookshelf, book, chapter, public-account, and search UI flows.
+local BookRecords = require("weread.lib.book_records")
 local BookReviews = require("weread.lib.book_reviews")
 local BookReviewsView = require("weread.ui.book_reviews_view")
 local ConfirmBox = require("ui/widget/confirmbox")
@@ -10,6 +11,7 @@ local ProgressbarDialog = require("ui/widget/progressbardialog")
 local TextViewer = require("ui/widget/textviewer")
 local UIManager = require("ui/uimanager")
 local WeRead = require("weread.lib.protocol")
+local WindowRegistry = require("weread.ui.window_registry")
 
 local PluginUtil = require("weread.lib.plugin_util")
 local _ = PluginUtil.tr
@@ -60,6 +62,38 @@ local function has_book_details(book)
     return false
 end
 
+-- Fields that are never persisted with the book record; changing them alone
+-- does not justify rewriting the record.
+local transient_record_fields = {
+    chapters = true,
+    _cached = true,
+}
+
+local function same_value(left, right, depth)
+    if left == right then return true end
+    if type(left) ~= "table" or type(right) ~= "table" then return false end
+    depth = (depth or 0) + 1
+    if depth > 4 then return false end
+    for key, value in pairs(left) do
+        if not same_value(value, right[key], depth) then return false end
+    end
+    for key in pairs(right) do
+        if left[key] == nil then return false end
+    end
+    return true
+end
+
+-- Catalog tables known to match the library database, keyed weakly by the
+-- table itself. Re-opening a chapter list used to rewrite the whole catalog
+-- (DELETE plus one INSERT and JSON encode per chapter) every time.
+local persisted_catalogs = setmetatable({}, { __mode = "k" })
+
+local function mark_catalog_persisted(chapters, book_id)
+    if type(chapters) == "table" and book_id ~= nil then
+        persisted_catalogs[chapters] = tostring(book_id)
+    end
+end
+
 local function list_items_per_page()
     local perpage = 14
     if G_reader_settings and G_reader_settings.readSetting then
@@ -99,21 +133,30 @@ function M:showBookshelf()
 end
 
 function M:closeWeReadUI()
-    -- Close from the topmost view down so no full-screen WeRead widget remains
-    -- in UIManager's window stack after a document is opened.
+    -- Close from the topmost view down so no WeRead window remains in
+    -- UIManager's window stack after a document is opened. Besides the
+    -- views referenced here this covers list menus, reviews, statistics
+    -- and views opened by other plugin instances.
     local seen = {}
     for _, field in ipairs({
         "_chapter_list_view",
         "_book_detail_view",
         "shelf_view",
+        "cache_menu",
     }) do
         local view = self[field]
         self[field] = nil
         if view and not seen[view] then
             seen[view] = true
-            UIManager:close(view)
+            if UIManager:isWidgetShown(view) then UIManager:close(view) end
         end
     end
+    WindowRegistry.closeAll()
+end
+
+-- showList() wrapper for WeRead list menus, so closeWeReadUI() finds them.
+function M:showTrackedList(...)
+    return WindowRegistry.track(self:showList(...))
 end
 
 function M:onWeReadAccountChanged()
@@ -179,6 +222,12 @@ function M:refreshBookshelf(old_view, view_options)
             or {}
         local archives = type(result) == "table" and type(result.archive) == "table" and result.archive or {}
         if self.library_db then self.library_db:cacheShelf(all_books, archives) end
+        if old_view and not UIManager:isWidgetShown(old_view) then
+            -- The user left the shelf while it refreshed: keep the new
+            -- snapshot for the next visit instead of re-opening the shelf.
+            self:applyShelfSnapshot(all_books, archives)
+            return
+        end
         local old_group_key = self.shelf_group_key
         self:applyShelfSnapshot(all_books, archives)
         local next_options = {}
@@ -248,7 +297,7 @@ function M:fetchVisibleShelfCovers(view, items, options)
     local cache = self:getShelfCoverCache()
     local visible = shelf_page_items(items, view.page, view.page_size or 6)
     local missing = {}
-    local online = self:isNetworkOnline()
+    local online = self:isNetworkConnected()
     for _, book in ipairs(visible) do
         if shelf_cover_url(book)
             and not cache:pathFor(book) then
@@ -281,18 +330,20 @@ function M:fetchVisibleShelfCovers(view, items, options)
     local index, changed = 1, false
     local function finish_batch()
         self.shelf_cover_job = nil
-        if changed and generation == self.shelf_cover_generation and self.shelf_view == view then
-            local pruned = pcall(cache.prune, cache)
-            if not pruned then logger.warn("bookshelf cover cache pruning failed") end
-            local next_options = {}
-            for key, value in pairs(options) do next_options[key] = value end
-            next_options.prepared_shelf = {
-                books = options.prepared_books or self.shelf_regular or {},
-                accounts = options.prepared_accounts or self.shelf_mp or {},
-            }
-            next_options.page = view.page
-            next_options.skip_cover_fetch_once = true
-            self:showShelfView(options.mode or "books", options.keyword, view, next_options)
+        if generation == self.shelf_cover_generation and self.shelf_view == view then
+            if changed then
+                local pruned = pcall(cache.prune, cache)
+                if not pruned then logger.warn("bookshelf cover cache pruning failed") end
+            end
+            -- Update the cells in place. Re-showing the shelf would put it on
+            -- top of whatever the user opened meanwhile (a book page, a
+            -- dialog, the keyboard) and flash the whole screen.
+            if view.updateCovers then
+                local ok, err = pcall(view.updateCovers, view, function(book)
+                    return cache:pathFor(book)
+                end)
+                if not ok then logger.warn("bookshelf cover update failed:", log_error(err)) end
+            end
         end
         local pending = self.shelf_cover_pending
         self.shelf_cover_pending = nil
@@ -368,15 +419,19 @@ function M:showShelfView(mode, keyword, old_view, options)
     mode = mode or "books"
     options.mode = mode
     options.keyword = keyword
-    local skip_cover_fetch_once = options.skip_cover_fetch_once == true
-    options.skip_cover_fetch_once = nil
     self.shelf_cover_generation = (self.shelf_cover_generation or 0) + 1
     self.shelf_view_mode = mode
     self.shelf_search_keyword = keyword
     self.shelf_view_pages = self.shelf_view_pages or { books = 1, public_account = 1 }
-    local saved_books = self.settings:get_books()
+    -- Loading every book record is expensive. A prepared shelf (page turns,
+    -- mode switches, cover refreshes) already carries the download state, so
+    -- only load the records when the shelf is actually filtered again.
+    local saved_books
     local downloaded_cache = {}
     local function filtered(source, with_download_state)
+        if with_download_state and not saved_books then
+            saved_books = BookRecords.all(self.settings)
+        end
         local result = {}
         local sorted = sortBooks(source or {}, self.settings:get("shelf").sort_order)
         for _i, book in ipairs(sorted) do
@@ -408,7 +463,7 @@ function M:showShelfView(mode, keyword, old_view, options)
         cover_paths = {}
         cover_loading = {}
         local cache = self:getShelfCoverCache()
-        local online = self:isNetworkOnline()
+        local online = self:isNetworkConnected()
         local visible, clamped_page = shelf_page_items(source, page, page_size)
         page = clamped_page
         for _, book in ipairs(visible) do
@@ -514,14 +569,17 @@ function M:showShelfView(mode, keyword, old_view, options)
             next_options.page = new_page
             self:showShelfView(mode, keyword, view, next_options)
         end,
+        on_closed = function(closed_view)
+            -- A closed shelf must not be updated or brought back by a
+            -- cover batch or a refresh that finishes later.
+            if self.shelf_view == closed_view then self.shelf_view = nil end
+        end,
     })
     if paged then self.shelf_view_pages[mode] = view.page end
     self.shelf_view = view
-    if cover_mode and not skip_cover_fetch_once then
+    if cover_mode then
         local fetch_options = {}
         for key, value in pairs(options) do fetch_options[key] = value end
-        fetch_options.prepared_books = books
-        fetch_options.prepared_accounts = accounts
         self:fetchVisibleShelfCovers(view, source, fetch_options)
     end
 end
@@ -590,68 +648,11 @@ sortBooks = function(books, sort_order)
     return sorted
 end
 
-function M:showShelfPage()
-    local books = self.shelf_books or {}
-    if #books == 0 then
-        self:showInfo(_("Your WeRead shelf is empty."))
-        return
-    end
-    local menu, buildItems
-    local function refresh()
-        menu:switchItemTable(nil, buildItems())
-    end
-    buildItems = function()
-        local items = self:shelfToolbarItems(true, refresh)
-        local sorted = sortBooks(books, self.settings:get("shelf").sort_order)
-        local saved_books = self.settings:get_books()
-        local downloaded_cache = {}
-        self._shelf_saved_books = saved_books
-        for _i, book in ipairs(sorted) do
-            if self:bookMatchesFilters(book, saved_books, downloaded_cache) then
-                local book_id = book.book_id or book.bookId
-                local is_cached = self:isBookDownloaded(book, saved_books, downloaded_cache)
-                local right_text
-                if book.readUpdateTime and book.readUpdateTime > 0 then
-                    right_text = os.date("%Y-%m-%d", book.readUpdateTime)
-                elseif book.finishReading == 1 then
-                    right_text = _("Done")
-                else
-                    right_text = ""
-                end
-                local function rightStatus(cached)
-                    if cached then
-                        return right_text ~= "" and "✓  " .. right_text or "✓"
-                    end
-                    return right_text
-                end
-                table.insert(items, {
-                    text = book.title or book.bookId or _("Untitled"),
-                    mandatory = rightStatus(is_cached),
-                    mandatory_func = function()
-                        local current = self._shelf_saved_books and self._shelf_saved_books[book_id]
-                        return rightStatus(self:bookRecordHasDownload(current))
-                    end,
-                    callback = self:safeCallback(book.title or book.bookId or _("Untitled"), function()
-                        self:showBookRecord(book)
-                    end),
-                })
-            end
-        end
-        return items
-    end
-    menu = self:showList(_("WeRead Bookshelf"), buildItems(), _("Your WeRead shelf is empty."))
-    self.shelf_menu = menu
-    self._shelf_refresh = refresh
-end
-
+-- Called by the downloader after every completion (including background
+-- prefetches while reading) and after cache cleanups. The bookshelf reads
+-- download state when it is filtered next, so there is nothing to refresh
+-- here; loading every book record on each call only cost time.
 function M:refreshShelfCacheIndicators()
-    self._shelf_saved_books = self.settings:get_books()
-    if self.shelf_menu and self._shelf_refresh then
-        local ok, err = pcall(self._shelf_refresh)
-        if not ok then
-            logger.warn("refresh shelf cache indicators failed:", log_error(err))
-        end
-    end
 end
 
 function M:showBookRecord(book)
@@ -663,26 +664,42 @@ function M:showBookRecord(book)
     if not book_id then return end
 
     local account_key = self.library_db and self.library_db:accountKey() or nil
-    local saved = self.settings:get_book(book_id) or {}
+    local stored = BookRecords.get(self.settings, book_id)
+    local saved = stored or {}
+    -- Opening a book the plugin already knows must not rewrite its record:
+    -- only persist when the shelf entry or cached details add something new.
+    local changed = stored == nil
     if account_key and saved._library_account_key
         and saved._library_account_key ~= account_key then
         saved = keep_local_cache(saved)
+        changed = true
+    end
+    local function assign(key, value)
+        if not transient_record_fields[key] and not same_value(saved[key], value) then
+            changed = true
+        end
+        saved[key] = value
     end
     local cached = self.library_db and self.library_db:getBook(book_id) or nil
     for key, value in pairs(cached or {}) do
-        if saved[key] == nil then saved[key] = value end
+        -- The chapters table owns the catalog; an old detail payload may
+        -- still embed a stale copy. Rewrite such a payload once, lean.
+        if key == "chapters" then
+            changed = true
+        elseif saved[key] == nil then
+            assign(key, value)
+        end
     end
     for key, value in pairs(book) do
-        if value ~= nil and key ~= "_cached" then saved[key] = value end
+        if value ~= nil and key ~= "_cached" then assign(key, value) end
     end
-    saved.book_id = book_id
-    saved._library_account_key = account_key
-    saved.updated_at = saved.updated_at or os.time()
-    self.settings:put_book(book_id, saved)
-    self.settings:flush()
-    if self.library_db then self.library_db:putBook(saved) end
-    if type(saved.chapters) ~= "table" and self.library_db then
-        saved.chapters = self.library_db:getChapters(book_id)
+    assign("book_id", book_id)
+    assign("_library_account_key", account_key)
+    if saved.updated_at == nil then assign("updated_at", os.time()) end
+    if changed then
+        BookRecords.put(self.settings, book_id, saved)
+        self.settings:flush()
+        if self.library_db then self.library_db:putBook(saved) end
     end
     if not has_book_details(cached) then
         self:refreshBookRecord(saved, nil, { automatic = true })
@@ -698,7 +715,7 @@ function M:refreshBookRecord(book, old_view, options)
         return
     end
     local book_id = book.book_id or book.bookId
-    if not self:isNetworkOnline() then
+    if not self:isNetworkConnected() then
         if options.automatic then self:showBookMenu(book) end
         self:showOffline(_("Book info"))
         return
@@ -728,7 +745,7 @@ function M:refreshBookRecord(book, old_view, options)
             book._library_account_key = self.library_db
                 and self.library_db:accountKey() or nil
             book.detail_updated_at = os.time()
-            self.settings:put_book(book_id, book)
+            BookRecords.put(self.settings, book_id, book)
             self.settings:flush()
             if self.library_db then self.library_db:putBook(book) end
         end)
@@ -739,7 +756,12 @@ function M:refreshBookRecord(book, old_view, options)
             self:showInfo(T(_("%1 failed:\n%2"), _("Book info"), display_error(err)))
             return
         end
-        if old_view then UIManager:close(old_view) end
+        if old_view then
+            -- The user left the page while it refreshed: keep the data,
+            -- do not bring the page back over whatever is shown now.
+            if not UIManager:isWidgetShown(old_view) then return end
+            UIManager:close(old_view)
+        end
         self:showBookMenu(book)
         self:showTransientInfo(_("Book information updated."), 2)
     end)
@@ -749,16 +771,24 @@ end
 function M:showBookMenu(book)
     local BookDetailView = require("weread.ui.book_detail_view")
     local book_id = book.book_id or book.bookId
-    if type(book.chapters) ~= "table" then
-        book.chapters = self.library_db and self.library_db:getChapters(book_id) or nil
-        if type(book.chapters) ~= "table" then
-            local legacy_catalog = Content.load_catalog_cache(self.client, self.settings, book)
-            if legacy_catalog and self.library_db then
-                self.library_db:putChapters(book_id, legacy_catalog)
+    -- The page only shows the chapter count: count rows instead of decoding
+    -- the whole catalog. The chapter list loads it when opened.
+    local total_chapters = type(book.chapters) == "table" and #book.chapters or nil
+    if not total_chapters and self.library_db and self.library_db.countChapters then
+        total_chapters = self.library_db:countChapters(book_id)
+        if total_chapters == 0 then total_chapters = nil end
+    end
+    if not total_chapters then
+        local legacy_catalog = Content.load_catalog_cache(self.client, self.settings, book)
+        if type(legacy_catalog) == "table" and #legacy_catalog > 0 then
+            book.chapters = legacy_catalog
+            total_chapters = #legacy_catalog
+            if self.library_db and self.library_db:putChapters(book_id, legacy_catalog) then
+                mark_catalog_persisted(legacy_catalog, book_id)
             end
         end
     end
-    local saved = self.settings:get_book(book_id) or book
+    local saved = BookRecords.get(self.settings, book_id) or book
     local cached_path = self:getFullBookCachePath(saved)
     local is_full_cached = file_exists(cached_path)
     local has_cache = self:bookRecordHasDownload(saved)
@@ -767,7 +797,6 @@ function M:showBookMenu(book)
     for _uid, path in pairs(book.cached_chapters or {}) do
         if file_exists(path) then cached_chapter_count = cached_chapter_count + 1 end
     end
-    local total_chapters = type(book.chapters) == "table" and #book.chapters or nil
     if is_full_cached and cached_chapter_count == 0 and total_chapters then
         cached_chapter_count = total_chapters
     end
@@ -818,8 +847,10 @@ function M:showBookMenu(book)
     local view
     local open_chapter_list = self:safeCallback(_("Chapter list"), function()
         self:showChapterList(book, function()
-            local latest = self.settings:get_book(book_id) or book
-            if view then UIManager:close(view) end
+            -- Rebuild for new download state, unless the page is gone.
+            if not (view and UIManager:isWidgetShown(view)) then return end
+            local latest = BookRecords.get(self.settings, book_id) or book
+            UIManager:close(view)
             self:showBookMenu(latest)
         end)
     end)
@@ -839,7 +870,8 @@ function M:showBookMenu(book)
                     book.cached_full_book = nil
                     book.cached_chapters = nil
                     book.cache_dir = nil
-                    if view then UIManager:close(view) end
+                    if not (view and UIManager:isWidgetShown(view)) then return end
+                    UIManager:close(view)
                     self:showBookMenu(book)
                 end)
             end),
@@ -881,6 +913,9 @@ function M:showBookMenu(book)
         on_refresh = self:safeCallback(_("Get latest information"), function()
             self:refreshBookRecord(book, view)
         end),
+        on_closed = function(closed_view)
+            if self._book_detail_view == closed_view then self._book_detail_view = nil end
+        end,
     })
     self._book_detail_view = view
     return view
@@ -911,12 +946,14 @@ function M:showBookReviewDetail(book, review, mode)
     text[#text + 1] = ""
     text[#text + 1] = review.content ~= "" and review.content or _("No review content.")
 
-    UIManager:show(TextViewer:new{
+    local viewer = TextViewer:new{
         title = mode == "latest" and _("Latest review") or _("Recommended review"),
         text = table.concat(text, "\n"),
         text_type = "general",
         auto_para_direction = true,
-    })
+    }
+    UIManager:show(viewer)
+    WindowRegistry.track(viewer)
 end
 
 function M:showBookReviews(book)
@@ -975,57 +1012,10 @@ function M:showBookReviews(book)
     loadReviews("recommended", nil)
 end
 
-function M:showShelfTabs()
-    local items = {
-        {
-            text = _("Books"),
-            post_text = T(_("%1 books"), tostring(#self.shelf_regular)),
-            callback = self:safeCallback(_("Books"), function()
-                self.shelf_books = self.shelf_regular
-                self:showShelfPage()
-            end),
-        },
-        {
-            text = _("Public Accounts"),
-            post_text = T(_("%1 accounts"), tostring(#self.shelf_mp)),
-            callback = self:safeCallback(_("Public Accounts"), function()
-                self:showMPShelfPage()
-            end),
-        },
-    }
-    self:showList(_("WeRead Bookshelf"), items, _("Your WeRead shelf is empty."))
-end
-
-function M:showMPShelfPage()
-    local books = self.shelf_mp or {}
-    if #books == 0 then
-        self:showInfo(_("No items."))
-        return
-    end
-    local menu, buildItems
-    local function refresh() menu:switchItemTable(nil, buildItems()) end
-    buildItems = function()
-        local items = self:shelfToolbarItems(false, refresh)
-        local sorted = sortBooks(books, self.settings:get("shelf").sort_order)
-        for _i, book in ipairs(sorted) do
-            table.insert(items, {
-                text = book.title or book.bookId or _("Untitled"),
-                post_text = book.author or "",
-                callback = self:safeCallback(book.title or book.bookId or _("Untitled"), function()
-                    self:showMPAccount(book)
-                end),
-            })
-        end
-        return items
-    end
-    menu = self:showList(_("Public Accounts"), buildItems(), _("No items."))
-end
-
 function M:showMPAccount(book)
-    self:rememberMPAccount(book)
-    local book_id = book.book_id or book.bookId
-    local cached = self:getCachedMPArticles(book_id)
-    if cached and #cached > 0 then
+    local record = self:rememberMPAccount(book)
+    local cached = record and record.mp_articles
+    if type(cached) == "table" and #cached > 0 then
         self:showMPArticleList(book, cached)
         return
     end
@@ -1038,17 +1028,27 @@ function M:rememberMPAccount(book)
     if not book_id then
         return
     end
-    local record = self.settings:get_book(book_id) or {}
-    record.book_id = book_id
-    record.title = book.title or record.title
-    record.author = book.author or record.author
-    record.updated_at = os.time()
+    local stored = BookRecords.get(self.settings, book_id)
+    local record = stored or {}
+    local title = book.title or record.title
+    local author = book.author or record.author
     -- Keep the resolved cache directory in sync both ways so the transient book
     -- object used for cached-path lookups knows where its articles actually live.
-    record.cache_dir = book.cache_dir or record.cache_dir
-    book.cache_dir = record.cache_dir
-    self.settings:put_book(book_id, record)
-    self.settings:flush()
+    local cache_dir = book.cache_dir or record.cache_dir
+    book.cache_dir = cache_dir
+    -- Only write when something changed; a tap on a known account must not
+    -- rewrite its record (and article list) on every visit.
+    if stored == nil or record.book_id ~= book_id or record.title ~= title
+        or record.author ~= author or record.cache_dir ~= cache_dir then
+        record.book_id = book_id
+        record.title = title
+        record.author = author
+        record.cache_dir = cache_dir
+        record.updated_at = os.time()
+        BookRecords.put(self.settings, book_id, record)
+        self.settings:flush()
+    end
+    return record
 end
 
 function M:fetchMPArticles(book)
@@ -1095,19 +1095,11 @@ function M:fetchMPArticles(book)
     end)
 end
 
-function M:getCachedMPArticles(book_id)
-    local record = self.settings:get_book(book_id)
-    if record and record.mp_articles then
-        return record.mp_articles
-    end
-    return nil
-end
-
 function M:cacheMPArticles(book_id, articles)
-    local record = self.settings:get_book(book_id) or {}
+    local record = BookRecords.get(self.settings, book_id) or {}
     record.mp_articles = articles
     record.mp_articles_time = os.time()
-    self.settings:put_book(book_id, record)
+    BookRecords.put(self.settings, book_id, record)
     self.settings:flush()
 end
 
@@ -1139,7 +1131,7 @@ function M:showMPArticleList(book, articles)
             self:fetchMPArticles(book)
         end),
     })
-    self:showList(book.title or _("Public Account"), items, _("No articles."))
+    self:showTrackedList(book.title or _("Public Account"), items, _("No articles."))
 end
 
 function M:downloadMPArticleAndRead(book, article)
@@ -1183,10 +1175,12 @@ function M:downloadMPArticleAndRead(book, article)
         -- article files can still be located after the download directory changes.
         local book_id = book.book_id or book.bookId
         if book_id and book.cache_dir then
-            local record = self.settings:get_book(book_id) or {}
-            record.cache_dir = book.cache_dir
-            self.settings:put_book(book_id, record)
-            self.settings:flush()
+            local record = BookRecords.get(self.settings, book_id) or {}
+            if record.cache_dir ~= book.cache_dir then
+                record.cache_dir = book.cache_dir
+                BookRecords.put(self.settings, book_id, record)
+                self.settings:flush()
+            end
         end
         self:openFile(path_or_err)
     end)
@@ -1196,8 +1190,10 @@ function M:loadChapters(book, callback, force_refresh)
     if not force_refresh then
         if book.chapters and #book.chapters > 0 then
             local book_id = book.book_id or book.bookId
-            if self.library_db and book_id then
-                self.library_db:putChapters(book_id, book.chapters)
+            if self.library_db and book_id
+                and persisted_catalogs[book.chapters] ~= tostring(book_id)
+                and self.library_db:putChapters(book_id, book.chapters) then
+                mark_catalog_persisted(book.chapters, book_id)
             end
             local catalog_path = Content.catalog_cache_path(
                 self.settings, book)
@@ -1216,6 +1212,7 @@ function M:loadChapters(book, callback, force_refresh)
         local cached = self.library_db and self.library_db:getChapters(book_id) or nil
         if type(cached) == "table" and #cached > 0 then
             book.chapters = cached
+            mark_catalog_persisted(cached, book_id)
             local catalog_path = Content.catalog_cache_path(
                 self.settings, book)
             if catalog_path and not file_exists(catalog_path) then
@@ -1228,8 +1225,9 @@ function M:loadChapters(book, callback, force_refresh)
             end
         else
             cached = Content.load_catalog_cache(self.client, self.settings, book)
-            if type(cached) == "table" and #cached > 0 and self.library_db then
-                self.library_db:putChapters(book_id, cached)
+            if type(cached) == "table" and #cached > 0 and self.library_db
+                and self.library_db:putChapters(book_id, cached) then
+                mark_catalog_persisted(cached, book_id)
             end
         end
         if type(cached) == "table" and #cached > 0 then
@@ -1260,10 +1258,12 @@ function M:loadChapters(book, callback, force_refresh)
         local book_id = book.book_id or book.bookId
         if book_id then
             if self.library_db then
-                self.library_db:putChapters(book_id, chapters_or_err)
+                if self.library_db:putChapters(book_id, chapters_or_err) then
+                    mark_catalog_persisted(chapters_or_err, book_id)
+                end
                 self.library_db:putBook(book)
             end
-            self.settings:put_book(book_id, book)
+            BookRecords.put(self.settings, book_id, book)
             self.settings:flush()
         end
         callback(chapters_or_err)
@@ -1275,75 +1275,105 @@ function M:showChapterList(book, on_close)
     local function reloadBookCache()
         if not self.settings then return end
         local book_id = book.book_id or book.bookId
-        local latest = book_id and self.settings:get_book(book_id)
+        local latest = book_id and BookRecords.get(self.settings, book_id)
         if type(latest) ~= "table" then return end
         for field in pairs(local_cache_fields) do
             if latest[field] ~= nil then book[field] = latest[field] end
         end
-        if self.library_db then self.library_db:putBook(latest) end
     end
-    local showCatalog
-    showCatalog = function(chapters, old_view)
-        -- Downloads persist their cache paths before invoking on_complete.
-        -- Always rebuild from that persisted record instead of the snapshot
-        -- captured when the chapter list was first opened.
-        reloadBookCache()
+    -- Cache state is checked lazily, for the rows of the visible page only:
+    -- one file_exists() per cached chapter on every rebuild added up.
+    local function chapter_status(chapter)
+        local key = tostring(chapter.chapterUid or chapter.chapterId)
+        local cached = book.cached_chapters and book.cached_chapters[key]
+        if cached and not file_exists(cached) then
+            book.cached_chapters[key] = nil
+            cached = nil
+        end
+        return cached and _("Cached")
+            or T(_("%1 words"), tostring(chapter.wordCount or 0))
+    end
+    local row_meta = {
+        __index = function(row, key)
+            if key ~= "status" then return nil end
+            local status = chapter_status(row.source)
+            rawset(row, "status", status)
+            return status
+        end,
+    }
+    local function reading_index(chapters)
+        local uid = book.chapter_uid ~= nil and tostring(book.chapter_uid) or nil
+        if not uid then return nil end
+        for index, chapter in ipairs(chapters) do
+            if tostring(chapter.chapterUid or chapter.chapterId) == uid then return index end
+        end
+    end
+    local function catalog_rows(chapters)
         local rows = {}
         for _i, chapter in ipairs(chapters) do
-            local chapter_uid = chapter.chapterUid or chapter.chapterId
-            local cached = book.cached_chapters
-                and book.cached_chapters[tostring(chapter_uid)]
-            if cached and not file_exists(cached) then
-                book.cached_chapters[tostring(chapter_uid)] = nil
-                cached = nil
-            end
-            rows[#rows + 1] = {
-                title = chapter.title or T(_("Chapter %1"), tostring(chapter_uid)),
-                status = cached and _("Cached")
-                    or T(_("%1 words"), tostring(chapter.wordCount or 0)),
+            rows[#rows + 1] = setmetatable({
+                title = chapter.title
+                    or T(_("Chapter %1"), tostring(chapter.chapterUid or chapter.chapterId)),
                 source = chapter,
-            }
+            }, row_meta)
         end
-        if old_view then
-            UIManager:close(old_view)
-            if self._chapter_list_view == old_view then
-                self._chapter_list_view = nil
-            end
-        end
+        return rows
+    end
+    local state = {}
+    -- Downloads persist their cache paths before invoking on_complete.
+    -- Always rebuild from that persisted record instead of the snapshot
+    -- captured when the chapter list was first opened. The list is updated
+    -- in place, and only while it is still shown: a download that finishes
+    -- after the user left (or started reading) must not bring it back.
+    local function refreshCatalog(chapters)
+        local view = state.view
+        if not view or not UIManager:isWidgetShown(view) then return false end
+        reloadBookCache()
+        if chapters then state.chapters = chapters end
+        view:setChapters(catalog_rows(state.chapters))
+        return true
+    end
+    local function showCatalog(chapters)
+        reloadBookCache()
+        state.chapters = chapters
         local view
         view = ChapterListView.show({
             title = book.title or _("Chapter list"),
-            chapters = rows,
+            chapters = catalog_rows(chapters),
+            focus_index = reading_index(chapters),
         }, {
             on_refresh = self:safeCallback(_("Refresh chapter list"), function()
                 self:loadChapters(book, function(refreshed_chapters)
-                    showCatalog(refreshed_chapters, view)
-                    self:showTransientInfo(T(_("Chapter list refreshed: %1 chapters"),
-                        tostring(#refreshed_chapters)), 2)
+                    if refreshCatalog(refreshed_chapters) then
+                        self:showTransientInfo(T(_("Chapter list refreshed: %1 chapters"),
+                            tostring(#refreshed_chapters)), 2)
+                    end
                 end, true)
             end),
             on_select_download = self:safeCallback(_("Select chapters to download"), function()
-                self:showChapterDownloadSelection(book, chapters, function()
-                    showCatalog(chapters, view)
+                self:showChapterDownloadSelection(book, state.chapters, function()
+                    refreshCatalog()
                 end)
             end),
             on_select = function(chapter)
                 self:openChapter(book, chapter, function()
-                    -- The downloader has persisted the new chapter path before
-                    -- this callback runs. Rebuild beneath the completion dialog
-                    -- so either "Read now" or "Close" leaves current cache state.
+                    -- Refresh beneath the completion dialog so either
+                    -- "Read now" or "Close" leaves current cache state.
                     UIManager:scheduleIn(0.1, function()
-                        showCatalog(chapters, view)
+                        refreshCatalog()
                     end)
                 end)
             end,
             on_close = function()
-                if self._chapter_list_view == view then
-                    self._chapter_list_view = nil
-                end
                 if on_close then on_close() end
             end,
+            on_closed = function(closed_view)
+                if self._chapter_list_view == closed_view then
+                    self._chapter_list_view = nil
+                end
+            end,
         })
+        state.view = view
         self._chapter_list_view = view
     end
     self:loadChapters(book, function(chapters)
@@ -1427,7 +1457,7 @@ function M:showChapterDownloadSelection(book, chapters, on_downloaded)
             }
         end
     end
-    menu = self:showList(_("Select chapters to download"), items,
+    menu = self:showTrackedList(_("Select chapters to download"), items,
         _("No chapters."), { items_per_page = perpage })
 end
 
@@ -1462,7 +1492,10 @@ function M:openBookForReading(book)
     local chapters = book.chapters
     if type(chapters) ~= "table" and self.library_db then
         chapters = self.library_db:getChapters(book_id)
-        if chapters then book.chapters = chapters end
+        if chapters then
+            book.chapters = chapters
+            mark_catalog_persisted(chapters, book_id)
+        end
     end
     if type(chapters) ~= "table" then
         chapters = Content.load_catalog_cache(self.client, self.settings, book)
@@ -1688,7 +1721,7 @@ function M:searchWithUI(keyword)
                 })
             end
         end
-        self:showList(T(_("Search: %1"), keyword), items, _("No search results."))
+        self:showTrackedList(T(_("Search: %1"), keyword), items, _("No search results."))
     end)
 end
 
@@ -1736,7 +1769,7 @@ function M:parseReaderURLWithUI(url)
         if not book_id then
             return _("Reader HTML loaded, but bookId was not found.")
         end
-        local record = self.settings:get_book(book_id) or {}
+        local record = BookRecords.get(self.settings, book_id) or {}
         record.book_id = book_id
         record.title = title
         record.reader_url = url
@@ -1744,7 +1777,7 @@ function M:parseReaderURLWithUI(url)
         record.pclts = pclts
         record.token = token
         record.updated_at = os.time()
-        self.settings:put_book(book_id, record)
+        BookRecords.put(self.settings, book_id, record)
         self.settings:flush()
         return T(_("Reader URL parsed.\nBook: %1\nbookId: %2"), title, book_id)
     end)
@@ -1753,7 +1786,7 @@ end
 
 function M:showCurrentBookDetails()
     local book_id = self:detectWeReadBook()
-    local book = book_id and self.settings:get_book(book_id) or nil
+    local book = book_id and BookRecords.get(self.settings, book_id) or nil
     if not book then
         self:showInfo(_("The current document is not a WeRead cached book."))
         return
