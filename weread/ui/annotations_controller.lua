@@ -448,8 +448,12 @@ function M:_ensureThoughtDB(book_id)
         return self._thought_db
     end
 
-    local books = self.settings:get("books", {})
-    local book = books[book_id]
+    local book
+    if type(self.settings.get_book) == "function" then
+        book = self.settings:get_book(book_id)
+    else
+        book = (self.settings:get("books", {}) or {})[book_id]
+    end
     if not book then
         return nil
     end

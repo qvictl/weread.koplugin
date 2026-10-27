@@ -39,8 +39,15 @@ function M:_annotationStore()
     return self.annotation_store
 end
 
+-- One library entry. Newer settings expose per-book reads (and reject the
+-- whole-library "books" key); fall back to the table on older settings.
 local function library_book(plugin, book_id)
-    local books = plugin.settings:get("books", {})
+    local settings = plugin.settings
+    if type(settings.get_book) == "function" then
+        return settings:get_book(tostring(book_id))
+            or (tonumber(book_id) and settings:get_book(tonumber(book_id))) or nil
+    end
+    local books = settings:get("books", {}) or {}
     return books[tostring(book_id)] or books[tonumber(book_id)] or books[book_id]
 end
 
