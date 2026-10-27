@@ -187,9 +187,16 @@ end
 local function run_resumable_footnotes(resumable_dl)
     local before = #scheduled
     downloader:_startFootnotes(resumable_dl)
-    scheduled[before + 1]()
-    scheduled[before + 2]()
-    scheduled[before + 3]()
+    expect(#scheduled == before + 1 and resumable_dl.footnote_scan_job,
+        "resumable footnote scan did not start as a scheduled step")
+    local steps = 0
+    while not resumable_dl.footnotes_done do
+        steps = steps + 1
+        expect(steps < 100 and scheduled[before + steps], "footnote phase stalled")
+        scheduled[before + steps]()
+    end
+    -- scan step + one transform step per chapter + completion step
+    return steps
 end
 
 local first_run = new_resumable_footnote_job()
@@ -232,4 +239,63 @@ expect(resumable_rendered["11"] == resumable_raw["11"]
     and resumable_rendered["22"] == resumable_raw["22"],
     "footnote validation fallback did not stage original chapters for packaging")
 
+-- Resumable rescans are split into small scheduled steps (F2/F4): a large
+-- book must not be scanned in one synchronous UI step.
+do
+    local many = {}
+    resumable_raw = {}
+    for chapter_index = 1, 10 do
+        many[chapter_index] = { chapterUid = 100 + chapter_index, chapterIdx = chapter_index }
+        resumable_raw[tostring(100 + chapter_index)] = "<p>chapter " .. chapter_index .. "</p>"
+    end
+    local original_scan = Footnotes.scan_chapter
+    local scans_per_step, current_step_scans = {}, 0
+    Footnotes.scan_chapter = function(...)
+        current_step_scans = current_step_scans + 1
+        return original_scan(...)
+    end
+    local job = new_resumable_footnote_job()
+    job.chapters, job.selected, job.total, job.index = many, many, 10, 11
+    local before = #scheduled
+    downloader:_startFootnotes(job)
+    expect(current_step_scans == 0, "resumable footnote scan ran inside the start step")
+    local steps = 0
+    while job.footnote_scan_job do
+        steps = steps + 1
+        current_step_scans = 0
+        scheduled[before + steps]()
+        scans_per_step[#scans_per_step + 1] = current_step_scans
+    end
+    Footnotes.scan_chapter = original_scan
+    expect(#scans_per_step == 3 and scans_per_step[1] == 4 and scans_per_step[2] == 4
+        and scans_per_step[3] == 2, "footnote rescans were not batched 4 per step")
+    expect(job.footnote_job and #job.footnote_job.chapters == 10,
+        "batched scan did not hand all chapters to the transform phase")
+end
+
+-- The resumable download loop does not scan on the UI loop; the checkpoint
+-- rescan in _startFootnotes is the only scan.
+do
+    local scan_calls = 0
+    local original_scan = Footnotes.scan_chapter
+    Footnotes.scan_chapter = function() scan_calls = scan_calls + 1; return {} end
+    local Content = require("weread.lib.content")
+    Content.fetch_single_chapter_source = function() return "<p>text</p>" end
+    Content.finalize_single_chapter_content = function(_c, _s, _b, _ch, xhtml) return xhtml, {} end
+    Content.save_full_download_css = function() end
+    Content.save_full_download_chapter = function() end
+    local function job(resumable)
+        return {
+            book = {}, chapters = { { chapterUid = 5 } }, total = 1, index = 1,
+            selected = {}, bodies = {}, state = {}, assets = {}, failed = {},
+            resumable = resumable, workspace = resumable and {} or nil,
+            completed = {}, completed_count = 0, footnote_scans = {},
+        }
+    end
+    downloader:_step(job(true))
+    expect(scan_calls == 0, "resumable download scanned footnotes on the UI loop")
+    downloader:_step(job(false))
+    expect(scan_calls == 1, "non-resumable download stopped scanning footnotes")
+    Footnotes.scan_chapter = original_scan
+end
 print(("downloader_footnotes_spec: %d checks"):format(checks))

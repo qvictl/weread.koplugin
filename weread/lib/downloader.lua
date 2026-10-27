@@ -67,6 +67,9 @@ end
 local Downloader = {}
 Downloader.__index = Downloader
 local RESUME_SKIP_BATCH_SIZE = 25
+-- Resumable footnote rescans: chapters per UI step and time budget per step.
+local FOOTNOTE_SCAN_BATCH_SIZE = 4
+local FOOTNOTE_SCAN_BUDGET_MS = 200
 -- Before each worker fork, wait (with backoff, yielding to the UI) for memory
 -- to free up, then stop the job instead of forking into a thrash. A full-book
 -- download keeps its checkpoint and can be resumed. Waiting is not a chapter
@@ -958,19 +961,23 @@ local function add_footnote_stats(total, current)
     end
 end
 
+function Downloader:_stopCancelled(dl)
+    if dl.resumable then
+        self:_preserveWorkspace(dl, dl.cancel_reason or "cancelled")
+    else
+        self:_releaseStandby(dl)
+        self:_cleanupWorkspace(dl)
+        self:_notifyCompletion(dl, false, dl.cancel_reason or "cancelled")
+        self:_finishJob(dl)
+    end
+    if not dl.prefetch then
+        self.show_transient(_("Download cancelled"), 2)
+    end
+end
+
 function Downloader:_footnoteStep(dl)
     if dl.cancelled then
-        if dl.resumable then
-            self:_preserveWorkspace(dl, dl.cancel_reason or "cancelled")
-        else
-            self:_releaseStandby(dl)
-            self:_cleanupWorkspace(dl)
-            self:_notifyCompletion(dl, false, dl.cancel_reason or "cancelled")
-            self:_finishJob(dl)
-        end
-        if not dl.prefetch then
-            self.show_transient(_("Download cancelled"), 2)
-        end
+        self:_stopCancelled(dl)
         return
     end
     local job = dl.footnote_job
@@ -1062,14 +1069,38 @@ function Downloader:_startFootnotes(dl)
         fallback = 0,
     }
     local selected = dl.resumable and dl.chapters or dl.selected
+    dl.footnote_scan_job = { index = 1, chapters = selected or {}, scans = {} }
     if dl.resumable then
         -- Keep source checkpoints pristine. Footnote conversion removes
         -- consumed definitions, so its output belongs in a disposable
         -- rendering directory that can be rebuilt after an interrupted run.
         Content.reset_full_download_rendered_text(dl.workspace)
+        -- Rescanning every checkpoint from disk is too slow for one UI step
+        -- on a large book; scan a few chapters per scheduled step.
+        self:_scheduleGuarded(dl, function() self:_footnoteScanStep(dl) end)
+        return
     end
-    local scans = {}
-    for chapter_index, chapter in ipairs(selected or {}) do
+    -- Other jobs scanned each chapter while downloading it.
+    self:_footnoteScanStep(dl)
+end
+
+-- Collect the per-chapter footnote scans for the book-wide index. Resumable
+-- jobs read and scan their checkpoints here (the download loop skips it),
+-- yielding to the UI after FOOTNOTE_SCAN_BATCH_SIZE chapters or
+-- FOOTNOTE_SCAN_BUDGET_MS, whichever comes first.
+function Downloader:_footnoteScanStep(dl)
+    if dl.cancelled then
+        self:_stopCancelled(dl)
+        return
+    end
+    local job = dl.footnote_scan_job
+    local chapters = job.chapters
+    local total = #chapters
+    local step_started = time.now()
+    local scanned = 0
+    while job.index <= total do
+        local chapter_index = job.index
+        local chapter = chapters[chapter_index]
         local uid = tostring(chapter.chapterUid or chapter_index)
         if dl.resumable then
             local body = Content.load_full_download_chapter(
@@ -1081,15 +1112,26 @@ function Downloader:_startFootnotes(dl)
                 logger.warn("checkpoint footnote scan failed; keeping original chapter:",
                     "chapter_uid=", uid, "error=", log_error(scan))
             end
+            scanned = scanned + 1
         end
         if dl.footnote_scans[uid] then
-            scans[uid] = dl.footnote_scans[uid]
+            job.scans[uid] = dl.footnote_scans[uid]
+        end
+        job.index = chapter_index + 1
+        if dl.resumable and job.index <= total and (scanned >= FOOTNOTE_SCAN_BATCH_SIZE
+            or tonumber(time.now() - step_started) / 1000 >= FOOTNOTE_SCAN_BUDGET_MS) then
+            self:_setStage(dl,
+                T(_("Scanning footnotes · chapter %1/%2"),
+                    tostring(job.index - 1), tostring(total)), dl.total)
+            self:_scheduleGuarded(dl, function() self:_footnoteScanStep(dl) end)
+            return
         end
     end
+    dl.footnote_scan_job = nil
     dl.footnote_job = {
         index = 1,
-        chapters = selected,
-        index_data = Footnotes.build_book_index(scans, selected),
+        chapters = chapters,
+        index_data = Footnotes.build_book_index(job.scans, chapters),
         css_needed = false,
     }
     self:_scheduleGuarded(dl, function() self:_footnoteStep(dl) end)
@@ -1173,17 +1215,7 @@ end
 
 function Downloader:_step(dl)
     if dl.cancelled then
-        if dl.resumable then
-            self:_preserveWorkspace(dl, dl.cancel_reason or "cancelled")
-        else
-            self:_releaseStandby(dl)
-            self:_cleanupWorkspace(dl)
-            self:_notifyCompletion(dl, false, dl.cancel_reason or "cancelled")
-            self:_finishJob(dl)
-        end
-        if not dl.prefetch then
-            self.show_transient(_("Download cancelled"), 2)
-        end
+        self:_stopCancelled(dl)
         return
     end
 
@@ -1507,14 +1539,18 @@ function Downloader:_step(dl)
     if dl.chapter_source_retries then
         dl.chapter_source_retries[tostring(chapter.chapterUid or dl.index)] = nil
     end
-    local uid = tostring(chapter.chapterUid or dl.index)
-    local scan_ok, scan = pcall(Footnotes.scan_chapter, xhtml, chapter)
-    dl.footnote_scans = dl.footnote_scans or {}
-    if scan_ok then
-        dl.footnote_scans[uid] = scan
-    else
-        logger.warn("footnote scan failed; chapter will keep original footnote markup:",
-            "chapter_uid=", uid, "error=", log_error(scan))
+    -- Resumable jobs rescan every checkpoint from disk in _startFootnotes, so
+    -- scanning here on the UI loop would only be thrown away.
+    if not dl.resumable then
+        local uid = tostring(chapter.chapterUid or dl.index)
+        local scan_ok, scan = pcall(Footnotes.scan_chapter, xhtml, chapter)
+        dl.footnote_scans = dl.footnote_scans or {}
+        if scan_ok then
+            dl.footnote_scans[uid] = scan
+        else
+            logger.warn("footnote scan failed; chapter will keep original footnote markup:",
+                "chapter_uid=", uid, "error=", log_error(scan))
+        end
     end
     dl.current = {
         chapter = chapter,
