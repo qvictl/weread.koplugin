@@ -40,10 +40,12 @@ end
 
 local shown = {}
 local has_keys = false
+local created_cover_types = {}
 package.preload["ffi/blitbuffer"] = function()
-    return { COLOR_WHITE = 0, COLOR_BLACK = 1, COLOR_GRAY = 2,
+    return { COLOR_WHITE = 0, COLOR_BLACK = 1, COLOR_GRAY = 2, TYPE_BB8 = "bb8",
         gray = function() return 2 end,
         new = function(width, height, btype)
+            created_cover_types[#created_cover_types + 1] = btype
             return { blitFrom = function() end, paintRect = function() end,
                 free = function() end, getType = function() return btype end }
         end,
@@ -414,6 +416,8 @@ local scaled_view = LibraryView.show({
 }, {})
 expect(scaled_view._item_rows[1]._has_cover == true,
     "mocked cover pipeline did not produce a cover widget")
+expect(created_cover_types[#created_cover_types] == "bb8",
+    "grayscale screen kept the decoder's color buffer type for a thumbnail")
 expect(scale_calls > 0 and lua_scale_calls == 0,
     "cover preparation used the per-pixel Lua scaler: lua=" .. lua_scale_calls
         .. " c=" .. scale_calls)

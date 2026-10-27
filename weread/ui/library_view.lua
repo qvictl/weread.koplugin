@@ -294,6 +294,15 @@ end
 
 LeftAlignedTitle.onCloseWidget = LeftAlignedTitle.free
 
+-- MuPDF returns color covers as RGB32 (four bytes per pixel), about 1 MB for
+-- a 9-cover shelf page on a high-DPI screen. A grayscale screen cannot show
+-- the extra data, so keep the thumbnails in 8-bit gray there.
+local function cover_buffer_type(source_type)
+    local ok, color = pcall(function() return Screen:isColorEnabled() end)
+    if ok and color then return source_type end
+    return Blitbuffer.TYPE_BB8 or source_type
+end
+
 local function build_center_cropped_cover(path, width, height)
     -- Keep image preparation independent from ImageWidget's "fit" and
     -- "stretch" modes: neither offers a cover-fill mode for raster files.
@@ -312,7 +321,7 @@ local function build_center_cropped_cover(path, width, height)
         -- Scale through KOReader's MuPDF path: a shelf turn can rebuild a
         -- dozen covers, and the per-pixel Lua fallback is far too slow for it.
         local filled = RenderImage:scaleBlitBuffer(source, crop.width, crop.height, true)
-        local output = Blitbuffer.new(width, height, filled:getType())
+        local output = Blitbuffer.new(width, height, cover_buffer_type(filled:getType()))
         output:blitFrom(filled, 0, 0, crop.offset_x, crop.offset_y, width, height)
         filled:free()
         return output
@@ -341,7 +350,7 @@ local function build_center_contained_cover(path, width, height, inset)
         local target_width = math.max(1, math.floor(source_width * factor + 0.5))
         local target_height = math.max(1, math.floor(source_height * factor + 0.5))
         local scaled = RenderImage:scaleBlitBuffer(source, target_width, target_height, true)
-        local output = Blitbuffer.new(width, height, scaled:getType())
+        local output = Blitbuffer.new(width, height, cover_buffer_type(scaled:getType()))
         output:paintRect(0, 0, width, height, Blitbuffer.COLOR_WHITE)
         output:blitFrom(scaled,
             math.floor((width - target_width) / 2),
