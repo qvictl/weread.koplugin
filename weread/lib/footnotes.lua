@@ -27,8 +27,40 @@ local function xml_escape(value)
         :gsub('"', "&quot;"))
 end
 
+-- Same result as value:match("^%s*(.-)%s*$"), without the pattern engine
+-- probing for the end of the string after every byte of a long text.
+local function trim(value)
+    local first = value:find("%S")
+    if not first then return "" end
+    return value:sub(first, value:match(".*%S()") - 1)
+end
+
+-- Element captures such as "<a([^>]*)>(.-)</a%s*>" cannot match an opener
+-- that has no closing tag after it, yet the pattern engine scans to the end
+-- of the chapter before giving up on each one. "<a" also opens <aside>,
+-- <abbr>, <audio> ..., so a chapter of N <aside> endnotes after its last
+-- </a> cost O(N x size). Every match ends with a closing tag and no part of
+-- these patterns can cross the ">" that ends the last one, so scanning only
+-- up to there yields the same matches; the rest is returned untouched.
+local CLOSE_SEARCH = {}
+
+local function split_after_last_close(html, close_pattern)
+    local search = CLOSE_SEARCH[close_pattern]
+    if not search then
+        search = { last = "^.*()" .. close_pattern, at = "^" .. close_pattern }
+        CLOSE_SEARCH[close_pattern] = search
+    end
+    local start = html:match(search.last)
+    if not start then return "", html end
+    local stop = select(2, html:find(search.at, start))
+    if stop == #html then return html, "" end
+    return html:sub(1, stop), html:sub(stop + 1)
+end
+
 local function decode_entities(value)
     value = tostring(value or "")
+    -- Every entity below starts with "&"; skip the eleven passes without one.
+    if not value:find("&", 1, true) then return value end
     value = value:gsub("&nbsp;", " "):gsub("&#160;", " "):gsub("&#x[Aa]0;", " ")
     value = value:gsub("&amp;", "&"):gsub("&#38;", "&")
     value = value:gsub("&lt;", "<"):gsub("&gt;", ">")
@@ -37,13 +69,33 @@ local function decode_entities(value)
     return value
 end
 
+-- get_attr runs for every tag of every scanned block, so build the four
+-- lookup patterns once per attribute name instead of on every call. Callers
+-- only pass a handful of fixed names, which bounds the cache.
+local ATTR_PATTERNS = {}
+
+local function attr_patterns(name)
+    local patterns = ATTR_PATTERNS[name]
+    if not patterns then
+        local escaped = name:gsub("([^%w])", "%%%1")
+        patterns = {
+            '^%s*' .. escaped .. '%s*=%s*"([^"]*)"',
+            '%s+' .. escaped .. '%s*=%s*"([^"]*)"',
+            "^%s*" .. escaped .. "%s*=%s*'([^']*)'",
+            "%s+" .. escaped .. "%s*=%s*'([^']*)'",
+        }
+        ATTR_PATTERNS[name] = patterns
+    end
+    return patterns
+end
+
 local function get_attr(raw, name)
     raw = tostring(raw or "")
-    local escaped = tostring(name or ""):gsub("([^%w])", "%%%1")
-    return raw:match('^%s*' .. escaped .. '%s*=%s*"([^"]*)"')
-        or raw:match('%s+' .. escaped .. '%s*=%s*"([^"]*)"')
-        or raw:match("^%s*" .. escaped .. "%s*=%s*'([^']*)'")
-        or raw:match("%s+" .. escaped .. "%s*=%s*'([^']*)'")
+    local patterns = attr_patterns(tostring(name or ""))
+    return raw:match(patterns[1])
+        or raw:match(patterns[2])
+        or raw:match(patterns[3])
+        or raw:match(patterns[4])
 end
 
 local function has_token(value, token)
@@ -53,13 +105,22 @@ end
 
 local function strip_tags(value)
     value = tostring(value or "")
-    value = value:gsub("<[bB][rR]%s*/?>", " ")
-    value = value:gsub("</[pP]%s*>", " "):gsub("</[dD][iI][vV]%s*>", " ")
-    value = value:gsub("<[^>]+>", " ")
+    -- The guards only skip passes that cannot match: every tag pattern needs
+    -- a "<" and every zero-width character starts with the bytes E2 80.
+    if value:find("<", 1, true) then
+        value = value:gsub("<[bB][rR]%s*/?>", " ")
+        value = value:gsub("</[pP]%s*>", " "):gsub("</[dD][iI][vV]%s*>", " ")
+        value = value:gsub("<[^>]+>", " ")
+    end
     value = decode_entities(value)
-    value = value:gsub("\226\128\139", ""):gsub("\226\128\140", ""):gsub("\226\128\141", "")
-    return value:gsub("%s+", " "):match("^%s*(.-)%s*$") or ""
+    if value:find("\226\128", 1, true) then
+        value = value:gsub("\226\128\139", ""):gsub("\226\128\140", ""):gsub("\226\128\141", "")
+    end
+    value = value:gsub("%s+", " ")
+    return trim(value)
 end
+
+local LEADING_NOTE_MARKERS = { "†", "‡", "※" }
 
 local function clean_note_text(value)
     local text = strip_tags(value)
@@ -67,13 +128,13 @@ local function clean_note_text(value)
     text = text:gsub("^%(%s*%d+%s*%)%s*", "")
     text = text:gsub("^（%s*%d+%s*）%s*", "")
     text = text:gsub("^%*+%s*", "")
-    for _i, marker in ipairs({ "†", "‡", "※" }) do
+    for _i, marker in ipairs(LEADING_NOTE_MARKERS) do
         if text:sub(1, #marker) == marker then
             text = text:sub(#marker + 1):gsub("^%s*", "")
             break
         end
     end
-    return text:match("^%s*(.-)%s*$") or ""
+    return trim(text)
 end
 
 local function is_symbol_marker(text)
@@ -141,8 +202,7 @@ local function is_symbol_only(text)
 end
 
 local function normalize_path(value)
-    value = decode_entities(value):gsub("\\", "/")
-    value = value:match("^%s*(.-)%s*$") or ""
+    value = trim(decode_entities(value):gsub("\\", "/"))
     value = value:gsub("^/+", "")
     local parts = {}
     for part in value:gmatch("[^/]+") do
@@ -160,7 +220,7 @@ local function basename(value)
 end
 
 local function split_href(value)
-    value = decode_entities(value):match("^%s*(.-)%s*$") or ""
+    value = trim(decode_entities(value))
     local file, anchor = value:match("^(.-)#(.+)$")
     if not anchor or anchor == "" then return nil, nil end
     anchor = anchor:gsub("%%([%x][%x])", function(hex)
@@ -230,7 +290,8 @@ end
 
 local function collect_refs(html)
     local refs = {}
-    for attrs, inner in tostring(html or ""):gmatch("<[aA]([^>]*)>(.-)</[aA]%s*>") do
+    local scannable = split_after_last_close(tostring(html or ""), "</[aA]%s*>")
+    for attrs, inner in scannable:gmatch("<[aA]([^>]*)>(.-)</[aA]%s*>") do
         local href = get_attr(attrs, "href")
         if href and looks_like_ref(attrs, href, inner) then
             local file, anchor = split_href(href)
@@ -249,21 +310,64 @@ end
 
 local BLOCK_TAGS = { "aside", "li", "p", "div", "section", "blockquote", "dd", "td" }
 
+-- Lower-case then upper-case pattern per block tag, in BLOCK_TAGS order; the
+-- order decides which equally short candidate is recorded first.
+local BLOCK_PATTERNS = {}
+for _i, tag in ipairs(BLOCK_TAGS) do
+    for _j, name in ipairs({ tag, tag:upper() }) do
+        BLOCK_PATTERNS[#BLOCK_PATTERNS + 1] = {
+            capture = "<" .. name .. "([^>]*)>(.-)</" .. name .. "%s*>",
+            close = "</" .. name .. "%s*>",
+            close_literal = "</" .. name,
+        }
+    end
+end
+
 -- Cap on cleaned note text length in bytes (#text counts bytes, so this is
 -- ~2000 CJK chars); genuine notes are far smaller, whole-chapter captures are
 -- far larger.
 local MAX_NOTE_TEXT_BYTES = 6000
 
-local function remember_definition(definitions, anchor, inner)
-    if not anchor or anchor == "" then return end
+local function anchor_of(raw)
+    return get_attr(raw, "id") or get_attr(raw, "name")
+end
+
+-- Judge one captured region as note text. Returns the cleaned text when it is
+-- usable, otherwise nil plus the cleaned size when the region was rejected
+-- only for being oversized.
+local function definition_text(inner)
     local text = clean_note_text(inner)
-    if text == "" or is_trivial_note(text) then return end
-    if is_symbol_only(text) then return end
+    if text == "" or is_trivial_note(text) then return nil end
+    if is_symbol_only(text) then return nil end
     -- Ancestor blocks spanning most of the chapter poison the definition;
     -- reject oversized candidates outright instead of storing them.
-    if #text > MAX_NOTE_TEXT_BYTES then
-        logger.warn("dropping oversized note candidate:",
-            "anchor=", tostring(anchor), "bytes=", tostring(#text))
+    if #text > MAX_NOTE_TEXT_BYTES then return nil, #text end
+    return text
+end
+
+-- Every candidate anchor of one captured region shares the same cleaned
+-- text, and cleaning (~20 gsub passes) is the expensive step. Judging the
+-- region again for each descendant id made index chapters (one wrapper block
+-- holding thousands of ids) quadratic, so the verdict is memoized per region
+-- and computed lazily on its first anchor, exactly once.
+local function remember_definition(definitions, drops, memo, anchor, inner)
+    if not anchor or anchor == "" then return end
+    if not memo.evaluated then
+        memo.evaluated = true
+        memo.text, memo.oversized_bytes = definition_text(inner)
+        if memo.oversized_bytes then
+            drops.regions = drops.regions + 1
+            if memo.oversized_bytes > drops.max_bytes then
+                drops.max_bytes = memo.oversized_bytes
+            end
+        end
+    end
+    local text = memo.text
+    if not text then
+        if memo.oversized_bytes then
+            drops.candidates = drops.candidates + 1
+            drops.first_anchor = drops.first_anchor or anchor
+        end
         return
     end
     local current = definitions[anchor]
@@ -274,35 +378,52 @@ local function remember_definition(definitions, anchor, inner)
     end
 end
 
-local function collect_definitions(html)
+local function reset_memo(memo)
+    memo.evaluated, memo.text, memo.oversized_bytes = false, nil, nil
+    return memo
+end
+
+local function collect_definitions(html, label)
     local definitions = {}
+    local drops = { candidates = 0, regions = 0, max_bytes = 0 }
+    local memo = {}
     html = tostring(html or "")
-    for _i, tag in ipairs(BLOCK_TAGS) do
-        local patterns = {
-            "<" .. tag .. "([^>]*)>(.-)</" .. tag .. "%s*>",
-            "<" .. tag:upper() .. "([^>]*)>(.-)</" .. tag:upper() .. "%s*>",
-        }
-        for _j, pattern in ipairs(patterns) do
-            for attrs, inner in html:gmatch(pattern) do
-                remember_definition(definitions,
-                    get_attr(attrs, "id") or get_attr(attrs, "name"), inner)
-                for raw_tag in inner:gmatch("<[%a][^>]*>") do
-                    remember_definition(definitions,
-                        get_attr(raw_tag, "id") or get_attr(raw_tag, "name"), inner)
-                end
+    for _i, pattern in ipairs(BLOCK_PATTERNS) do
+        -- Most chapters use one letter case, so half the passes have no
+        -- closing tag at all and cannot match anything.
+        local scannable = ""
+        if html:find(pattern.close_literal, 1, true) then
+            scannable = split_after_last_close(html, pattern.close)
+        end
+        for attrs, inner in scannable:gmatch(pattern.capture) do
+            reset_memo(memo)
+            remember_definition(definitions, drops, memo, anchor_of(attrs), inner)
+            for raw_tag in inner:gmatch("<[%a][^>]*>") do
+                remember_definition(definitions, drops, memo, anchor_of(raw_tag), inner)
             end
         end
     end
-    for attrs, inner in html:gmatch("<[aA]([^>]*)>(.-)</[aA]%s*>") do
-        remember_definition(definitions,
-            get_attr(attrs, "id") or get_attr(attrs, "name"), inner)
+    local links = split_after_last_close(html, "</[aA]%s*>")
+    for attrs, inner in links:gmatch("<[aA]([^>]*)>(.-)</[aA]%s*>") do
+        remember_definition(definitions, drops, reset_memo(memo), anchor_of(attrs), inner)
     end
     -- A common tail-note layout places an empty named anchor immediately
     -- before the paragraph containing the actual note text.
-    for attrs, inner in html:gmatch(
+    local paragraphs = split_after_last_close(html, "</[pP]%s*>")
+    for attrs, inner in paragraphs:gmatch(
         "<[aA]([^>]*)>%s*</[aA]>%s*<[pP][^>]*>(.-)</[pP]%s*>") do
-        remember_definition(definitions,
-            get_attr(attrs, "id") or get_attr(attrs, "name"), inner)
+        remember_definition(definitions, drops, reset_memo(memo), anchor_of(attrs), inner)
+    end
+    -- Index chapters routinely reject thousands of candidates; one summary
+    -- line per chapter keeps the device log readable.
+    if drops.candidates > 0 then
+        logger.info("dropped oversized note candidates:",
+            "chapter=", tostring(label or ""),
+            "candidates=", tostring(drops.candidates),
+            "regions=", tostring(drops.regions),
+            "max_bytes=", tostring(drops.max_bytes),
+            "limit=", tostring(MAX_NOTE_TEXT_BYTES),
+            "first_anchor=", tostring(drops.first_anchor))
     end
     return definitions
 end
@@ -318,7 +439,8 @@ end
 
 local function collect_definition_backlinks(html)
     local backlinks = {}
-    for attrs, inner in tostring(html or ""):gmatch("<[pP]([^>]*)>(.-)</[pP]%s*>") do
+    local scannable = split_after_last_close(tostring(html or ""), "</[pP]%s*>")
+    for attrs, inner in scannable:gmatch("<[pP]([^>]*)>(.-)</[pP]%s*>") do
         local class = get_attr(attrs, "class") or ""
         local lower = class:lower()
         if has_token(class, "note") or lower:find("fncontent", 1, true) then
@@ -373,10 +495,11 @@ function Footnotes.scan_chapter(html, chapter)
             forward_ref_ids[ref.ref_id] = true
         end
     end
+    local uid = chapter_uid(chapter)
     return {
-        chapter_uid = chapter_uid(chapter),
+        chapter_uid = uid,
         chapter = chapter,
-        definitions = collect_definitions(html),
+        definitions = collect_definitions(html, uid),
         anchors = collect_anchor_presence(html),
         definition_backlinks = collect_definition_backlinks(html),
         refs = refs,
@@ -494,7 +617,8 @@ end
 
 local function strip_consumed_note_blocks(html, converted_anchors)
     local removed = 0
-    html = html:gsub("<[pP]([^>]*)>(.-)</[pP]%s*>", function(attrs, inner)
+    local scannable, rest = split_after_last_close(html, "</[pP]%s*>")
+    html = scannable:gsub("<[pP]([^>]*)>(.-)</[pP]%s*>", function(attrs, inner)
         local class = get_attr(attrs, "class") or ""
         local lower = class:lower()
         if not has_token(class, "note") and not lower:find("fncontent", 1, true) then
@@ -518,6 +642,7 @@ local function strip_consumed_note_blocks(html, converted_anchors)
         end
         return "<p" .. attrs .. ">" .. inner .. "</p>"
     end)
+    if rest ~= "" then html = html .. rest end
     return html, removed
 end
 
@@ -555,7 +680,8 @@ function Footnotes.transform_chapter(html, scan, index)
             target_id, ref_id, ordinal)
     end)
 
-    html = html:gsub("<[aA]([^>]*)>(.-)</[aA]%s*>", function(attrs, inner)
+    local links, after_links = split_after_last_close(html, "</[aA]%s*>")
+    html = links:gsub("<[aA]([^>]*)>(.-)</[aA]%s*>", function(attrs, inner)
         local href = get_attr(attrs, "href")
         if not href or not looks_like_ref(attrs, href, inner) then
             return "<a" .. attrs .. ">" .. inner .. "</a>"
@@ -594,6 +720,7 @@ function Footnotes.transform_chapter(html, scan, index)
             '<span class="wr-fn-ref"><a epub:type="noteref" role="doc-noteref" href="#%s" id="%s">%s</a></span>',
             target_id, ref_id, xml_escape(display))
     end)
+    if after_links ~= "" then html = html .. after_links end
 
     html, stats.removed_note_blocks = strip_consumed_note_blocks(html, converted_anchors)
     return append_before_body_close(html, build_section(notes)), stats
