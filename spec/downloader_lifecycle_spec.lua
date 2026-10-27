@@ -383,20 +383,114 @@ end
 
 -- Memory never frees up: the job stops instead of skipping the chapter.
 do
-    downloader.memory_gate = function() return false, 1000 end
+    local gate_calls = 0
+    downloader.memory_gate = function()
+        gate_calls = gate_calls + 1
+        return false, 50 * 1024, 96 * 1024
+    end
     local starved = { book = {}, total = 1, trapper = trapper }
     downloader:_ensureProgressDialog(starved)
     local ok, err
     trapper:wrap(function()
         ok, err = pcall(downloader._runInterruptible, downloader, starved, function() end)
     end)
-    for _i = 1, 12 do table.remove(scheduled)() end
-    expect(ok == false and tostring(err):find("Not enough free memory", 1, true),
+    expect(dialog.title:find("Waiting for free memory", 1, true)
+        and dialog.title:find("50 MB free, 96 MB needed", 1, true),
+        "low-memory wait did not show a stage: " .. tostring(dialog.title))
+    local waits = 0
+    while ok == nil and #scheduled > 0 do
+        table.remove(scheduled)()
+        waits = waits + 1
+    end
+    expect(waits == 6 and gate_calls == 7, "low-memory wait did not back off 6 times")
+    expect(child_pending == nil, "forked although memory never recovered")
+    expect(ok == false and tostring(err):find("weread_low_memory", 1, true),
         "starved download did not stop with a low-memory error")
-    local retry_ok, retry_err = pcall(downloader._retryChapterSource, downloader, starved, err)
-    expect(not retry_ok and tostring(retry_err):find("Not enough free memory", 1, true),
-        "low memory was treated as a chapter failure and skipped")
+
+    -- Resumable job: pause with the checkpoint kept, never count a failure.
+    local infos_before = #messages
+    local resumable = {
+        book = {}, chapters = { { chapterUid = 9 } }, total = 1, index = 1,
+        failed = {}, resumable = true, workspace = {}, standby_guard = true,
+        completed_count = 0,
+    }
+    local reason
+    resumable.on_complete = function(_ok, value) reason = value end
+    downloader._active_job = resumable
+    downloader:_beginStandby()
+    expect(downloader:_retryChapterSource(resumable, err) == false,
+        "low memory was retried as a chapter failure")
+    expect(#resumable.failed == 0 and resumable.index == 1,
+        "low memory skipped the chapter")
+    expect(reason == "low_memory" and downloader._active_job == nil
+        and downloader._standby_ref == 0, "low memory did not pause the resumable job")
+    expect(#messages == infos_before + 1
+        and messages[#messages]:find("Completed chapters were kept", 1, true)
+        and messages[#messages]:find("restart KOReader", 1, true),
+        "low-memory pause did not explain how to continue")
+
+    -- Non-resumable job: stop cleanly.
+    local plain = {
+        book = {}, chapters = { { chapterUid = 9 } }, total = 1, index = 1,
+        failed = {}, standby_guard = true,
+    }
+    plain.on_complete = function(_ok, value) reason = value end
+    downloader._active_job = plain
+    downloader:_beginStandby()
+    downloader:_failChapter(plain, err)
+    expect(#plain.failed == 0 and reason == "low_memory"
+        and downloader._active_job == nil and downloader._standby_ref == 0,
+        "low memory did not stop the non-resumable job cleanly")
+    expect(messages[#messages]:find("Download stopped: not enough free memory", 1, true),
+        "low-memory stop was not reported")
     downloader.memory_gate = function() return true end
+end
+
+-- Cancelling while waiting for memory wakes the job at once and never forks.
+do
+    downloader.memory_gate = function() return false, 1000, 98304 end
+    local waiting = { book = {}, total = 1, trapper = trapper }
+    downloader:_ensureProgressDialog(waiting)
+    local returned, value = false, "unset"
+    trapper:wrap(function()
+        value = downloader:_runInterruptible(waiting, function() return "unused" end)
+        returned = true
+    end)
+    expect(not returned and dialog.dismiss_callback ~= nil,
+        "memory wait is not cancellable from the dialog")
+    local pending_timer = table.remove(scheduled)
+    dialog.options.buttons[1][1].callback()
+    expect(returned and value == nil and waiting.cancelled and child_pending == nil,
+        "cancel during the memory wait did not stop the job")
+    pending_timer() -- the late timer must not resume the finished coroutine
+    expect(child_pending == nil, "late memory-wait timer resumed the job")
+    downloader.memory_gate = function() return true end
+end
+
+-- The default gate collects garbage and honours max(96 MB, heap + 48 MB).
+do
+    local MemoryGate = require("weread.lib.memory_gate")
+    expect(MemoryGate.fork_requirement_kb(10 * 1024) == 96 * 1024,
+        "small heaps must still keep the 96 MB floor")
+    expect(MemoryGate.fork_requirement_kb(64 * 1024) == 112 * 1024,
+        "large heaps must add 48 MB of headroom")
+    local ok, available, required = MemoryGate.check_fork(function()
+        return "MemTotal: 480000 kB\nMemAvailable: 90000 kB\n"
+    end)
+    expect(ok == false and available == 90000 and required >= 96 * 1024,
+        "90 MB available must not pass the fork gate")
+    ok = MemoryGate.check_fork(function() return "MemAvailable: 400000 kB\n" end)
+    expect(ok == true, "plenty of memory must pass the fork gate")
+    expect(MemoryGate.check_fork(function() return nil end) == true,
+        "unknown memory must not block downloads")
+    expect(MemoryGate.parse_rss_kb("Name:\treader\nVmRSS:\t  99196 kB\n") == 99196,
+        "VmRSS was not parsed")
+    local snapshot_downloader = Downloader:new{
+        read_meminfo = function() return "MemAvailable: 123 kB\n" end,
+        read_self_status = function() return "VmRSS: 456 kB\n" end,
+    }
+    local avail, rss = snapshot_downloader:_memorySnapshot()
+    expect(avail == 123 and rss == 456, "memory snapshot did not use injected readers")
 end
 
 print(("downloader_lifecycle_spec: %d checks"):format(checks))
