@@ -588,6 +588,68 @@ do
     expect(closed_with == update_view, "closing the shelf did not notify its owner")
 end
 
+-- Taps and swipes are handled after their feedback, once per burst.
+do
+    local uimanager = package.loaded["ui/uimanager"]
+    local ticks = {}
+    local immediate = uimanager.nextTick
+    local selections, pages = {}, {}
+    local tap_books = {}
+    for index = 1, 30 do tap_books[index] = { bookId = "t" .. index, title = "T" .. index } end
+    local tap_view = LibraryView.show({
+        mode = "books", books = tap_books, accounts = {}, paged = true, page = 1, page_size = 10,
+    }, {
+        on_select = function(book) selections[#selections + 1] = book end,
+        on_page_changed = function(page) pages[#pages + 1] = page end,
+    })
+    uimanager.nextTick = function(_self, callback) ticks[#ticks + 1] = callback end
+    tap_view._item_rows[1].callback()
+    tap_view._item_rows[2].callback()
+    expect(#selections == 0 and #ticks == 1, "book tap ran synchronously or was not debounced")
+    ticks[1]()
+    expect(#selections == 1 and selections[1] == tap_books[1], "deferred book tap did not open the book")
+    ticks = {}
+    tap_view:onShelfSwipe(nil, { direction = "west" })
+    tap_view:onShelfSwipe(nil, { direction = "west" })
+    tap_view._page_buttons[3].callback()
+    expect(#pages == 0 and #ticks == 1, "queued page turns were not collapsed")
+    ticks[1]()
+    expect(#pages == 1 and pages[1] == 2, "deferred page turn went to the wrong page")
+    uimanager.nextTick = immediate
+
+    -- A cover cell that was never painted ignores the tap instead of acting
+    -- on its (0, 0) placeholder range.
+    local cover_tap_view = LibraryView.show({
+        mode = "books", books = tap_books, accounts = {}, paged = true, page = 1, page_size = 6,
+        cover_mode = true, cover_columns = 3,
+    }, { on_select = function(book) selections[#selections + 1] = book end })
+    local cell = cover_tap_view._item_rows[1]
+    cell.frame.dimen = nil
+    local before = #selections
+    expect(cell:onTapCoverCell() == false and #selections == before,
+        "unpainted cover cell handled a tap")
+end
+
+-- Book page footer actions run deferred, once per burst of taps.
+do
+    package.preload["ui/widget/textboxwidget"] = package.preload["ui/widget/textboxwidget"] or widget_module
+    local BookDetailView = require("weread.ui.book_detail_view")
+    local uimanager = package.loaded["ui/uimanager"]
+    local ticks, runs = {}, 0
+    local detail = BookDetailView.show({
+        title = "Book", refresh_label = "Refresh", refresh_date = "never", metadata = {},
+        bottom_actions = { { text = "Chapter list", callback = function() runs = runs + 1 end } },
+    }, {})
+    local immediate = uimanager.nextTick
+    uimanager.nextTick = function(_self, callback) ticks[#ticks + 1] = callback end
+    detail._footer_actions[1].callback()
+    detail._footer_actions[1].callback()
+    uimanager.nextTick = immediate
+    expect(runs == 0 and #ticks == 1, "footer action ran synchronously or twice")
+    ticks[1]()
+    expect(runs == 1, "deferred footer action did not run")
+end
+
 -- A long catalog builds only the rows of its current page, computes row
 -- status lazily for those rows, and turns pages in place.
 do

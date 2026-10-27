@@ -187,6 +187,17 @@ function BookDetailView:actionBlock(actions)
     return group
 end
 
+-- Footer actions open full-screen views or start downloads. Run them after
+-- the tap feedback painted, and only once per burst of queued taps.
+function BookDetailView:runAction(callback)
+    if self._action_pending then return end
+    self._action_pending = true
+    UIManager:nextTick(function()
+        self._action_pending = nil
+        if UIManager:isWidgetShown(self) then callback() end
+    end)
+end
+
 function BookDetailView:footer()
     local actions = self.data.bottom_actions or {}
     local count = math.max(1, #actions)
@@ -203,7 +214,7 @@ function BookDetailView:footer()
             height = footer_height,
             enabled = action.enabled ~= false,
             show_parent = self,
-            callback = action.callback,
+            callback = action.callback and function() self:runAction(action.callback) end,
         }
         self._footer_actions[#self._footer_actions + 1] = footer_action
         table.insert(row, footer_action)

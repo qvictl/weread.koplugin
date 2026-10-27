@@ -153,9 +153,7 @@ function ChapterListView:content()
             status = chapter.status,
             width = self.list_width,
             show_parent = self,
-            callback = function()
-                if self.on_select then self.on_select(chapter.source) end
-            end,
+            callback = function() self:selectChapter(chapter.source) end,
         }
         self._chapter_rows[#self._chapter_rows + 1] = row
         table.insert(group, row)
@@ -168,6 +166,16 @@ function ChapterListView:content()
         })
     end
     return group
+end
+
+-- Open a chapter after the row feedback painted, once per tap burst.
+function ChapterListView:selectChapter(chapter)
+    if self._select_pending or not self.on_select then return end
+    self._select_pending = true
+    UIManager:nextTick(function()
+        self._select_pending = nil
+        if UIManager:isWidgetShown(self) then self.on_select(chapter) end
+    end)
 end
 
 function ChapterListView:pageBar()
