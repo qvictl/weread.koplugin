@@ -134,7 +134,9 @@ end
 local image_count = 24
 local image_size = 256 * 1024
 local fake_client = {}
-function fake_client:download_to_file(_url, path)
+local tar_download_opts
+function fake_client:download_to_file(_url, path, opts)
+    tar_download_opts = opts
     local file = assert(io.open(path, "wb"))
     for index = 1, image_count do
         local name = string.format("image-%03d.jpg", index)
@@ -157,6 +159,9 @@ local assets, src_map = Content.download_chapter_assets_to_files(
 collectgarbage("collect")
 local after_kb = collectgarbage("count")
 expect(#assets == image_count, "not all TAR images were extracted")
+expect(type(tar_download_opts) == "table" and type(tar_download_opts.timeout) == "table"
+    and tar_download_opts.timeout[2] == 120,
+    "chapter resource download has no bounded total timeout")
 expect(assets[1].data == nil and type(assets[1].path) == "string",
     "extracted image remained resident in an asset data field")
 expect(src_map["image-001.jpg"] == "../images/image-001.jpg",

@@ -56,7 +56,14 @@ package.preload["socket.http"] = function()
             requests[#requests + 1] = options
             local response = table.remove(responses, 1)
             if response.raise then error(response.raise) end
-            if options.sink then options.sink(response.body or "") end
+            if response.fail then return nil, response.fail end
+            if options.sink then
+                for _i, chunk in ipairs(response.chunks or { response.body or "" }) do
+                    if response.before_chunk then response.before_chunk() end
+                    local accepted, sink_err = options.sink(chunk)
+                    if not accepted then return nil, sink_err end
+                end
+            end
             return 1, response.code, response.headers or {}, response.status
         end,
     }
@@ -263,7 +270,7 @@ client.json_decode = function()
     error("invalid JSON")
 end
 ok, err = pcall(function()
-    client:decode_http_json("<not-json>", {
+    client:decode_http_json("not-json", {
         method = "GET",
         url = "https://weread.qq.com/web/invalid-json",
         code = 200,
@@ -272,7 +279,7 @@ end)
 expect(not ok and tostring(err):find("invalid JSON", 1, true),
     "JSON decode failure was not preserved")
 local decode_failure_log = table.concat(logs, "\n")
-expect(decode_failure_log:find("response_body= <not-json>", 1, true),
+expect(decode_failure_log:find("response_body= not-json", 1, true),
     "JSON decode failure log omitted the raw response body")
 
 local shelf_client = Client:new(settings)
@@ -379,5 +386,68 @@ ok = pcall(function()
 end)
 expect(not ok and io.open(download_path .. ".part", "rb") == nil,
     "oversized file download did not remove its partial output")
+
+-- F8: error logs keep a short, tag-free excerpt of the body.
+logs = {}
+local huge_page = "<html><head><script>var secret = 1;</script><style>p{}</style></head><body>"
+    .. "<p>Service busy</p>" .. string.rep("<div>reader chapter text</div>", 20000) .. "</body></html>"
+responses[#responses + 1] = { body = huge_page, code = 500,
+    headers = { ["content-type"] = "text/html" } }
+ok, err = pcall(function() client:get_text("https://weread.qq.com/web/reader/huge") end)
+local huge_log = table.concat(logs, "\n")
+local logged_body = huge_log:match("response_body= (.*)$") or ""
+expect(not ok and huge_log:find("body_bytes= " .. #huge_page, 1, true),
+    "error log lost the full body size")
+expect(#logged_body <= 320 and logged_body:find("Service busy", 1, true)
+    and logged_body:find("(truncated)", 1, true),
+    "error log body was not a short excerpt: " .. #logged_body)
+expect(not logged_body:find("<", 1, true) and not logged_body:find("secret", 1, true),
+    "error log kept HTML markup or script text")
+
+-- F10: a transport failure names its cause instead of "HTTP nil".
+logs = {}
+responses[#responses + 1] = { fail = "wantread" }
+ok, err = pcall(function() client:get_text("https://weread.qq.com/web/reader/slow") end)
+expect(not ok and tostring(err):find("HTTP nil (wantread)", 1, true),
+    "transport status missing from the HTTP error: " .. tostring(err))
+responses[#responses + 1] = { fail = "closed" }
+client.json_encode = function() return "{}" end
+ok, err = pcall(function() client:post_json("https://weread.qq.com/web/x", {}) end)
+expect(not ok and tostring(err):find("HTTP nil (closed)", 1, true),
+    "post_json lost the transport status: " .. tostring(err))
+responses[#responses + 1] = { fail = "timeout" }
+ok, err = pcall(function()
+    client:download_to_file("https://weread.qq.com/slow.tar", download_path, {})
+end)
+expect(not ok and tostring(err):find("HTTP nil (timeout)", 1, true),
+    "download_to_file lost the transport status: " .. tostring(err))
+responses[#responses + 1] = { body = "", code = 503 }
+ok, err = pcall(function() client:get_text("https://weread.qq.com/web/busy") end)
+expect(not ok and tostring(err):find("HTTP 503,", 1, true),
+    "HTTP status errors changed format: " .. tostring(err))
+
+-- F10: file downloads honour the total timeout in their own sink.
+do
+    local fake_now = 1000
+    local real_time = os.time
+    -- luacheck: push ignore 122
+    os.time = function() return fake_now end
+    responses[#responses + 1] = {
+        code = 200, chunks = { "a", "b", "c" },
+        before_chunk = function() fake_now = fake_now + 100 end,
+    }
+    ok, err = pcall(function()
+        client:download_to_file("https://weread.qq.com/trickle", download_path,
+            { timeout = { 20, 120 } })
+    end)
+    os.time = real_time
+    -- luacheck: pop
+    expect(not ok and tostring(err):find("sink timeout", 1, true),
+        "trickling file download did not hit its total timeout: " .. tostring(err))
+    expect(io.open(download_path .. ".part", "rb") == nil,
+        "timed-out download left its partial file")
+    expect(timeout_calls[#timeout_calls][1] == 20 and timeout_calls[#timeout_calls][2] == 120,
+        "file download timeout was not applied to the socket")
+end
 
 print(("client_spec: %d checks"):format(checks))

@@ -4,6 +4,11 @@ local WeRead = require("weread.lib.protocol")
 local logger = require("weread.lib.logger")
 
 local Content = {}
+-- Request timeouts {block, total} in seconds for the book download path. The
+-- client default has no total limit, so a trickling server could keep a
+-- download worker alive forever (F10).
+local CONTENT_TIMEOUT = { 15, 60 }
+local FILE_TIMEOUT = { 20, 120 }
 local b64chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
 -- Forward declarations used by the resumable-download checkpoint helpers.
 local xml_escape
@@ -1310,7 +1315,9 @@ function Content.download_remote_images(client, xhtml, used_names, progress)
             return "src=" .. quote .. "../" .. cached_href .. quote
         end
         local ok, data = pcall(function()
-            return client:get_binary(url, { referer = "https://weread.qq.com/" })
+            return client:get_binary(url, {
+                referer = "https://weread.qq.com/", timeout = FILE_TIMEOUT,
+            })
         end)
         if not ok or not data or #data == 0 then
             return "src=" .. quote .. src .. quote
@@ -1346,7 +1353,7 @@ function Content.download_chapter_assets(client, book, chapter, used_names)
     elseif tar_url:match("^/") then
         tar_url = "https://weread.qq.com" .. tar_url
     end
-    local raw = client:get_binary(tar_url, { referer = referer })
+    local raw = client:get_binary(tar_url, { referer = referer, timeout = FILE_TIMEOUT })
     local assets = {}
     local src_map = {}
     for entry_index, entry in ipairs(tar_entries(raw)) do
@@ -1508,6 +1515,7 @@ function Content.download_chapter_assets_to_files(client, book, chapter, used_na
     client:download_to_file(tar_url, tar_path, {
         referer = referer,
         max_bytes = MAX_TAR_ENTRY_BYTES,
+        timeout = FILE_TIMEOUT,
     })
     local input = assert(io.open(tar_path, "rb"))
     local signature = input:read(4) or ""
@@ -1548,6 +1556,7 @@ function Content.download_remote_images_to_files(client, xhtml, used_names, work
             client:download_to_file(url, incoming, {
                 referer = "https://weread.qq.com/",
                 max_bytes = 64 * 1024 * 1024,
+                timeout = FILE_TIMEOUT,
             })
         end)
         if not ok then
@@ -1588,7 +1597,9 @@ end
 function Content.ensure_reader_state(client, book)
     local book_id = book.book_id or book.bookId
     local reader_url = book.reader_url or WeRead.reader_url(book_id)
-    local reader_html = client:get_text(reader_url, { referer = reader_url })
+    local reader_html = client:get_text(reader_url, {
+        referer = reader_url, timeout = CONTENT_TIMEOUT,
+    })
     local state = Content.extract_reader_state(reader_html, function(encoded)
         return client:json_decode(encoded)
     end)
@@ -1627,7 +1638,7 @@ function Content.fetch_catalog(client, book)
     local reader_url = book.reader_url or WeRead.reader_url(book_id)
     local catalog = client:post_json("https://weread.qq.com/web/book/chapterInfos", {
         bookIds = { tostring(book_id) },
-    }, { referer = reader_url })
+    }, { referer = reader_url, timeout = CONTENT_TIMEOUT })
     local chapters = Content.readable_chapters(Content.normalize_chapters(catalog, book_id))
     book.chapters = chapters
     return chapters
@@ -1648,9 +1659,10 @@ function Content.fetch_chapter_shard(client, _settings, book, chapter, endpoint)
         sc = 1,
         style = is_style_shard,
     })
-    local text, code = client:request({
+    local text, code, _headers, status = client:request({
         url = "https://weread.qq.com" .. endpoint,
         method = "POST",
+        timeout = CONTENT_TIMEOUT,
         headers = {
             ["Content-Type"] = "application/json;charset=UTF-8",
             ["Origin"] = "https://weread.qq.com",
@@ -1659,7 +1671,10 @@ function Content.fetch_chapter_shard(client, _settings, book, chapter, endpoint)
         body = client:json_encode(params),
     })
     if not code or code < 200 or code >= 300 then
-        error(endpoint .. " failed: HTTP " .. tostring(code or "unknown"))
+        -- Keep the transport status ("timeout", "wantread", ...) so the
+        -- downloader can tell a network outage from a server answer.
+        error(endpoint .. " failed: HTTP " .. tostring(code or "unknown")
+            .. ((not code and status) and (" (" .. tostring(status) .. ")") or ""))
     end
     if text == "{}" then
         error(endpoint .. " returned empty object")
