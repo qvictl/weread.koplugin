@@ -97,6 +97,7 @@ package.preload["ui/uimanager"] = function()
         close = function() end,
         nextTick = function(_self, callback) callback() end,
         setDirty = function() end,
+        isWidgetShown = function() return true end,
     }
 end
 package.preload["ui/widget/textwidget"] = function()
@@ -585,6 +586,70 @@ do
         "a second update without new covers rebuilt cells")
     update_view:onCloseWidget()
     expect(closed_with == update_view, "closing the shelf did not notify its owner")
+end
+
+-- A long catalog builds only the rows of its current page, computes row
+-- status lazily for those rows, and turns pages in place.
+do
+    local ChapterListView = require("weread.ui.chapter_list_view")
+    local status_reads = 0
+    local rows = {}
+    for index = 1, 811 do
+        rows[index] = setmetatable({ title = "Chapter " .. index, source = { chapterUid = index } }, {
+            __index = function(row, key)
+                if key ~= "status" then return nil end
+                status_reads = status_reads + 1
+                rawset(row, "status", "words")
+                return "words"
+            end,
+        })
+    end
+    local selected
+    local view = ChapterListView.show({ title = "Long", chapters = rows, focus_index = 400 }, {
+        on_select = function(chapter) selected = chapter end,
+    })
+    local per_page = view.page_size
+    expect(per_page > 1 and per_page < 60, "chapter page size was not derived from the screen")
+    expect(#view._chapter_rows == per_page, "chapter list built rows outside the current page")
+    expect(status_reads == per_page, "chapter status was computed for invisible rows")
+    expect(view.page_count == math.ceil(811 / per_page), "chapter page count is wrong")
+    local expected_page = math.floor(399 / per_page) + 1
+    expect(view.page == expected_page, "chapter list did not open on the reading chapter's page")
+    expect(view._page_buttons and view._page_buttons[2].text
+            == expected_page .. "/" .. view.page_count .. " pages",
+        "chapter page indicator is missing or wrong")
+    view._chapter_rows[1].callback()
+    expect(selected == rows[(expected_page - 1) * per_page + 1].source,
+        "chapter row on a later page opened the wrong chapter")
+
+    view._page_buttons[3].callback()
+    expect(view.page == expected_page + 1 and #view._chapter_rows == per_page,
+        "next-page button did not rebuild the following page in place")
+    expect(view:onChapterPageSwipe(nil, { direction = "east" }) and view.page == expected_page,
+        "right swipe did not return to the previous page")
+    expect(not view:onChapterPageSwipe(nil, { direction = "north" }), "chapter list captured vertical swipes")
+
+    -- Queued page requests collapse into one rebuild.
+    local uimanager = package.loaded["ui/uimanager"]
+    local ticks = {}
+    local immediate = uimanager.nextTick
+    uimanager.nextTick = function(_self, callback) ticks[#ticks + 1] = callback end
+    view:goToPage(view.page + 1)
+    view:goToPage(view.page + 1)
+    view:onChapterPageSwipe(nil, { direction = "west" })
+    uimanager.nextTick = immediate
+    expect(#ticks == 1, "queued page turns each scheduled a rebuild")
+    ticks[1]()
+    expect(view.page == expected_page + 1, "deferred page turn did not apply")
+
+    view:goToPage(view.page_count)
+    expect(#view._chapter_rows == 811 - (view.page_count - 1) * per_page,
+        "last chapter page was not sliced correctly")
+    expect(not view:goToPage(view.page_count + 1), "chapter list paged beyond the end")
+
+    local short = ChapterListView.show({ title = "Short", chapters = { rows[1], rows[2] } }, {})
+    expect(short.page_count == 1 and short._page_buttons == nil and #short._chapter_rows == 2,
+        "short catalog created page controls")
 end
 
 print(("empty_state_face_spec: %d checks"):format(checks))

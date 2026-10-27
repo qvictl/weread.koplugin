@@ -287,10 +287,21 @@ function LibraryDB:getShelf()
     return ok and books or nil
 end
 
+-- The catalog lives in the chapters table. Embedding it in the book payload
+-- re-encoded every chapter on each book write and decoded it on each read.
+local function book_payload(book)
+    if book.chapters == nil then return encode(book) end
+    local copy = {}
+    for key, value in pairs(book) do
+        if key ~= "chapters" then copy[key] = value end
+    end
+    return encode(copy)
+end
+
 function LibraryDB:putBook(book)
     if type(book) ~= "table" then return false end
     local book_id = book.book_id or book.bookId
-    local payload = encode(book)
+    local payload = book_payload(book)
     if not book_id or not payload then return false end
     local db = self:open()
     if not db then return false end
@@ -368,6 +379,22 @@ function LibraryDB:putChapters(book_id, chapters)
     self:_done(ok)
     if not ok then logger.warn("library_db catalog write failed:", err) end
     return ok
+end
+
+-- Number of cached catalog entries, without decoding them.
+function LibraryDB:countChapters(book_id)
+    if not book_id then return nil end
+    local db = self:open()
+    if not db then return nil end
+    local stmt, count
+    local ok = pcall(function()
+        stmt = db:prepare("SELECT COUNT(*) FROM chapters WHERE book_id=?")
+        local row = stmt:reset():bind(tostring(book_id)):step()
+        count = row and tonumber(row[1]) or 0
+    end)
+    close_statement(stmt)
+    self:_done(ok)
+    return ok and count or nil
 end
 
 function LibraryDB:getChapters(book_id)
