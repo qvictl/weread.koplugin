@@ -147,10 +147,6 @@ local host = {
     settings = require("spec.helpers.book_settings").install({
         set = function() end, flush = function() end,
         get = function(_self, key, default)
-            if key == "books" then
-                books_reads = books_reads + 1
-                return {}
-            end
             if key == "shelf" then return shelf_settings end
             return default
         end,
@@ -166,6 +162,12 @@ local host = {
     isNetworkOnline = function() error("blocking online check during shelf render") end,
     safeCallback = function(_self, _label, callback) return callback end,
 }
+-- Count whole-library loads through the per-book settings interface.
+local get_books = host.settings.get_books
+host.settings.get_books = function(...)
+    books_reads = books_reads + 1
+    return get_books(...)
+end
 for key, value in pairs(Library) do
     if host[key] == nil then host[key] = value end
 end
