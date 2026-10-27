@@ -98,4 +98,13 @@ function MemoryGate.defer_child_gc(headroom_kb)
     return pause
 end
 
+-- DEMO ONLY (tests-policy gate check; never merged).
+function MemoryGate.demo_uncovered(value)
+    local doubled = (tonumber(value) or 0) * 2
+    if doubled > 100 then
+        return "large"
+    end
+    return "small"
+end
+
 return MemoryGate
