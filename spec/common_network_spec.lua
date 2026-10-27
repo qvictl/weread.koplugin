@@ -21,9 +21,15 @@ package.preload["ui/uimanager"] = function()
         scheduleIn = function(_self, _delay, callback) callback() end,
     }
 end
+local dns_lookups = 0
+local link_up = false
 package.preload["ui/network/manager"] = function()
     return {
-        isOnline = function() return false end,
+        isOnline = function()
+            dns_lookups = dns_lookups + 1
+            return false
+        end,
+        isConnected = function() return link_up end,
     }
 end
 package.preload["weread.lib.logger"] = function()
@@ -55,5 +61,19 @@ eq(offline_notices, 0, "silent offline task does not show a notice")
 eq(host:runOnlineTask("manual", function() end), false,
     "regular offline task does not start")
 eq(offline_notices, 1, "regular offline task still shows a notice")
+
+dns_lookups = 0
+local ran = false
+link_up = true
+eq(host:runOnlineTask("lifecycle", function() ran = true end, nil, {
+    silent_offline = true, link_only = true,
+}), true, "link-only task starts when the link is up")
+eq(ran, true, "link-only task runs")
+eq(dns_lookups, 0, "link-only task never resolves DNS")
+link_up = false
+eq(host:runOnlineTask("lifecycle", function() end, nil, {
+    silent_offline = true, link_only = true,
+}), false, "link-only task skips quietly when the link is down")
+eq(dns_lookups, 0, "still no DNS lookup")
 
 print(string.format("common_network_spec: %d checks", checks))

@@ -10,10 +10,11 @@ local RESUME_RECHECK_SECONDS = 5 * 60
 local PULL_RETRY_DELAY_SECONDS = 15
 local PULL_MAX_RETRIES = 3
 local BUSY_RETRY_SECONDS = 2
--- Uploads deferred from suspend wait this long after resume, so Wi-Fi has a
--- chance to come back first, and retry a few times while it is still down.
-local RESUME_UPLOAD_DELAY_SECONDS = 5
-local RESUME_UPLOAD_MAX_ATTEMPTS = 6
+-- Network work after resume or open (deferred uploads, the resume recheck)
+-- waits for these delays in turn while the link is still down, then gives
+-- up quietly until the next resume/open: the Amazon framework brings Wi-Fi
+-- back a few seconds after resume.
+local NETWORK_WORK_DELAYS = { 5, 10, 20 }
 local BUSY_RETRY_LIMIT = 10
 -- Background upload jobs are polled this often, up to this many times
 -- (the job itself is killed after 45 s).
@@ -41,6 +42,31 @@ end
 
 local function is_mp_book(book_id)
     return tostring(book_id or ""):sub(1, 7) == "MP_WXS_"
+end
+
+-- Per-book settings API (upstream #207) with a legacy "books" fallback.
+local function stored_book(settings, book_id)
+    if type(settings.get_book) == "function" then
+        return settings:get_book(book_id)
+    end
+    local books = settings:get("books", {})
+    return type(books) == "table" and (books[book_id] or books[tonumber(book_id)]) or nil
+end
+
+local function store_book(settings, book_id, book)
+    if type(settings.put_book) == "function" then
+        return settings:put_book(book_id, book)
+    end
+    local books = settings:get("books", {}) or {}
+    books[book_id] = book
+    settings:set("books", books)
+end
+
+local function all_books(settings)
+    if type(settings.get_books) == "function" then
+        return settings:get_books() or {}
+    end
+    return settings:get("books", {}) or {}
 end
 
 local function document_path(document)
@@ -101,8 +127,7 @@ end
 function ProgressSync:_persist(book_id, patch)
     book_id = tostring(book_id or "")
     if book_id == "" or type(patch) ~= "table" then return false end
-    local books = self.settings:get("books", {})
-    local book = books[book_id] or { book_id = book_id }
+    local book = stored_book(self.settings, book_id) or { book_id = book_id }
     for key, value in pairs(patch) do
         if value == false then
             book[key] = nil
@@ -110,10 +135,43 @@ function ProgressSync:_persist(book_id, patch)
             book[key] = copy(value)
         end
     end
-    books[book_id] = book
-    self.settings:set("books", books)
+    store_book(self.settings, book_id, book)
     self.settings:flush()
     return true
+end
+
+-- All timers go through here so teardown() can cancel them.
+function ProgressSync:_schedule(delay, callback)
+    self.timers = self.timers or {}
+    local timer
+    timer = function()
+        self.timers[timer] = nil
+        if self.torn_down then return end
+        callback()
+    end
+    self.timers[timer] = true
+    self.scheduler:scheduleIn(delay, timer)
+    return timer
+end
+
+-- Cancels every timer, poll chain and open dialog of this object, for the
+-- host's onCloseWidget. Unsent positions stay persisted in the book records
+-- and are uploaded by the next instance.
+function ProgressSync:teardown(reason)
+    self:_close_choice(reason or "teardown")
+    self:_persist_unsaved_uploads()
+    self.torn_down = true
+    self.generation = self.generation + 1
+    self.pull_retry_token = self.pull_retry_token + 1
+    self.upload_token = (self.upload_token or 0) + 1
+    self.net_token = (self.net_token or 0) + 1
+    self.uploading = nil
+    if type(self.scheduler.unschedule) == "function" then
+        for timer in pairs(self.timers or {}) do
+            self.scheduler:unschedule(timer)
+        end
+    end
+    self.timers = {}
 end
 
 function ProgressSync:_local_fraction()
@@ -343,7 +401,7 @@ function ProgressSync:_apply_remote(remote, context, options)
     if options.manual then
         self.notify("remote_applied", { position = remote })
     end
-    self.scheduler:scheduleIn(0.15, function()
+    self:_schedule(0.15, function()
         local position = self:capture_local()
         if position then
             self.local_position = position
@@ -356,88 +414,279 @@ function ProgressSync:_apply_remote(remote, context, options)
     return true
 end
 
-function ProgressSync:_upload_snapshot(position, reason, show_result)
-    if type(position) ~= "table" then return false end
+-- Uploads (F3, F10). A snapshot is queued per book, newest wins, so a
+-- newer position captured while an older upload is in flight is never
+-- dropped: it is sent after the current one finishes. Uploads run as
+-- background jobs (ReadReport:upload_position is submit-or-poll), so this
+-- never blocks the UI loop. Lifecycle handlers only queue (suspend) or
+-- persist (close); the network happens after resume/open, once the link is
+-- up. Automatic uploads carry guard data so the child never moves the
+-- cloud back past newer reading done elsewhere (see ReadReport).
+function ProgressSync:_enqueue_upload(position, reason, options)
+    options = options or {}
+    if type(position) ~= "table" then return nil end
     local book_id = tostring(position.book_id or self.current_book_id or "")
-    if book_id == "" or self.uploading then return false end
-    self:_persist(book_id, {
-        pending_upload_position = position,
-        pending_upload_reason = reason or "unspecified",
+    if book_id == "" then return nil end
+    local entry = {
+        book_id = book_id,
+        position = copy(position),
+        reason = reason or "unspecified",
+        show_result = options.show_result == true,
+        explicit = options.explicit == true,
+        baselines = copy(options.baselines)
+            or self:_known_cloud_positions(book_id),
+    }
+    entry.position.guard = nil
+    self.upload_queue = self.upload_queue or {}
+    self.upload_queue[book_id] = entry
+    if options.persist ~= false then
+        self:_persist_upload(entry)
+    end
+    return entry
+end
+
+function ProgressSync:_persist_upload(entry)
+    self:_persist(entry.book_id, {
+        pending_upload_position = entry.position,
+        pending_upload_reason = entry.reason,
+        pending_upload_baselines = entry.baselines or false,
     })
+    entry.persisted = true
+end
+
+-- Queued positions that so far only live in memory (suspend) must survive
+-- this instance (document close, teardown).
+function ProgressSync:_persist_unsaved_uploads()
+    local entries = {}
+    for _book_id, entry in pairs(self.upload_queue or {}) do
+        entries[#entries + 1] = entry
+    end
+    if self.uploading then entries[#entries + 1] = self.uploading end
+    for _i, entry in ipairs(entries) do
+        if not entry.persisted then
+            local ok, err = pcall(self._persist_upload, self, entry)
+            if not ok then log("warn", "persist pending upload failed:", tostring(err)) end
+        end
+    end
+end
+
+-- Positions persisted by earlier instances (closed documents, failed
+-- uploads). Without book_id: every book; with it: that book only.
+function ProgressSync:_load_persisted_uploads(book_id)
+    if self:_config().upload_on_close ~= true then return end
+    self.upload_queue = self.upload_queue or {}
+    local books
+    if book_id then
+        books = { [book_id] = stored_book(self.settings, book_id) }
+    else
+        local ok, result = pcall(all_books, self.settings)
+        if not ok then
+            log("warn", "loading pending uploads failed:", tostring(result))
+            return
+        end
+        books = result
+    end
+    for id, book in pairs(books) do
+        id = tostring(id)
+        if type(book) == "table" and type(book.pending_upload_position) == "table"
+            and not self.upload_queue[id]
+            and not (self.uploading and self.uploading.book_id == id) then
+            local position = copy(book.pending_upload_position)
+            position.book_id = position.book_id or id
+            self.upload_queue[id] = {
+                book_id = id,
+                position = position,
+                reason = book.pending_upload_reason or "deferred",
+                baselines = type(book.pending_upload_baselines) == "table"
+                    and copy(book.pending_upload_baselines) or {},
+                persisted = true,
+            }
+        end
+    end
+end
+
+-- Starts the next queued upload unless one is running, the device sleeps,
+-- or the link is down (the queue then waits for the next resume/open).
+function ProgressSync:_pump_uploads()
+    if self.uploading or self.suspended or self.torn_down then return false end
+    local queue = self.upload_queue or {}
+    local entry
+    for book_id, candidate in pairs(queue) do
+        -- The open book's pending position is decided by a running pull
+        -- or an open choice dialog, not uploaded behind it.
+        local held = book_id == self.current_book_id
+            and (self.pulling or self.choice ~= nil)
+        if not held and (not entry or book_id == self.current_book_id) then
+            entry = candidate
+        end
+    end
+    if not entry then return false end
     if not self.is_online() then
-        self.state = "offline"
-        if show_result then self.notify("offline", {}) end
+        if entry.book_id == self.current_book_id then self.state = "offline" end
+        if entry.show_result then
+            entry.show_result = false
+            self.notify("offline", {})
+        end
         return false
     end
-    self.uploading = true
-    self.state = "uploading"
+    queue[entry.book_id] = nil
+    self:_start_upload(entry)
+    return true
+end
+
+function ProgressSync:_start_upload(entry)
+    self.uploading = entry
+    self.upload_token = (self.upload_token or 0) + 1
+    local token = self.upload_token
+    if entry.book_id == self.current_book_id then
+        self.state = "uploading"
+    end
+    local payload = copy(entry.position)
+    if not entry.explicit then
+        payload.guard = { strict = true, baselines = copy(entry.baselines) }
+    end
+    -- Only the first attempt of an explicit choice goes unguarded.
+    entry.explicit = false
     local attempts = 0
     local polls = 0
     local attempt
     attempt = function()
+        if token ~= self.upload_token then return end
         attempts = attempts + 1
         local ok, accepted, outcome = pcall(
             self.upload_position,
-            book_id,
-            copy(position),
+            entry.book_id,
+            copy(payload),
             0
         )
+        if token ~= self.upload_token then return end
         -- The upload runs in a background job; poll for its result.
         if ok and not accepted and type(outcome) == "table"
             and outcome.error_kind == "pending"
             and polls < UPLOAD_POLL_LIMIT then
             polls = polls + 1
             attempts = attempts - 1
-            self.scheduler:scheduleIn(UPLOAD_POLL_SECONDS, attempt)
+            self:_schedule(UPLOAD_POLL_SECONDS, attempt)
             return
         end
         if ok and not accepted and type(outcome) == "table"
             and outcome.error_kind == "busy"
             and attempts < BUSY_RETRY_LIMIT then
-            self.scheduler:scheduleIn(BUSY_RETRY_SECONDS, attempt)
+            self:_schedule(BUSY_RETRY_SECONDS, attempt)
             return
         end
-        self.uploading = false
-        if ok and accepted then
+        self.uploading = nil
+        self:_finish_upload(entry, ok, accepted, outcome)
+        self:_pump_uploads()
+    end
+    attempt()
+end
+
+function ProgressSync:_finish_upload(entry, ok, accepted, outcome)
+    local book_id = entry.book_id
+    local position = entry.position
+    local is_current = book_id == self.current_book_id
+    local newer = self.upload_queue and self.upload_queue[book_id]
+    local clear_pending = not newer and {
+        pending_upload_position = false,
+        pending_upload_reason = false,
+        pending_upload_baselines = false,
+    } or {}
+    if ok and accepted then
+        self.last_uploaded_position = copy(position)
+        if is_current then
             self.state = "verified"
-            self.dirty = false
-            self.last_uploaded_position = copy(position)
-            self:_persist(book_id, {
-                last_local_position = position,
-                last_uploaded_position = position,
-                last_upload_at = self.now(),
-                pending_upload_position = false,
-                pending_upload_reason = false,
-                last_sync_error = false,
-            })
-            log("info", "upload accepted:",
-                "book=", book_id,
-                "percent=", tostring(position.percent),
-                "reason=", tostring(reason))
-            if show_result then
-                self.notify("upload_success", { position = position })
+            if not newer and (not self.local_position
+                or PositionMapper.same_position(self.local_position, position)) then
+                self.dirty = false
             end
+        end
+        clear_pending.last_uploaded_position = position
+        clear_pending.last_upload_at = self.now()
+        clear_pending.last_sync_error = false
+        if is_current then clear_pending.last_local_position = position end
+        self:_persist(book_id, clear_pending)
+        log("info", "upload accepted:",
+            "book=", book_id,
+            "percent=", tostring(position.percent),
+            "reason=", tostring(entry.reason))
+        if entry.show_result then
+            self.notify("upload_success", { position = position })
+        end
+        return
+    end
+    if ok and type(outcome) == "table" and outcome.error_kind == "remote_ahead" then
+        -- Someone read further elsewhere: this older snapshot must not
+        -- replace it. Drop it; the open book keeps the cloud as a floor.
+        clear_pending.last_sync_error = false
+        if type(outcome.remote) == "table" then
+            clear_pending.last_remote_position = outcome.remote
+        end
+        self:_persist(book_id, clear_pending)
+        log("info", "upload skipped, cloud progress is ahead:",
+            "book=", book_id,
+            "percent=", tostring(position.percent),
+            "reason=", tostring(entry.reason))
+        if is_current and type(outcome.remote) == "table" then
+            self.remote_floor = copy(outcome.remote)
+            if self.verified and self:_config().pull_on_open == true then
+                self:_clear_verified("cloud_moved")
+                self:_pull({ manual = false })
+            end
+        end
+        return
+    end
+    local error_message = ok and type(outcome) == "table"
+        and outcome.error or outcome
+    if is_current then self.state = "error" end
+    -- Keep it pending for the next resume/open.
+    if not entry.persisted and not newer then
+        self:_persist_upload(entry)
+    end
+    self:_persist(book_id, {
+        last_sync_error = tostring(error_message or "upload_failed"),
+    })
+    log("warn", "upload failed:", tostring(error_message))
+    if entry.show_result then
+        self.notify("upload_failed", {
+            error = tostring(error_message or "upload_failed"),
+        })
+    end
+end
+
+function ProgressSync:_upload_snapshot(position, reason, show_result, options)
+    options = options or {}
+    local entry = self:_enqueue_upload(position, reason, {
+        show_result = show_result,
+        explicit = options.explicit,
+        baselines = options.baselines,
+    })
+    if not entry then return false end
+    return self:_pump_uploads()
+end
+
+-- Network work after resume/open: wait for the link, then run `work`.
+-- Skipped quietly when the link stays down (see NETWORK_WORK_DELAYS).
+function ProgressSync:_schedule_network_work(reason, work)
+    self.net_token = (self.net_token or 0) + 1
+    local token = self.net_token
+    local step = 1
+    local try
+    try = function()
+        if token ~= self.net_token or self.suspended then return end
+        if not self.is_online() then
+            step = step + 1
+            if not NETWORK_WORK_DELAYS[step] then
+                log("info", "network still down, deferred sync skipped:",
+                    "reason=", tostring(reason))
+                return
+            end
+            self:_schedule(NETWORK_WORK_DELAYS[step], try)
             return
         end
-        local error_message = ok and type(outcome) == "table"
-            and outcome.error or outcome
-        self.state = "error"
-        self:_persist(book_id, {
-            last_sync_error = tostring(error_message or "upload_failed"),
-        })
-        log("warn", "upload failed:", tostring(error_message))
-        if show_result then
-            self.notify("upload_failed", {
-                error = tostring(error_message or "upload_failed"),
-            })
-        end
+        work()
     end
-    local started = self.run_online("progress_upload", attempt)
-    if not started then
-        self.uploading = false
-        self.state = "offline"
-    end
-    return started == true
+    self:_schedule(NETWORK_WORK_DELAYS[1], try)
 end
 
 function ProgressSync:_keep_local(local_position, remote, options)
@@ -450,7 +699,14 @@ function ProgressSync:_keep_local(local_position, remote, options)
         remote
     )
     if options.upload_now then
-        self:_upload_snapshot(local_position, options.reason, not options.silent)
+        -- An explicit choice is sent as is once; should it fail, the
+        -- persisted retry is guarded by the cloud position the reader chose
+        -- to replace.
+        self:_upload_snapshot(local_position, options.reason, not options.silent, {
+            explicit = options.reason == "explicit_local_choice",
+            baselines = options.reason == "explicit_local_choice"
+                and { copy(remote) } or nil,
+        })
     elseif options.manual then
         self.notify("local_kept", { position = local_position })
     end
@@ -476,6 +732,24 @@ end
 --    a nearby chapter back.
 function ProgressSync:_resolve(local_position, remote, context, options)
     options = options or {}
+    -- A position queued for this book (suspend/close) is decided here: it is
+    -- uploaded only on the "keep local" paths below.
+    local queued = self.upload_queue and self.upload_queue[context.book_id]
+    if queued then
+        self.upload_queue[context.book_id] = nil
+        options.upload_pending = true
+        options.baselines = options.baselines or {}
+        for _i, baseline in ipairs(queued.baselines or {}) do
+            options.baselines[#options.baselines + 1] = baseline
+        end
+        if queued.persisted then
+            self:_persist(context.book_id, {
+                pending_upload_position = false,
+                pending_upload_reason = false,
+                pending_upload_baselines = false,
+            })
+        end
+    end
     self.local_position = copy(local_position)
     self.remote_position = copy(remote)
     self.remote_floor = nil
@@ -719,7 +993,7 @@ function ProgressSync:_schedule_pull_retry(options, retry_token)
         return false
     end
     local generation = self.generation
-    self.scheduler:scheduleIn(PULL_RETRY_DELAY_SECONDS, function()
+    self:_schedule(PULL_RETRY_DELAY_SECONDS, function()
         if generation ~= self.generation then return end
         if retry_token ~= self.pull_retry_token then return end
         if self.verified or self.pulling then return end
@@ -728,7 +1002,6 @@ function ProgressSync:_schedule_pull_retry(options, retry_token)
             manual = false,
             retry = attempt,
             retry_token = retry_token,
-            resume_pending = options.resume_pending,
         })
     end)
     log("info", "pull retry scheduled:",
@@ -829,10 +1102,7 @@ function ProgressSync:_pull(options)
         end
         -- Collect what this device knew about the cloud before the pull
         -- result overwrites it (see _resolve rule 3).
-        local extra = options.resume_pending and options.resume_pending.baseline
-            and { options.resume_pending.baseline } or nil
-        options.baselines = self:_known_cloud_positions(context.book_id, extra)
-        if options.resume_pending then options.upload_pending = true end
+        options.baselines = self:_known_cloud_positions(context.book_id)
         self:_persist(context.book_id, {
             last_remote_position = remote,
             last_local_position = local_position,
@@ -840,6 +1110,7 @@ function ProgressSync:_pull(options)
             last_sync_error = false,
         })
         self:_resolve(local_position, remote, context, options)
+        self:_pump_uploads()
     end
     local started = self.run_online("progress_pull", function()
         -- Anything in pull_task may throw (catalog refresh, capture, remote
@@ -852,7 +1123,12 @@ function ProgressSync:_pull(options)
             self.state = "error"
             error(err, 0)
         end
-    end, { silent_offline = true })
+    end, {
+        silent_offline = true,
+        -- Automatic pulls run right after open/resume: check the link state
+        -- only, never a blocking DNS lookup on the UI loop (F4).
+        link_only = options.manual ~= true,
+    })
     if not started then
         self.pulling = false
         self.state = "offline"
@@ -893,7 +1169,7 @@ function ProgressSync:_apply_pending_jump(book_id)
     if pending.notify then
         self.notify("remote_applied", { position = pending.remote })
     end
-    self.scheduler:scheduleIn(0.15, function()
+    self:_schedule(0.15, function()
         local position = self:capture_local()
         if position then
             self.local_position = position
@@ -917,8 +1193,18 @@ function ProgressSync:on_reader_ready()
     self.generation = self.generation + 1
     local generation = self.generation
     -- A request of the previous document may still be marked in flight.
+    -- Its upload stays queued (and persisted) for the pump below.
     self.pulling = false
-    self.uploading = false
+    if self.uploading then
+        local entry = self.uploading
+        self.uploading = nil
+        self.upload_token = (self.upload_token or 0) + 1
+        self.upload_queue = self.upload_queue or {}
+        if not self.upload_queue[entry.book_id] then
+            self.upload_queue[entry.book_id] = entry
+        end
+    end
+    self.suspended = false
     self.current_book_id = nil
     self.local_position = nil
     self.remote_position = nil
@@ -929,7 +1215,7 @@ function ProgressSync:on_reader_ready()
     self.dirty = false
     self.state = "waiting"
 
-    self.scheduler:scheduleIn(OPEN_DELAY_SECONDS, function()
+    self:_schedule(OPEN_DELAY_SECONDS, function()
         if generation ~= self.generation then return end
         local book_id = self.detect_book()
         if not book_id or is_mp_book(book_id) then
@@ -948,11 +1234,16 @@ function ProgressSync:on_reader_ready()
         end
         self.local_position = local_position
         self:_persist(book_id, { last_local_position = local_position })
-        if self:_config().pull_on_open ~= true then
+        -- This book's position left pending by an earlier session is decided
+        -- by the pull below when there is one, uploaded (guarded) otherwise.
+        -- Other books' pending positions are sent after the next resume.
+        self:_load_persisted_uploads(book_id)
+        if self:_config().pull_on_open == true then
+            self:_pull({ manual = false })
+        else
             self.state = "unverified"
-            return
+            self:_pump_uploads()
         end
-        self:_pull({ manual = false })
     end)
 end
 
@@ -967,6 +1258,8 @@ function ProgressSync:on_page_update()
     self.local_position = position
 end
 
+-- Must not touch the network (F3): the final position is persisted as a
+-- pending upload and sent by a later instance after open/resume.
 function ProgressSync:on_close_document()
     -- A choice left on screen would float over the next document.
     self:_close_choice("document_closed")
@@ -979,9 +1272,15 @@ function ProgressSync:on_close_document()
             self.dirty = true
         end
         if self.dirty then
-            self:_upload_snapshot(position, "document_close", false)
+            self:_enqueue_upload(position, "document_close")
         end
     end
+    self:_persist_unsaved_uploads()
+    -- Results of an upload still in flight are ignored from here on; its
+    -- position stays persisted until a later upload succeeds.
+    self.upload_token = (self.upload_token or 0) + 1
+    self.uploading = nil
+    self.net_token = (self.net_token or 0) + 1
     self.generation = self.generation + 1
     self.current_book_id = nil
     self.verified = false
@@ -992,7 +1291,10 @@ function ProgressSync:on_close_document()
     self.document_context = nil
 end
 
+-- O(1) and network-free (F3, F16): the device and its Wi-Fi are going to
+-- sleep. Remember what to upload (in memory) and stop every chain.
 function ProgressSync:on_suspend()
+    self.suspended = true
     self.suspended_at = self.now()
     -- Positions in an unanswered dialog may be stale after sleeping; ask
     -- again with fresh data after resume instead.
@@ -1004,59 +1306,53 @@ function ProgressSync:on_suspend()
         and not PositionMapper.same_position(position, self.local_position) then
         self.dirty = true
     end
-    -- Never touch the disk or the network here: the device is going to sleep
-    -- (and Wi-Fi with it), so a blocking request or settings rewrite can hang
-    -- the suspend. Remember what to upload, and do it after resume.
+    self.upload_queue = self.upload_queue or {}
+    -- The in-flight upload's job is killed with ReadReport's; queue it again
+    -- unless a newer position replaces it below.
+    if self.uploading then
+        local entry = self.uploading
+        self.uploading = nil
+        if not self.upload_queue[entry.book_id] then
+            self.upload_queue[entry.book_id] = entry
+        end
+    end
     if position and self.verified and self.dirty
         and self:_config().upload_on_close == true
         and not self:_below_floor(position) then
-        self.pending_resume_upload = {
-            position = copy(position),
-            baseline = copy(self.remote_position),
-            generation = self.generation,
-        }
+        self:_enqueue_upload(position, "suspend", { persist = false })
     end
+    self.upload_token = (self.upload_token or 0) + 1
+    self.net_token = (self.net_token or 0) + 1
+    self.pull_retry_token = self.pull_retry_token + 1
 end
 
-function ProgressSync:_flush_resume_upload(pending, attempt)
-    if pending.generation ~= self.generation or not self.verified then return end
-    if tostring(self.detect_book() or "") ~= tostring(pending.position.book_id) then return end
-    if self.uploading then return end
-    if not self.is_online() then
-        if attempt < RESUME_UPLOAD_MAX_ATTEMPTS then
-            self.scheduler:scheduleIn(RESUME_UPLOAD_DELAY_SECONDS, function()
-                self:_flush_resume_upload(pending, attempt + 1)
-            end)
-        else
-            log("warn", "suspend upload dropped while offline:",
-                "book=", tostring(pending.position.book_id))
-        end
-        return
-    end
-    self:_upload_snapshot(pending.position, "suspend", false)
-end
-
+-- Nothing network-bound runs here (F4): the recheck pull and queued
+-- uploads wait a few seconds for Wi-Fi and are skipped quietly when it
+-- stays down.
 function ProgressSync:on_resume()
     local slept = self.suspended_at and self.now() - self.suspended_at or 0
     self.suspended_at = nil
-    local pending = self.pending_resume_upload
-    self.pending_resume_upload = nil
+    self.suspended = false
     local reask = self.reask_after_resume == true
     self.reask_after_resume = nil
-    if (slept >= RESUME_RECHECK_SECONDS or reask)
-        and self:_config().pull_on_open == true then
-        -- Someone may have read elsewhere while we slept: the pending upload
-        -- goes through the pull, which keeps it only if the cloud position
-        -- did not move.
-        self:_clear_verified("resume_recheck")
-        self:_pull({ manual = false, resume_pending = pending })
-        return
-    end
-    if pending then
-        self.scheduler:scheduleIn(RESUME_UPLOAD_DELAY_SECONDS, function()
-            self:_flush_resume_upload(pending, 1)
-        end)
-    end
+    local book_id = self.current_book_id
+    local recheck = book_id ~= nil
+        and self:_config().pull_on_open == true
+        and (slept >= RESUME_RECHECK_SECONDS or reask
+            or (not self.verified and not self.report_fallback
+                and self.state ~= "switching_chapter"))
+    local generation = self.generation
+    self:_schedule_network_work("resume", function()
+        if generation ~= self.generation then return end
+        if recheck and not self.choice and not self.pulling then
+            -- Someone may have read elsewhere while we slept. A position
+            -- queued at suspend goes through this pull (see _resolve).
+            self:_clear_verified("resume_recheck")
+            self:_pull({ manual = false })
+        end
+        self:_load_persisted_uploads()
+        self:_pump_uploads()
+    end)
 end
 
 function ProgressSync:sync_now()
@@ -1117,7 +1413,7 @@ function ProgressSync:status()
         verified = self.verified,
         dirty = self.dirty,
         pulling = self.pulling == true,
-        uploading = self.uploading == true,
+        uploading = self.uploading ~= nil and self.uploading ~= false,
         local_position = copy(self.local_position),
         remote_position = copy(self.remote_position),
     }
