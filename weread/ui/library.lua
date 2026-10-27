@@ -82,6 +82,17 @@ local function same_value(left, right, depth)
     return true
 end
 
+-- Catalog tables known to match the library database, keyed weakly by the
+-- table itself. Re-opening a chapter list used to rewrite the whole catalog
+-- (DELETE plus one INSERT and JSON encode per chapter) every time.
+local persisted_catalogs = setmetatable({}, { __mode = "k" })
+
+local function mark_catalog_persisted(chapters, book_id)
+    if type(chapters) == "table" and book_id ~= nil then
+        persisted_catalogs[chapters] = tostring(book_id)
+    end
+end
+
 local function list_items_per_page()
     local perpage = 14
     if G_reader_settings and G_reader_settings.readSetting then
@@ -718,7 +729,13 @@ function M:showBookRecord(book)
     end
     local cached = self.library_db and self.library_db:getBook(book_id) or nil
     for key, value in pairs(cached or {}) do
-        if saved[key] == nil then assign(key, value) end
+        -- The chapters table owns the catalog; an old detail payload may
+        -- still embed a stale copy. Rewrite such a payload once, lean.
+        if key == "chapters" then
+            changed = true
+        elseif saved[key] == nil then
+            assign(key, value)
+        end
     end
     for key, value in pairs(book) do
         if value ~= nil and key ~= "_cached" then assign(key, value) end
@@ -730,9 +747,6 @@ function M:showBookRecord(book)
         BookRecords.put(self.settings, book_id, saved)
         self.settings:flush()
         if self.library_db then self.library_db:putBook(saved) end
-    end
-    if type(saved.chapters) ~= "table" and self.library_db then
-        saved.chapters = self.library_db:getChapters(book_id)
     end
     if not has_book_details(cached) then
         self:refreshBookRecord(saved, nil, { automatic = true })
@@ -799,12 +813,20 @@ end
 function M:showBookMenu(book)
     local BookDetailView = require("weread.ui.book_detail_view")
     local book_id = book.book_id or book.bookId
-    if type(book.chapters) ~= "table" then
-        book.chapters = self.library_db and self.library_db:getChapters(book_id) or nil
-        if type(book.chapters) ~= "table" then
-            local legacy_catalog = Content.load_catalog_cache(self.client, self.settings, book)
-            if legacy_catalog and self.library_db then
-                self.library_db:putChapters(book_id, legacy_catalog)
+    -- The page only shows the chapter count: count rows instead of decoding
+    -- the whole catalog. The chapter list loads it when opened.
+    local total_chapters = type(book.chapters) == "table" and #book.chapters or nil
+    if not total_chapters and self.library_db and self.library_db.countChapters then
+        total_chapters = self.library_db:countChapters(book_id)
+        if total_chapters == 0 then total_chapters = nil end
+    end
+    if not total_chapters then
+        local legacy_catalog = Content.load_catalog_cache(self.client, self.settings, book)
+        if type(legacy_catalog) == "table" and #legacy_catalog > 0 then
+            book.chapters = legacy_catalog
+            total_chapters = #legacy_catalog
+            if self.library_db and self.library_db:putChapters(book_id, legacy_catalog) then
+                mark_catalog_persisted(legacy_catalog, book_id)
             end
         end
     end
@@ -817,7 +839,6 @@ function M:showBookMenu(book)
     for _uid, path in pairs(book.cached_chapters or {}) do
         if file_exists(path) then cached_chapter_count = cached_chapter_count + 1 end
     end
-    local total_chapters = type(book.chapters) == "table" and #book.chapters or nil
     if is_full_cached and cached_chapter_count == 0 and total_chapters then
         cached_chapter_count = total_chapters
     end
@@ -1249,8 +1270,10 @@ function M:loadChapters(book, callback, force_refresh)
     if not force_refresh then
         if book.chapters and #book.chapters > 0 then
             local book_id = book.book_id or book.bookId
-            if self.library_db and book_id then
-                self.library_db:putChapters(book_id, book.chapters)
+            if self.library_db and book_id
+                and persisted_catalogs[book.chapters] ~= tostring(book_id)
+                and self.library_db:putChapters(book_id, book.chapters) then
+                mark_catalog_persisted(book.chapters, book_id)
             end
             local catalog_path = Content.catalog_cache_path(
                 self.settings, book)
@@ -1269,6 +1292,7 @@ function M:loadChapters(book, callback, force_refresh)
         local cached = self.library_db and self.library_db:getChapters(book_id) or nil
         if type(cached) == "table" and #cached > 0 then
             book.chapters = cached
+            mark_catalog_persisted(cached, book_id)
             local catalog_path = Content.catalog_cache_path(
                 self.settings, book)
             if catalog_path and not file_exists(catalog_path) then
@@ -1281,8 +1305,9 @@ function M:loadChapters(book, callback, force_refresh)
             end
         else
             cached = Content.load_catalog_cache(self.client, self.settings, book)
-            if type(cached) == "table" and #cached > 0 and self.library_db then
-                self.library_db:putChapters(book_id, cached)
+            if type(cached) == "table" and #cached > 0 and self.library_db
+                and self.library_db:putChapters(book_id, cached) then
+                mark_catalog_persisted(cached, book_id)
             end
         end
         if type(cached) == "table" and #cached > 0 then
@@ -1313,7 +1338,9 @@ function M:loadChapters(book, callback, force_refresh)
         local book_id = book.book_id or book.bookId
         if book_id then
             if self.library_db then
-                self.library_db:putChapters(book_id, chapters_or_err)
+                if self.library_db:putChapters(book_id, chapters_or_err) then
+                    mark_catalog_persisted(chapters_or_err, book_id)
+                end
                 self.library_db:putBook(book)
             end
             BookRecords.put(self.settings, book_id, book)
@@ -1333,7 +1360,33 @@ function M:showChapterList(book, on_close)
         for field in pairs(local_cache_fields) do
             if latest[field] ~= nil then book[field] = latest[field] end
         end
-        if self.library_db then self.library_db:putBook(latest) end
+    end
+    -- Cache state is checked lazily, for the rows of the visible page only:
+    -- one file_exists() per cached chapter on every rebuild added up.
+    local function chapter_status(chapter)
+        local key = tostring(chapter.chapterUid or chapter.chapterId)
+        local cached = book.cached_chapters and book.cached_chapters[key]
+        if cached and not file_exists(cached) then
+            book.cached_chapters[key] = nil
+            cached = nil
+        end
+        return cached and _("Cached")
+            or T(_("%1 words"), tostring(chapter.wordCount or 0))
+    end
+    local row_meta = {
+        __index = function(row, key)
+            if key ~= "status" then return nil end
+            local status = chapter_status(row.source)
+            rawset(row, "status", status)
+            return status
+        end,
+    }
+    local function reading_index(chapters)
+        local uid = book.chapter_uid ~= nil and tostring(book.chapter_uid) or nil
+        if not uid then return nil end
+        for index, chapter in ipairs(chapters) do
+            if tostring(chapter.chapterUid or chapter.chapterId) == uid then return index end
+        end
     end
     local showCatalog
     showCatalog = function(chapters, old_view)
@@ -1343,20 +1396,13 @@ function M:showChapterList(book, on_close)
         reloadBookCache()
         local rows = {}
         for _i, chapter in ipairs(chapters) do
-            local chapter_uid = chapter.chapterUid or chapter.chapterId
-            local cached = book.cached_chapters
-                and book.cached_chapters[tostring(chapter_uid)]
-            if cached and not file_exists(cached) then
-                book.cached_chapters[tostring(chapter_uid)] = nil
-                cached = nil
-            end
-            rows[#rows + 1] = {
-                title = chapter.title or T(_("Chapter %1"), tostring(chapter_uid)),
-                status = cached and _("Cached")
-                    or T(_("%1 words"), tostring(chapter.wordCount or 0)),
+            rows[#rows + 1] = setmetatable({
+                title = chapter.title
+                    or T(_("Chapter %1"), tostring(chapter.chapterUid or chapter.chapterId)),
                 source = chapter,
-            }
+            }, row_meta)
         end
+        local page = old_view and old_view.page or nil
         if old_view then
             UIManager:close(old_view)
             if self._chapter_list_view == old_view then
@@ -1367,6 +1413,8 @@ function M:showChapterList(book, on_close)
         view = ChapterListView.show({
             title = book.title or _("Chapter list"),
             chapters = rows,
+            page = page,
+            focus_index = not page and reading_index(chapters) or nil,
         }, {
             on_refresh = self:safeCallback(_("Refresh chapter list"), function()
                 self:loadChapters(book, function(refreshed_chapters)
@@ -1515,7 +1563,10 @@ function M:openBookForReading(book)
     local chapters = book.chapters
     if type(chapters) ~= "table" and self.library_db then
         chapters = self.library_db:getChapters(book_id)
-        if chapters then book.chapters = chapters end
+        if chapters then
+            book.chapters = chapters
+            mark_catalog_persisted(chapters, book_id)
+        end
     end
     if type(chapters) ~= "table" then
         chapters = Content.load_catalog_cache(self.client, self.settings, book)

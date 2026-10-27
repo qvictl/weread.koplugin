@@ -11,7 +11,7 @@ local function expect(condition, message)
     if not condition then error(message or ("check " .. checks .. " failed"), 2) end
 end
 
-local opened, closed, execs, prepared = {}, {}, {}, {}
+local opened, closed, execs, prepared, encoded = {}, {}, {}, {}, {}
 local rows_by_sql = {}
 local step_error
 
@@ -26,10 +26,12 @@ local function fake_statement(db, sql)
             error("disk I/O error")
         end
         self.index = self.index + 1
-        for pattern, rows in pairs(rows_by_sql) do
-            if sql:find(pattern, 1, true) then return rows[self.index] end
+        -- The most specific (longest) matching fixture wins.
+        local best
+        for pattern in pairs(rows_by_sql) do
+            if sql:find(pattern, 1, true) and (not best or #pattern > #best) then best = pattern end
         end
-        return nil
+        return best and rows_by_sql[best][self.index] or nil
     end
     function stmt:close() self.closed = true end
     return stmt
@@ -59,7 +61,7 @@ end
 -- Minimal JSON double: payloads in this spec are flat {"key":value} objects.
 package.preload["json"] = function()
     return {
-        encode = function() return "{}" end,
+        encode = function(value) encoded[#encoded + 1] = value return "{}" end,
         decode = function(text)
             local result = {}
             for key, value in text:gmatch('"([^"]+)":"?([^",}]+)"?') do result[key] = value end
@@ -110,6 +112,16 @@ expect(count(execs, "journal_mode") == 1 and count(execs, "CREATE TABLE IF NOT E
 for _i, stmt in ipairs(prepared) do
     expect(stmt.closed, "statement leaked: " .. stmt.sql)
 end
+
+-- Book payloads never embed the catalog, and counting does not decode it.
+local book_with_catalog = { bookId = "b", title = "T", chapters = { { chapterUid = 1 } } }
+second:putBook(book_with_catalog)
+expect(encoded[#encoded].chapters == nil and encoded[#encoded].title == "T",
+    "book payload embedded the chapter catalog")
+expect(book_with_catalog.chapters ~= nil, "putBook stripped the caller's catalog")
+rows_by_sql["SELECT COUNT(*) FROM chapters"] = { { 811 } }
+local counted = first:countChapters("b")
+expect(counted == 811, "chapter count was not read: " .. tostring(counted))
 
 -- A failing step inside a read loop is contained: no error escapes, the
 -- statement is closed and the next call reopens a clean connection.
