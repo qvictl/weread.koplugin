@@ -75,4 +75,37 @@ assert(coroutine.resume(worker))
 assert(checkpoint and checkpoint.next_index == 17 and #checkpoint.records == 16)
 records, stats = locate(many, { resume = checkpoint })
 assert(#records == 40 and stats.located == 40 and stats.total == 40, "matching resume lost or duplicated records")
+-- UI-thread budget: a slow record (the whole-book fallback) yields at once
+-- instead of finishing a 16-record batch, and checkpoints (each re-encodes
+-- every matched record) are throttled after the first one.
+local fake_now = 0
+local real_clock = External.clock
+External.clock = function() return fake_now end
+local yields, saved = {}, {}
+local slow_document = setmetatable({
+    findAllText = function(self, quote)
+        fake_now = fake_now + 0.3 -- each fallback search costs 300 ms
+        return document.findAllText(self, quote)
+    end,
+}, { __index = document })
+document.getPrevVisibleChar = nil -- force the whole-book fallback
+records = External.locate(slow_document, { { book_id = "b", chapter_uid = "1",
+    underlines = { many[1], many[2], many[3], many[4] }, reviews = {} } }, {
+    chapter_ranges = { ["1"] = { start_xpointer = "0", end_xpointer = tostring(#text) } },
+    yield = function(current) yields[#yields + 1] = current end,
+    checkpoint = function(state) saved[#saved + 1] = state.next_index end,
+})
+document.getPrevVisibleChar = previous
+assert(#records == 4, "slow fallback lost records")
+assert(table.concat(yields, ",") == "1,2,3,4", "slow records did not yield individually: " .. table.concat(yields, ","))
+assert(table.concat(saved, ",") == "2,5", "checkpoints were not throttled: " .. table.concat(saved, ","))
+-- The fast path still yields and checkpoints per 16-record batch, throttled.
+yields, saved, fake_now = {}, {}, 0
+records = locate(many, {
+    yield = function(current) yields[#yields + 1] = current; fake_now = fake_now + 0.4 end,
+    checkpoint = function(state) saved[#saved + 1] = state.next_index end,
+})
+assert(#records == 40 and table.concat(yields, ",") == "16,32,40", "fast path yield cadence changed")
+assert(table.concat(saved, ",") == "17,41", "fast path checkpoints were not throttled: " .. table.concat(saved, ","))
+External.clock = real_clock
 print("annotation_locator_regressions_spec: overlap, equality, bounds, fast path and matching resume passed")

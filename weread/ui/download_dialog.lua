@@ -22,6 +22,8 @@ local DownloadDialog = InputContainer:extend{
     progress_max = 100,
     buttons = nil,
     refresh_time_seconds = 3,
+    -- Minimum time between title repaints; see setTitle.
+    title_refresh_seconds = 1,
 }
 
 function DownloadDialog:init()
@@ -113,15 +115,38 @@ function DownloadDialog:reportProgress(progress)
     end
 end
 
+-- Callers retitle the dialog on every step (annotation sync: every chapter
+-- stage and every batch of matched underlines). A forced repaint plus an
+-- e-ink refresh per step costs more UI-thread time than many steps
+-- themselves, so repaint at most once per title_refresh_seconds; a trailing
+-- repaint makes sure the latest title is eventually shown.
 function DownloadDialog:setTitle(title)
     title = title or ""
     if self.title == title then return end
     self.title = title
-    if self.title_widget and self.title_widget.setText then
-        self.title_widget:setText(self.title)
+    if not (self.title_widget and self.title_widget.setText) then return end
+    self.title_widget:setText(self.title)
+    local now = time.now()
+    local interval = time.s(self.title_refresh_seconds)
+    local last = self._title_redraw_time
+    if not last or now - last >= interval then
+        self._title_redraw_time = now
         UIManager:setDirty(self, function() return "fast", self.dimen end)
         UIManager:forceRePaint()
+        return
     end
+    if self._title_redraw_pending then return end
+    self._title_redraw_pending = true
+    UIManager:scheduleIn(time.to_s(interval - (now - last)), function()
+        self._title_redraw_pending = nil
+        if self._closed then return end
+        self._title_redraw_time = time.now()
+        UIManager:setDirty(self, function() return "fast", self.dimen end)
+    end)
+end
+
+function DownloadDialog:onCloseWidget()
+    self._closed = true
 end
 
 function DownloadDialog:show()
