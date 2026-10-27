@@ -5,12 +5,22 @@ on:
   push:
     branches:
       - main
+  # Also dispatched by the upstream-sync workflow for its PR branch (PRs
+  # opened with GITHUB_TOKEN do not trigger pull_request workflows).
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  checks:
-    name: Basic checks
+  lua:
+    name: Lua lint and specs
     runs-on: ubuntu-latest
-
+    timeout-minutes: 20
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -18,14 +28,17 @@ jobs:
       - name: Install Lua tooling
         run: |
           sudo apt-get update
-          sudo apt-get install -y luajit luarocks ripgrep libsqlite3-0
+          sudo apt-get install -y luajit luarocks libsqlite3-0
           sudo luarocks install luacheck
+
+      - name: Install ripgrep with PCRE2
+        uses: ./.github/actions/setup-ripgrep
 
       - name: Lua namespace policy
         run: bash scripts/check_lua_namespace.sh
 
       - name: Lua static analysis
-        run: luacheck main.lua _meta.lua weread spec
+        run: luacheck main.lua _meta.lua weread integrations spec
 
       - name: Lua syntax check
         run: |
@@ -38,17 +51,47 @@ jobs:
       - name: Lua unit and component specs
         run: bash scripts/run_lua_specs.sh
 
-      - name: Python syntax check
-        run: |
-          if [ -d scripts ]; then
-            python3 -m py_compile scripts/*.py
-          fi
+  python:
+    name: Python scripts and mock service
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
 
-      - name: Offline mock service checks
+      - name: Python syntax check
+        run: python3 -m py_compile scripts/*.py
+
+      - name: Offline mock service contract
         run: python3 scripts/test_mock_weread.py
 
+      - name: Emulator scenario inventory
+        run: python3 scripts/run_emulator_scenarios.py --list
+
+  package:
+    name: Package and changelog
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Version consistency
+        run: |
+          meta="$(sed -nE 's/^[[:space:]]*version[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' _meta.lua | head -n 1)"
+          main="$(sed -nE 's/^[[:space:]]*version[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' main.lua | head -n 1)"
+          echo "_meta.lua=$meta main.lua=$main"
+          test -n "$meta" && test "$meta" = "$main"
+
       - name: Release package smoke test
-        run: bash scripts/package_release.sh /tmp/weread.koplugin-release-test.zip
+        run: |
+          bash scripts/package_release.sh /tmp/weread.koplugin-release-test.zip
+          unzip -Z1 /tmp/weread.koplugin-release-test.zip | grep -qx 'weread.koplugin/main.lua'
+          if unzip -Z1 /tmp/weread.koplugin-release-test.zip \
+            | grep -Eq '^weread\.koplugin/(spec|scripts|docs|\.github)/'; then
+            echo "error: development-only files in the release package" >&2
+            exit 1
+          fi
 
       - name: Release changelog check
         run: |
@@ -59,28 +102,31 @@ jobs:
           bash scripts/extract_release_notes.sh "$version" /tmp/release-preface.md
           grep -qx '## 新功能与改进' /tmp/release-preface.md
 
-      - name: Sensitive information scan
+  secrets:
+    name: Sensitive information scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install ripgrep with PCRE2
+        uses: ./.github/actions/setup-ripgrep
+
+      - name: Scan for credentials
+        run: bash scripts/check_secrets.sh
+
+  ci:
+    # Required status check for main. Stays green only if every job above
+    # succeeded (a skipped or cancelled job fails it too).
+    name: ci
+    if: always()
+    needs: [lua, python, package, secrets]
+    runs-on: ubuntu-latest
+    steps:
+      - name: All CI jobs passed
+        env:
+          RESULTS: ${{ toJSON(needs) }}
         run: |
-          set -euo pipefail
-
-          found=0
-
-          scan() {
-            local description="$1"
-            local pattern="$2"
-
-            if rg -n -P "$pattern" . \
-              --glob '!cache/**' \
-              --glob '!*.epub' \
-              --glob '!.git/**'; then
-              echo "::error::$description"
-              found=1
-            fi
-          }
-
-          scan "Possible real WeRead API key. Remove API keys before committing." 'wrk-(?!x{8,})[A-Za-z0-9_-]{12,}'
-          scan "Possible real WeRead cookie value. Remove cookies before committing." '(wr_skey|wr_rt|wr_vid|ptcz)=((?!XXX)[^;[:space:]'\''"]{8,})'
-          scan "Possible real x-wrpa header. Remove anti-abuse headers before committing." 'x-wrpa-[0-9]+:\s*((?!\.\.\.)[A-Za-z0-9+/=_-]{12,})'
-          scan "Possible thirdwx value. Remove account/session data before committing." 'thirdwx[=:]\s*[A-Za-z0-9_-]{8,}'
-
-          exit "$found"
+          echo "$RESULTS" | jq -r 'to_entries[] | "\(.key): \(.value.result)"'
+          echo "$RESULTS" | jq -e 'to_entries | all(.value.result == "success")' > /dev/null

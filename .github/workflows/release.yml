@@ -1,5 +1,9 @@
 name: Release
 
+# Version-based release of qvictl/weread.koplugin: when CI and Integration
+# pass on main and _meta.lua carries a version without a tag, publish
+# v<version> with weread.koplugin-v<version>.zip(.sha256) - the asset names
+# the in-app updater (weread/lib/updater.lua) downloads from this repo.
 on:
   workflow_dispatch:
     inputs:
@@ -7,9 +11,14 @@ on:
         description: Optional package label; defaults to the first 8 characters of the commit ID
         required: false
         type: string
+      publish:
+        description: Publish the current _meta.lua version from main if its tag does not exist yet
+        required: false
+        type: boolean
+        default: false
   workflow_run:
     workflows:
-      - KOReader integration
+      - Integration
     types:
       - completed
     branches:
@@ -40,6 +49,7 @@ jobs:
         env:
           EVENT_NAME: ${{ github.event_name }}
           MANUAL_LABEL: ${{ inputs.package_label }}
+          MANUAL_PUBLISH: ${{ inputs.publish }}
           TARGET_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
         run: |
           set -euo pipefail
@@ -58,7 +68,11 @@ jobs:
           automatic_release=false
           tag="v$current"
           package_label="$tag"
-          if [[ "$EVENT_NAME" == "workflow_run" ]]; then
+          if [[ "$EVENT_NAME" == "workflow_run" || "$MANUAL_PUBLISH" == "true" ]]; then
+            if [[ "$EVENT_NAME" != "workflow_run" && "$GITHUB_REF" != "refs/heads/main" ]]; then
+              echo "error: manual publishing is only allowed from main" >&2
+              exit 1
+            fi
             if ! git rev-parse --verify --quiet "refs/tags/$tag"; then
               automatic_release=true
             fi
@@ -80,29 +94,32 @@ jobs:
           echo "target_sha=$TARGET_SHA" >> "$GITHUB_OUTPUT"
 
       - name: Explain existing release
-        if: github.event_name == 'workflow_run' && steps.version.outputs.automatic_release != 'true'
+        if: (github.event_name == 'workflow_run' || inputs.publish) && steps.version.outputs.automatic_release != 'true'
         run: echo "Tag ${{ steps.version.outputs.tag }} already exists; no package was published."
 
-      - name: Verify basic CI passed
+      - name: Verify CI and Integration passed
         if: steps.version.outputs.automatic_release == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           TARGET_SHA: ${{ steps.version.outputs.target_sha }}
         run: |
-          conclusion="$(
-            gh run list \
-              --repo "$GITHUB_REPOSITORY" \
-              --workflow ci.yml \
-              --commit "$TARGET_SHA" \
-              --event push \
-              --limit 1 \
-              --json conclusion \
-              --jq '.[0].conclusion // ""'
-          )"
-          if [[ "$conclusion" != "success" ]]; then
-            echo "error: CI for $TARGET_SHA did not succeed (conclusion: ${conclusion:-missing})" >&2
-            exit 1
-          fi
+          for workflow in ci.yml integration.yml; do
+            conclusion="$(
+              gh run list \
+                --repo "$GITHUB_REPOSITORY" \
+                --workflow "$workflow" \
+                --commit "$TARGET_SHA" \
+                --status success \
+                --limit 1 \
+                --json conclusion \
+                --jq '.[0].conclusion // ""'
+            )"
+            if [[ "$conclusion" != "success" ]]; then
+              echo "error: $workflow has no successful run for $TARGET_SHA" >&2
+              exit 1
+            fi
+            echo "$workflow: success for $TARGET_SHA"
+          done
 
       - name: Build plugin package
         if: github.event_name == 'workflow_dispatch' || steps.version.outputs.automatic_release == 'true'
@@ -179,6 +196,18 @@ jobs:
             dist/release-preface.md
           cat dist/release-preface.md
 
+      - name: Verify updater asset names
+        if: steps.version.outputs.automatic_release == 'true'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          ARCHIVE: ${{ steps.version.outputs.archive }}
+        run: |
+          # weread/lib/updater.lua parse_release() expects exactly these names.
+          test "$(basename "$ARCHIVE")" = "weread.koplugin-v$VERSION.zip"
+          test -f "$ARCHIVE.sha256"
+          grep -q 'Updater.RELEASE_PREFIX = "https://github.com/'"$GITHUB_REPOSITORY"'/releases/download/"' weread/lib/updater.lua
+          grep -q 'Updater.API_URL = "https://api.github.com/repos/'"$GITHUB_REPOSITORY"'/releases/latest"' weread/lib/updater.lua
+
       - name: Create GitHub Release
         if: steps.version.outputs.automatic_release == 'true'
         env:
@@ -192,7 +221,23 @@ jobs:
           gh release create "$TAG" \
             "$ARCHIVE" \
             "$ARCHIVE.sha256" \
+            --repo "$GITHUB_REPOSITORY" \
             --target "$TARGET_SHA" \
             --title "Version $VERSION" \
             --notes "$release_preface" \
-            --generate-notes
+            --generate-notes \
+            --latest
+
+      - name: Verify published release
+        if: steps.version.outputs.automatic_release == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          latest="$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name)"
+          test "$latest" = "$TAG"
+          mkdir -p "$RUNNER_TEMP/verify" && cd "$RUNNER_TEMP/verify"
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" -p "weread.koplugin-v$VERSION.zip*"
+          sha256sum -c "weread.koplugin-v$VERSION.zip.sha256"

@@ -1,0 +1,145 @@
+name: PR policy
+
+# tests-policy (required): Lua code changes need test changes unless a
+# maintainer applies `no-tests-needed` (`upstream-sync` PRs are exempt), and
+# changed Lua lines must reach the diff-coverage threshold under the unit
+# specs (LuaCov). The coverage table is posted to the job summary and as a
+# sticky PR comment (same-repository PRs).
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled, ready_for_review]
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: Pull request number (used by the upstream-sync workflow)
+        required: true
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: pr-policy-${{ github.event.pull_request.number || inputs.pr }}
+  cancel-in-progress: true
+
+env:
+  DIFF_COVERAGE_THRESHOLD: "70"
+  LUACOV_VERSION: v0.16.0
+
+jobs:
+  tests-policy:
+    name: tests-policy
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Resolve pull request
+        id: pr
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number || inputs.pr }}
+        run: |
+          set -euo pipefail
+          data="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER")"
+          echo "number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
+          echo "base_ref=$(jq -r .base.ref <<<"$data")" >> "$GITHUB_OUTPUT"
+          echo "head_sha=$(jq -r .head.sha <<<"$data")" >> "$GITHUB_OUTPUT"
+          echo "same_repo=$(jq -r '.head.repo.full_name == .base.repo.full_name' <<<"$data")" >> "$GITHUB_OUTPUT"
+          echo "labels=$(jq -r '[.labels[].name] | join(",")' <<<"$data")" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout pull request head
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ steps.pr.outputs.head_sha }}
+          fetch-depth: 0
+
+      - name: Fetch base branch
+        run: git fetch --no-tags origin "${{ steps.pr.outputs.base_ref }}:refs/remotes/origin/${{ steps.pr.outputs.base_ref }}"
+
+      - name: Tests accompany code changes
+        id: policy
+        continue-on-error: true
+        run: |
+          python3 scripts/check_test_policy.py \
+            --base "origin/${{ steps.pr.outputs.base_ref }}" \
+            --head HEAD \
+            --labels "${{ steps.pr.outputs.labels }}" \
+            --summary "$RUNNER_TEMP/policy.md"
+
+      - name: Install LuaJIT and LuaCov
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y luajit libsqlite3-0
+          git clone --quiet --depth 1 --branch "$LUACOV_VERSION" \
+            https://github.com/lunarmodules/luacov.git "$RUNNER_TEMP/luacov"
+          echo "LUA_PATH=$RUNNER_TEMP/luacov/src/?.lua;;" >> "$GITHUB_ENV"
+
+      - name: Unit specs under LuaCov
+        run: bash scripts/run_lua_coverage.sh
+
+      - name: Diff coverage of changed Lua lines
+        id: coverage
+        continue-on-error: true
+        run: |
+          python3 scripts/coverage_tools.py diff coverage/luacov.report.out \
+            --base "origin/${{ steps.pr.outputs.base_ref }}" --head HEAD \
+            --threshold "$DIFF_COVERAGE_THRESHOLD" \
+            --summary "$RUNNER_TEMP/coverage.md" --json "$RUNNER_TEMP/coverage.json"
+          python3 scripts/coverage_tools.py total coverage/luacov.report.out | tee "$RUNNER_TEMP/total.txt"
+
+      - name: Compose summary
+        if: always()
+        run: |
+          {
+            echo "<!-- weread-tests-policy -->"
+            cat "$RUNNER_TEMP/policy.md" 2>/dev/null || echo "Test policy did not run."
+            echo
+            cat "$RUNNER_TEMP/coverage.md" 2>/dev/null || echo "Diff coverage did not run."
+            if [[ -f "$RUNNER_TEMP/total.txt" ]]; then
+              echo
+              echo "Overall unit-spec line coverage: $(cat "$RUNNER_TEMP/total.txt")"
+            fi
+            echo
+            echo "_Labels: \`no-tests-needed\` (maintainers) skips the test-change rule and the coverage threshold; \`upstream-sync\` marks automated upstream merges._"
+          } > "$RUNNER_TEMP/comment.md"
+          cat "$RUNNER_TEMP/comment.md" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Post sticky PR comment
+        if: always() && steps.pr.outputs.same_repo == 'true'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
+        run: |
+          set -euo pipefail
+          existing="$(gh api "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" --paginate \
+            --jq '.[] | select(.body | startswith("<!-- weread-tests-policy -->")) | .id' | head -n 1)"
+          if [[ -n "$existing" ]]; then
+            gh api -X PATCH "repos/$GITHUB_REPOSITORY/issues/comments/$existing" -F body=@"$RUNNER_TEMP/comment.md" >/dev/null
+          else
+            gh api -X POST "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" -F body=@"$RUNNER_TEMP/comment.md" >/dev/null
+          fi
+
+      - name: Enforce policy
+        env:
+          LABELS: ${{ steps.pr.outputs.labels }}
+          POLICY: ${{ steps.policy.outcome }}
+          COVERAGE: ${{ steps.coverage.outcome }}
+        run: |
+          echo "test policy: $POLICY, diff coverage: $COVERAGE, labels: ${LABELS:-none}"
+          exempt=false
+          case ",$LABELS," in
+            *,no-tests-needed,*|*,upstream-sync,*) exempt=true ;;
+          esac
+          if [[ "$POLICY" != "success" ]]; then
+            echo "::error::Lua code changed without test changes (see summary)."
+            exit 1
+          fi
+          if [[ "$COVERAGE" != "success" ]]; then
+            if [[ "$exempt" == "true" ]]; then
+              echo "::warning::Diff coverage below ${DIFF_COVERAGE_THRESHOLD}% accepted because of an exempting label."
+            else
+              echo "::error::Diff coverage of changed Lua lines is below ${DIFF_COVERAGE_THRESHOLD}% (see summary)."
+              exit 1
+            fi
+          fi

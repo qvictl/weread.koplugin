@@ -27,16 +27,29 @@
 
 ## 测试
 
-请说明你如何验证这个 PR。
+本仓库欢迎人或 AI 编写的 PR，以测试把关：必需检查 `ci`、`integration`（KOReader 模拟器
+集成场景 + PluginLoader）、`tests-policy`（修改 `main.lua`、`weread/`、`integrations/`
+的 Lua 代码必须同时修改 `spec/` 下的测试，改动行单元测试覆盖率 ≥ 70%）全部通过后才能合并。
+仅维护者可添加 `no-tests-needed` 标签豁免测试要求。
 
-- [ ] 已在 KOReader 中手动测试
+请说明你如何验证这个 PR，并给出证据。
+
+- [ ] 新增或修改了单元测试（`spec/*_spec.lua`），bugfix 的回归测试在修复前会失败
+- [ ] 新增或修改了模拟器场景（`spec/emulator/scenarios/`），或说明为何不需要
 - [ ] 已运行 `bash scripts/run_lua_specs.sh`
 - [ ] 已运行 `bash scripts/check_lua_namespace.sh`
-- [ ] 已运行 `luacheck main.lua _meta.lua weread spec`
-- [ ] 如涉及插件加载/KOReader 兼容性，已运行或触发 `KOReader integration`
+- [ ] 已运行 `luacheck main.lua _meta.lua weread integrations spec`
+- [ ] 已运行 `python3 scripts/run_emulator_scenarios.py`（或依赖 CI 的 `integration` 检查）
+- [ ] 已在 KOReader 中手动测试（设备/模拟器型号：）
 - [ ] 不适用，仅文档或注释变更
 
-测试说明:
+新增/修改的测试与覆盖的行为:
+
+```text
+
+```
+
+测试证据（命令输出摘要、模拟器场景结果、截图或 CI 链接）:
 
 ```text
 
@@ -81,7 +94,7 @@ scripts/
 - [ ] 如果是新增 UI/交互特性，我已经提供截图或录屏。
 - [ ] 我没有提交 KOReader `settings/weread.lua`、API key、cookie、token、`x-wrpa-*` 或私人书籍内容。
 - [ ] 新增或移动的项目 Lua 模块遵循 `weread/lib/`、`weread/ui/` 命名空间规范。
-- [ ] 新增或修复的逻辑包含对应回归测试；若无法自动化，已在测试说明中解释原因。
+- [ ] 新增或修复的逻辑包含对应回归测试（单元测试和/或模拟器场景）；若无法自动化，已在测试说明中解释原因并申请 `no-tests-needed`。
 - [ ] 如果修改了用户可见文本，我已经更新 `weread/lib/i18n.lua`。
 - [ ] 如果修改了菜单结构，我已经同步更新 README 菜单结构。
 - [ ] 如果涉及非公开 WeRead Web API，我已经在 `scripts/` 中提交可独立运行、可复现的 Python 验证脚本，并填写了复现命令和脱敏结果。
