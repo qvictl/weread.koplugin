@@ -21,6 +21,8 @@ for _, module_name in ipairs({
 }) do
     package.loaded[module_name] = old_namespace_sentinel
 end
+-- Keep the runtime from loading real worker modules in this fake environment.
+require("weread.lib.runtime").PRELOAD_MODULES = {}
 
 package.preload["ui/event"] = function()
     return { new = function(_self, name, value) return { name, value } end }
@@ -77,11 +79,23 @@ end
 package.preload["weread.lib.background_worker"] = function()
     return { new = function(_self, options) return { options = options } end }
 end
+local downloaders_created, recovers, settings_created = 0, 0, 0
 package.preload["weread.lib.downloader"] = function()
-    return { new = function(_self, options) return options end }
+    return {
+        new = function(_self, options)
+            downloaders_created = downloaders_created + 1
+            options.recover = function() recovers = recovers + 1 end
+            return options
+        end,
+    }
 end
 package.preload["weread.lib.settings"] = function()
-    return { new = function() return fake_settings end }
+    return {
+        new = function()
+            settings_created = settings_created + 1
+            return fake_settings
+        end,
+    }
 end
 package.preload["weread.lib.updater"] = function()
     return {
@@ -115,13 +129,19 @@ package.preload["weread.lib.plugin_util"] = function()
         tr = function(text) return text end,
     }
 end
+local qr_cancels = 0
 package.preload["weread.lib.qr_login"] = function()
-    return { new = function() return { kind = "qr_login" } end }
+    return {
+        new = function()
+            return { kind = "qr_login", cancel = function() qr_cancels = qr_cancels + 1 end }
+        end,
+    }
 end
 package.preload["weread.lib.read_report"] = function()
     return {
         new = function(_self, options)
             options.maybe_start = function() end
+            options.stop = function(self, reason) self.stopped = reason end
             return options
         end,
     }
@@ -143,9 +163,10 @@ package.preload["weread.lib.reader_lifecycle"] = function()
     }
 end
 
+local infos = {}
 package.preload["weread.ui.common"] = function()
     return {
-        showInfo = function() end,
+        showInfo = function(self, text) infos[#infos + 1] = { self, text } end,
         showTransientInfo = function() end,
         refreshUI = function() end,
         refreshShelfCacheIndicators = function() end,
@@ -190,15 +211,18 @@ package.preload["weread.ui.reader_navigation"] = function()
 end
 
 local Plugin = dofile("main.lua")
-local plugin = setmetatable({
-    ui = {
-        menu = {
-            registerToMainMenu = function(_self, registered_plugin)
-                menu_registered = registered_plugin ~= nil
-            end,
+local function new_instance()
+    return setmetatable({
+        ui = {
+            menu = {
+                registerToMainMenu = function(_self, registered_plugin)
+                    menu_registered = registered_plugin ~= nil
+                end,
+            },
         },
-    },
-}, { __index = Plugin })
+    }, { __index = Plugin })
+end
+local plugin = new_instance()
 plugin:init()
 
 expect(plugin.name == "weread", "plugin metadata was not loaded")
@@ -224,6 +248,26 @@ expect(package.loaded["weread.lib.client"] ~= nil,
     "namespaced client module was not loaded")
 expect(package.loaded["weread.ui.menu"] ~= nil,
     "namespaced menu module was not loaded")
+
+-- KOReader re-instantiates the plugin for every FileManager/ReaderUI. The
+-- second instance must share the services and must not re-run recovery.
+plugin.downloader.show_info("from first")
+expect(infos[1] and infos[1][1] == plugin, "downloader callbacks did not reach the instance")
+plugin:onCloseWidget()
+expect(plugin.read_report.stopped == "plugin_closed" and qr_cancels == 1,
+    "closing an instance must stop its read-report timer and QR login")
+local reader_instance = new_instance()
+reader_instance:init()
+expect(settings_created == 1 and downloaders_created == 1,
+    "a second plugin instance must reuse the process services")
+expect(reader_instance.settings == plugin.settings
+    and reader_instance.downloader == plugin.downloader
+    and reader_instance.client == plugin.client,
+    "plugin instances do not share the runtime services")
+expect(recovers == 1, "stale download recovery must run once per process")
+plugin.downloader.show_info("from second")
+expect(#infos == 2 and infos[2][1] == reader_instance,
+    "callbacks must follow the current instance, not the closed one")
 
 for _, module_name in ipairs({
     "lib.client",
