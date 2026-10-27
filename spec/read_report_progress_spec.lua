@@ -538,6 +538,111 @@ test("teardown cancels the tick and kills a running job", function()
     eq(runner.terminated, true, "child killed")
 end)
 
+local function guard_fixture(position, remote, stored)
+    local report, records = fixture(function()
+        return position, nil, true
+    end)
+    local book = {
+        book_id = "book", psvts = "ps", pclts = "pc", token = "token",
+        read_session_id = report.session_id, read_session_entered_at = 80,
+    }
+    for key, value in pairs(stored or {}) do book[key] = value end
+    local get = report.settings.get
+    report.settings.get = function(self_, key, default)
+        if key == "books" then return { book = book } end
+        return get(self_, key, default)
+    end
+    report.ensure_context = function() return book end
+    report._persist_context = function() end
+    report.client.get_web_progress = function()
+        if not remote then error("Network is unreachable") end
+        return remote
+    end
+    report.needs_cloud_check = true
+    report.task = function() end
+    -- An open server session with 40 s of reading to credit.
+    report.server_session_ready = true
+    report.server_session_book_id = "book"
+    report.server_session_ready_at = 50
+    report.last_credit_at = 60
+    return report, records, book
+end
+
+test("first report after a gap never sends a position behind newer cloud progress", function()
+    local report, records = guard_fixture(
+        { chapter_uid = 22, chapter_idx = 2, chapter_offset = 200, percent = 30 },
+        { bookId = "book", progress = 40, chapterUid = 33, chapterIdx = 3, chapterOffset = 10 },
+        { chapter_uid = 22, chapter_offset = 150, progress = 25 })
+    report:_tick(report.generation, report.task)
+    eq(#records, 1, "time is still reported")
+    eq(records[1].chapter_uid, 33, "cloud chapter re-sent")
+    eq(records[1].progress, 40, "cloud progress re-sent")
+    eq(report.needs_cloud_check, false, "check done for this session")
+    eq(report.report_floor.position.chapter_uid, 33, "cloud position kept as floor")
+    report.last_credit_at = 60
+    report:_tick(report.generation, report.task)
+    eq(#records, 2, "second report sent")
+    eq(records[#records].chapter_uid, 33, "later reports keep the floor")
+end)
+
+test("a cloud position this device sent itself does not block moving back", function()
+    local report, records = guard_fixture(
+        { chapter_uid = 22, chapter_idx = 2, chapter_offset = 200, percent = 30 },
+        { bookId = "book", progress = 40, chapterUid = 33, chapterIdx = 3, chapterOffset = 10 },
+        { chapter_uid = 33, chapter_offset = 10, progress = 40 })
+    report:_tick(report.generation, report.task)
+    eq(records[1].chapter_uid, 22, "local position sent")
+    eq(records[1].chapter_offset, 200, "local offset sent")
+    eq(report.report_floor, nil, "no floor")
+end)
+
+test("a time-only report re-asserts the fresh cloud position", function()
+    local report, records = guard_fixture(nil,
+        { bookId = "book", progress = 40, chapterUid = 33, chapterIdx = 3, chapterOffset = 10 },
+        { chapter_uid = 22, chapter_offset = 150, progress = 25 })
+    report.position_provider = function() return nil, nil, false end
+    report:_tick(report.generation, report.task)
+    eq(records[1].chapter_uid, 33, "fresh cloud chapter, not the stale context")
+    eq(records[1].progress, 40, "fresh cloud progress")
+end)
+
+test("a deferred upload is skipped when the cloud moved ahead elsewhere", function()
+    local report, records = guard_fixture(nil,
+        { bookId = "book", progress = 40, chapterUid = 33, chapterIdx = 3, chapterOffset = 10 },
+        { chapter_uid = 22, chapter_offset = 150, progress = 25 })
+    local accepted, outcome = report:upload_position("book", {
+        chapter_uid = 22, chapter_idx = 2, chapter_offset = 200, percent = 30,
+        guard = { strict = true, baselines = { { chapter_uid = 22, chapter_offset = 150 } } },
+    }, 0)
+    eq(accepted, false, "not uploaded")
+    eq(outcome.error_kind, "remote_ahead", "reason")
+    eq(outcome.remote.chapter_uid, 33, "cloud position returned")
+    eq(#records, 0, "no request sent")
+end)
+
+test("a strict upload guard without cloud data does not upload", function()
+    local report, records = guard_fixture(nil, nil,
+        { chapter_uid = 22, chapter_offset = 150, progress = 25 })
+    local accepted, outcome = report:upload_position("book", {
+        chapter_uid = 22, chapter_offset = 200, percent = 30,
+        guard = { strict = true },
+    }, 0)
+    eq(accepted, false, "not uploaded")
+    eq(outcome.error_kind, "transport", "kept for a retry")
+    eq(#records, 0, "no request sent")
+end)
+
+test("an explicit upload is never guarded", function()
+    local report, records = guard_fixture(nil,
+        { bookId = "book", progress = 40, chapterUid = 33, chapterIdx = 3, chapterOffset = 10 },
+        { chapter_uid = 22, chapter_offset = 150, progress = 25 })
+    local accepted = report:upload_position("book", {
+        chapter_uid = 22, chapter_idx = 2, chapter_offset = 100, percent = 20,
+    }, 0)
+    eq(accepted, true, "explicit choice uploads")
+    eq(records[1].chapter_offset, 100, "older position sent on request")
+end)
+
 print(string.format(
     "read_report_progress_spec: %d checks, %d failure(s)", checks, failures))
 os.exit(failures == 0 and 0 or 1)

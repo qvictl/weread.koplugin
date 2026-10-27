@@ -1,4 +1,5 @@
 local Content = require("weread.lib.content")
+local PositionMapper = require("weread.lib.position_mapper")
 local WeRead = require("weread.lib.protocol")
 
 local logger = require("weread.lib.logger").scoped("ReadReport")
@@ -94,6 +95,32 @@ local function put_book(settings, book_id, book)
     local books = settings:get("books", {}) or {}
     books[book_id] = book
     settings:set("books", books)
+end
+
+-- Cloud position fields a report payload is built from.
+local function slim_position(position)
+    if type(position) ~= "table" then return nil end
+    return {
+        chapter_uid = position.chapter_uid,
+        chapter_idx = tonumber(position.chapter_idx),
+        chapter_offset = tonumber(position.chapter_offset),
+        percent = tonumber(position.raw_percent) or tonumber(position.percent),
+        summary = position.summary,
+        has_chapter_offset = position.has_chapter_offset,
+    }
+end
+
+-- Makes the payload re-assert the cloud's own position.
+local function merge_cloud_position(book, remote)
+    book.chapter_uid = remote.chapter_uid or book.chapter_uid
+    book.chapter_idx = tonumber(remote.chapter_idx) or tonumber(book.chapter_idx) or 0
+    book.chapter_offset = tonumber(remote.chapter_offset)
+        or tonumber(book.chapter_offset) or 0
+    book.progress = tonumber(remote.raw_percent) or tonumber(remote.percent)
+        or tonumber(book.progress) or 0
+    if tostring(remote.summary or "") ~= "" then
+        book.summary = remote.summary
+    end
 end
 
 -- Identifies one progress upload so a later call with the same snapshot can
@@ -451,6 +478,11 @@ function ReadReport:start(reason)
     self.state = "waiting"
     self.stop_reason = nil
     self.last_skip = nil
+    -- Someone may have read elsewhere before this session (re)started.
+    self.needs_cloud_check = true
+    if self.report_floor and self.report_floor.book_id ~= book_id then
+        self.report_floor = nil
+    end
 
     local task
     task = function()
@@ -619,6 +651,7 @@ function ReadReport:_tick(generation, task)
             elapsed_seconds = elapsed,
             session_open = session_open,
         }
+        position = self:_apply_report_floor(book_id, position)
         local spawned, spawn_err, unsupported = self:_start_job(
             book_id, allow_renewal, generation, task, position, credit)
         if spawned then
@@ -642,7 +675,9 @@ function ReadReport:_tick(generation, task)
             position = position,
             elapsed_seconds = credit.elapsed_seconds,
             session_open = credit.session_open,
+            guard = self.needs_cloud_check and {} or nil,
         })
+        self:_note_cloud_check(book_id, outcome)
         self:_apply_outcome(outcome, book_id)
         self:_schedule_next(generation, task)
     end)
@@ -791,6 +826,8 @@ function ReadReport:_start_job(book_id, allow_renewal, generation, task, positio
         allow_renewal = allow_renewal,
         position = position,
         credit = credit or {},
+        -- First report after a gap: check the cloud before sending.
+        guard = self.needs_cloud_check and {} or nil,
     }, function(job, outcome, timed_out)
         if timed_out then
             self:_set_error("report job timed out", "transport", "read report job failed:")
@@ -898,7 +935,35 @@ end
 
 function ReadReport:_apply_job_outcome(job, outcome)
     self:_write_back(job, outcome)
+    self:_note_cloud_check(job.book_id, outcome)
     return self:_apply_outcome(outcome, job.book_id)
+end
+
+-- A completed cloud check ends the post-gap check; a cloud position found
+-- ahead becomes a floor for the following reports of this session.
+function ReadReport:_note_cloud_check(book_id, outcome)
+    if type(outcome) ~= "table" or type(outcome.remote) ~= "table" then return end
+    self.needs_cloud_check = false
+    if type(outcome.floor) == "table" then
+        self.report_floor = { book_id = tostring(book_id), position = outcome.floor }
+    end
+end
+
+-- Never report a position behind a known cloud floor (see
+-- _apply_cloud_guard); report the floor itself until reading passes it.
+function ReadReport:_apply_report_floor(book_id, position)
+    local floor = self.report_floor
+    if not floor then return position end
+    if floor.book_id ~= tostring(book_id) or type(position) ~= "table" then
+        return position
+    end
+    if PositionMapper.is_behind(position, floor.position) then
+        local result = {}
+        for key, value in pairs(floor.position) do result[key] = value end
+        return result
+    end
+    self.report_floor = nil
+    return position
 end
 
 -- Persists renewed auth and the refreshed reader context a child sent
@@ -1020,6 +1085,7 @@ function ReadReport:_child_report(book_id, allow_renewal, position, credit, spec
             elapsed_seconds = credit.elapsed_seconds,
             session_open = credit.session_open,
             progress_only = spec.kind == "upload",
+            guard = spec.guard,
         })
     end)
     if not ok then
@@ -1049,6 +1115,9 @@ end
 function ReadReport:_run_pipeline(book_id, opts)
     opts = opts or {}
     local outcome = { accepted = false, renew_attempted = false }
+    -- What the stored context last sent (or saw) before this attempt; the
+    -- context build below may merge fresh cloud progress into it.
+    local stored = opts.guard and slim_position(get_book(self.settings, book_id))
 
     local context_ok, book = pcall(function()
         return self:ensure_context(book_id, false, opts)
@@ -1058,6 +1127,10 @@ function ReadReport:_run_pipeline(book_id, opts)
         outcome.error_kind = "context"
         outcome.error_prefix = "read report context initialization failed:"
         return outcome
+    end
+    if opts.guard then
+        local stop = self:_apply_cloud_guard(book_id, book, opts, outcome, stored)
+        if stop then return outcome end
     end
     local function send_report(report_book)
         local send_ok, result, http_code, entered, elapsed_used = pcall(function()
@@ -1162,6 +1235,73 @@ function ReadReport:_run_pipeline(book_id, opts)
     outcome.error_kind = final_ok and "server" or "transport"
     outcome.error_prefix = "read report final retry failed:"
     return outcome
+end
+
+-- Monotonic guard (F6), run in the child before the first send of a report
+-- after a gap (open, resume) and before every deferred progress upload:
+-- fetch the current cloud position and, when it moved ahead of what is
+-- about to be sent and is not a position this device put or saw there,
+-- never send the older one. Reports then carry the cloud's own position
+-- (reading time is still credited); uploads are skipped. A report without
+-- a position re-asserts the fresh cloud position instead of a possibly
+-- stale stored context. Returns true when the pipeline must stop.
+function ReadReport:_apply_cloud_guard(book_id, book, opts, outcome, stored)
+    local remote, fetch_error = self:_fetch_cloud_position(book_id, book)
+    if not remote then
+        outcome.remote_check_error = tostring(fetch_error)
+        if opts.guard.strict then
+            outcome.error = "cloud progress unavailable: " .. tostring(fetch_error)
+            outcome.error_kind = "transport"
+            outcome.book = self:_context_snapshot(book)
+            return true
+        end
+        return false
+    end
+    outcome.remote = slim_position(remote)
+    if opts.position == nil then
+        merge_cloud_position(book, remote)
+        return false
+    end
+    local ours = PositionMapper.same_spot(remote, stored)
+    for _i, known in ipairs(opts.guard.baselines or {}) do
+        ours = ours or PositionMapper.same_spot(remote, known)
+    end
+    if ours or not PositionMapper.is_behind(opts.position, remote) then
+        return false
+    end
+    log("info", "cloud progress is ahead, not sending an older position:",
+        "book=", book_id,
+        "sending=", tostring(PositionMapper.exact_percent(opts.position)),
+        "cloud=", tostring(remote.percent))
+    if opts.progress_only then
+        outcome.error = "cloud progress moved ahead elsewhere"
+        outcome.error_kind = "remote_ahead"
+        outcome.book = self:_context_snapshot(book)
+        return true
+    end
+    opts.position = nil
+    merge_cloud_position(book, remote)
+    outcome.floor = outcome.remote
+    return false
+end
+
+function ReadReport:_fetch_cloud_position(book_id, book)
+    local chapters = type(book.chapters) == "table" and book.chapters or nil
+    local ok, result = pcall(self.client.get_web_progress, self.client, book_id)
+    local remote, err
+    if ok then
+        remote, err = PositionMapper.normalize_remote(result, book_id, "web", chapters)
+    else
+        err = result
+    end
+    if not remote and type(self.settings.is_api_configured) == "function"
+        and self.settings:is_api_configured() then
+        ok, result = pcall(self.client.get_progress, self.client, book_id)
+        if ok then
+            remote = PositionMapper.normalize_remote(result, book_id, "gateway", chapters)
+        end
+    end
+    return remote, err
 end
 
 -- Inline (blocking) report used when subprocess support is unavailable.
@@ -1454,6 +1594,9 @@ function ReadReport:upload_position(book_id, position, elapsed_seconds)
             and elapsed or (tonumber(elapsed_seconds) or 0),
         session_open = session_open,
     }
+    -- Automatic (deferred) uploads carry guard data; explicit choices do not.
+    local guard = type(position) == "table" and type(position.guard) == "table"
+        and position.guard or nil
     if not self.subprocess then
         -- No fork support on this platform (and in specs): run inline.
         local outcome = self:_run_pipeline(book_id, {
@@ -1462,6 +1605,7 @@ function ReadReport:upload_position(book_id, position, elapsed_seconds)
             elapsed_seconds = credit.elapsed_seconds,
             session_open = credit.session_open,
             progress_only = true,
+            guard = guard,
         })
         self:_finish_upload(book_id, outcome)
         if type(outcome.book) == "table" then
@@ -1481,6 +1625,7 @@ function ReadReport:upload_position(book_id, position, elapsed_seconds)
         allow_renewal = self:_renewal_allowed(),
         position = position,
         credit = credit,
+        guard = guard,
         timeout = UPLOAD_JOB_TIMEOUT_SECONDS,
     }, function(done_job, outcome, timed_out)
         if timed_out or type(outcome) ~= "table" then
