@@ -643,6 +643,22 @@ test("an explicit upload is never guarded", function()
     eq(records[1].chapter_offset, 100, "older position sent on request")
 end)
 
+test("rejected report logs at most 2 KB of the response body", function()
+    local report = fixture()
+    local book = { book_id = "book", chapter_uid = 5, psvts = "ps", pclts = "pc",
+        read_session_id = report.session_id, read_session_entered_at = 80 }
+    report.ensure_context = function() return book end
+    report.client.report_read = function()
+        return string.rep("<html>", 20000), 200
+    end
+    local outcome = report:_run_pipeline("book", {
+        allow_renewal = false, elapsed_seconds = 30, session_open = true,
+        position = { chapter_uid = 5, percent = 1 },
+    })
+    eq(outcome.accepted, false, "rejected")
+    eq(#outcome.error < 6000, true, "error text stays small")
+end)
+
 print(string.format(
     "read_report_progress_spec: %d checks, %d failure(s)", checks, failures))
 os.exit(failures == 0 and 0 or 1)

@@ -182,16 +182,27 @@ local function response_accepted(result, http_code)
     return false, body
 end
 
+-- Rejections sometimes return a whole HTML page (46-470 KB in crash.log).
+-- Writing that to the log is a slow write on the UI loop and buries the
+-- log; the first 2 KB are enough to diagnose an unexpected reply.
+local MAX_LOGGED_BODY_BYTES = 2048
+
 local function full_response_body(client, result)
+    local text
     if type(result) == "table" and client and type(client.json_encode) == "function" then
         local ok, encoded = pcall(function()
             return client:json_encode(result)
         end)
         if ok then
-            return encoded
+            text = encoded
         end
     end
-    return tostring(result)
+    text = tostring(text or result)
+    if #text > MAX_LOGGED_BODY_BYTES then
+        text = text:sub(1, MAX_LOGGED_BODY_BYTES)
+            .. "...(" .. tostring(#text) .. " bytes)"
+    end
+    return text
 end
 
 local function response_summary(client, result, http_code)
@@ -218,9 +229,9 @@ local function response_summary(client, result, http_code)
         parts[#parts + 1] = "error_message="
             .. tostring(message):gsub("[%c]+", " "):sub(1, 160)
     end
-    -- Only rejected reading reports call this function. Keep the complete
-    -- decoded response in the failure log so unexpected server replies can be
-    -- diagnosed without enabling verbose logging for successful reports.
+    -- Only rejected reading reports call this function. Keep the start of
+    -- the decoded response in the failure log so unexpected server replies
+    -- can be diagnosed without enabling verbose logging for successes.
     parts[#parts + 1] = "response_body=" .. full_response_body(client, result)
     return table.concat(parts, ", ")
 end
