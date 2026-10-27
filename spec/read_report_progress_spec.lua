@@ -549,6 +549,13 @@ local function guard_fixture(position, remote, stored)
         if key == "books" then return { book = book } end
         return get(self_, key, default)
     end
+    if report.settings.get_book then
+        local get_book = report.settings.get_book
+        report.settings.get_book = function(self_, book_id)
+            if tostring(book_id) == "book" then return book end
+            return get_book(self_, book_id)
+        end
+    end
     report.ensure_context = function() return book end
     report._persist_context = function() end
     report.client.get_web_progress = function()
