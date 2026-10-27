@@ -111,8 +111,16 @@ expect(cache:store({ cover = "https://cdn.example/tiny" }, "\255\216\255") == ni
     "truncated image header was cached")
 
 modified[jpeg_path], modified[png_path] = 1, 2
+-- Temporaries being written by store()/thumbnail generation are older than
+-- everything else here but must be neither evicted nor counted.
+local part_thumb = cache.dir .. "/inflight.thumb.part.png"
+local part_source = cache.dir .. "/inflight.source.part.jpg"
+files[part_thumb], files[part_source] = string.rep("x", 4096), string.rep("y", 4096)
+modified[part_thumb], modified[part_source] = 0, 0
 local removed = cache:prune(#files[png_path])
 expect(removed == 1 and files[jpeg_path] == nil and files[png_path] ~= nil,
     "cover cache did not evict the oldest file at its size limit")
+expect(files[part_thumb] ~= nil and files[part_source] ~= nil,
+    "prune deleted an in-progress cover temporary")
 
 print(("cover_cache_spec: %d checks"):format(checks))
