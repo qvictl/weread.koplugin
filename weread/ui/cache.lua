@@ -306,15 +306,6 @@ local SHELF_SORT_OPTIONS = {
     { key = "name_desc", label = _("Title Z-A"), short = "Z–A" },
 }
 
-local function shelfSortLabel(sort_key)
-    for _i, opt in ipairs(SHELF_SORT_OPTIONS) do
-        if opt.key == sort_key then
-            return opt.label
-        end
-    end
-    return SHELF_SORT_OPTIONS[1].label
-end
-
 function M:shelfSortSummary()
     local sort_key = self.settings:get("shelf").sort_order
     for _i, opt in ipairs(SHELF_SORT_OPTIONS) do
@@ -477,30 +468,6 @@ function M:isBookDownloaded(book, saved_books, downloaded_cache)
         downloaded_cache[book_id] = is_downloaded
     end
     return is_downloaded
-end
-
-function M:shelfToolbarItems(with_filters, refresh)
-    local sort_order = self.settings:get("shelf").sort_order
-    local items = {
-        {
-            text = _("Sort"),
-            mandatory = T(_("%1 \u{25BE}"), shelfSortLabel(sort_order)),
-            callback = self:safeCallback(_("Sort"), function()
-                self:showShelfSortOptions(refresh)
-            end),
-        },
-    }
-    if with_filters then
-        table.insert(items, {
-            text = _("Filter"),
-            mandatory = T(_("%1 \u{25BE}"), self:shelfFilterSummary()),
-            callback = self:safeCallback(_("Filter"), function()
-                self:showShelfFilterOptions(refresh)
-            end),
-        })
-    end
-    items[#items].separator = true -- divide the toolbar rows from the book list
-    return items
 end
 
 function M:showCacheManagement()
