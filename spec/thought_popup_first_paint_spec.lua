@@ -141,6 +141,18 @@ for _i, Widget in ipairs({ CenterWidget, BottomWidget }) do
     expect(#inner_events == 0, "a reopened popup accepted taps before repainting")
 end
 
+-- A paragraph-long quote must not push the thought text out of the window.
+local long_quote = string.rep("很长的划线原文", 300)
+local tall = CenterWidget:new{ items = { { abstract = long_quote, content = "body" } } }
+local title = tall._titlebar.title
+expect(#title < 120 * 3 + 4 and title:sub(-3) == "…", "a long quote was not truncated")
+expect(title:sub(1, 21) == long_quote:sub(1, 21), "truncation did not keep the start of the quote")
+expect(tall._titlebar:getHeight() <= math.floor(800 * 0.7 * 0.3),
+    "the title bar takes too much of the popup height")
+local short = CenterWidget:new{ items = { { abstract = "short quote", content = "body" } } }
+expect(short._titlebar.title_multilines == true and short._titlebar.title == "short quote",
+    "a short quote lost its multi-line title")
+
 -- The entry never stacks a visible pooled widget twice.
 package.loaded["ui/uimanager"] = nil
 local shown, closed, visible = {}, {}, {}
