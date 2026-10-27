@@ -348,6 +348,7 @@ local zh = {
     ["Full-book download stopped: %1 of %2 chapters failed.\n\nNo incomplete EPUB was saved. Please retry the download."] = "整本下载已停止：共 %2 章，其中 %1 章失败。\n\n未保存残缺的 EPUB，请重试下载。",
     ["Full-book download paused: the network seems to be unavailable.\n\nCompleted chapters were kept. Choose Download full book again to continue when the connection is back.\n\nLast error: %1"] = "整本下载已暂停：网络似乎不可用。\n\n已完成章节已保留，网络恢复后再次选择“下载全书”即可继续。\n\n最后一次错误：%1",
     ["Full-book download paused: several chapters in a row failed.\n\nCompleted chapters were kept. Choose Download full book again to continue later.\n\nLast error: %1"] = "整本下载已暂停：连续多个章节下载失败。\n\n已完成章节已保留，稍后再次选择“下载全书”即可继续。\n\n最后一次错误：%1",
+    ["Full-book download paused: %1 of %2 chapters could not be verified after downloading them again.\n\nCompleted chapters were kept. Choose Download full book again to retry."] = "整本下载已暂停：共 %2 章，其中 %1 章重新下载后仍无法通过校验。\n\n已完成章节已保留，再次选择“下载全书”即可重试。",
     ["Full-book download paused: %1 of %2 chapters failed.\n\nCompleted chapters were kept. Choose Download full book again to continue."] = "整本下载已暂停：共 %2 章，其中 %1 章失败。\n\n已完成章节已保留，再次选择“下载全书”即可继续。",
     ["Resuming downloaded chapter %1/%2"] = "跳过已下载章节 %1/%2",
     ["Verifying downloaded chapters %1/%2"] = "正在校验已下载章节 %1/%2",

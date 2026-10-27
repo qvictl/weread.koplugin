@@ -70,6 +70,8 @@ local RESUME_SKIP_BATCH_SIZE = 25
 -- Resumable footnote rescans: chapters per UI step and time budget per step.
 local FOOTNOTE_SCAN_BATCH_SIZE = 4
 local FOOTNOTE_SCAN_BUDGET_MS = 200
+-- Re-download passes for chapters that fail the final checkpoint check.
+local MAX_VERIFY_REDOWNLOAD_PASSES = 2
 -- Before each worker fork, wait (with backoff, yielding to the UI) for memory
 -- to free up, then stop the job instead of forking into a thrash. A full-book
 -- download keeps its checkpoint and can be resumed. Waiting is not a chapter
@@ -1439,6 +1441,22 @@ function Downloader:_step(dl)
         if dl.resumable and not dl.workspace_verified then
             local completed_count = self:_restoreFullDownloadCheckpoint(dl)
             if completed_count < dl.total then
+                -- A chapter that keeps "saving" without verifying (full
+                -- storage, broken directory entry, ...) would otherwise be
+                -- downloaded again forever (F11).
+                dl.verify_passes = (dl.verify_passes or 0) + 1
+                if dl.verify_passes > MAX_VERIFY_REDOWNLOAD_PASSES then
+                    logger.warn("full-book download paused: chapters do not verify:",
+                        "completed=", tostring(completed_count),
+                        "total=", tostring(dl.total),
+                        "passes=", tostring(dl.verify_passes - 1))
+                    self:_preserveWorkspace(dl, "verification_failed")
+                    if not dl.prefetch then
+                        self.show_info(T(_("Full-book download paused: %1 of %2 chapters could not be verified after downloading them again.\n\nCompleted chapters were kept. Choose Download full book again to retry."),
+                            tostring(dl.total - completed_count), tostring(dl.total)))
+                    end
+                    return
+                end
                 for chapter_index = 1, dl.total do
                     if not dl.completed[chapter_index] then
                         dl.index = chapter_index

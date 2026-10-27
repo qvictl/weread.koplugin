@@ -379,4 +379,46 @@ do
     scheduled = {}
 end
 
+-- F11: chapters that never verify are re-downloaded at most twice.
+do
+    local Content = require("weread.lib.content")
+    local original_complete = Content.full_download_completed_chapters
+    local original_fetch = Content.fetch_single_chapter_source
+    local fetches = 0
+    Content.fetch_single_chapter_source = function()
+        fetches = fetches + 1
+        return "<p>never verifies</p>"
+    end
+    Content.full_download_completed_chapters = function(_workspace, list)
+        local completed = {}
+        for index = 1, #list - 1 do completed[index] = true end
+        return completed
+    end
+    local infos = {}
+    downloader.show_info = function(text) infos[#infos + 1] = text end
+    local reason
+    local list = { { chapterUid = 1 }, { chapterUid = 2 }, { chapterUid = 3 } }
+    local dl = {
+        book = { book_id = "book" }, chapters = list, total = 3, index = 4,
+        selected = { list[1], list[2] }, bodies = {}, assets = {}, failed = {}, resumable = true,
+        workspace = {}, completed = {}, completed_count = 0, state = {},
+        footnote_scans = {}, on_complete = function(_ok, value) reason = value end,
+    }
+    downloader._active_job = dl
+    scheduled = {}
+    downloader:_step(dl)
+    local steps = 0
+    while #scheduled > 0 and steps < 200 do
+        steps = steps + 1
+        table.remove(scheduled, 1)()
+    end
+    Content.full_download_completed_chapters = original_complete
+    Content.fetch_single_chapter_source = original_fetch
+    expect(reason == "verification_failed" and fetches == 2,
+        "verification loop was not capped: fetches=" .. fetches .. " reason=" .. tostring(reason))
+    expect(infos[#infos]:find("could not be verified", 1, true),
+        "verification pause was not explained")
+    scheduled = {}
+end
+
 print(("downloader_resume_spec: %d checks"):format(checks))
