@@ -95,6 +95,7 @@ local ChapterListView = FocusManager:extend{
     on_select_download = nil,
     on_select = nil,
     on_close = nil,
+    on_closed = nil,
 }
 
 function ChapterListView:toolbar()
@@ -344,6 +345,7 @@ end
 
 function ChapterListView:onCloseWidget()
     UIManager:setDirty(nil, function() return "ui", self.dimen end)
+    if self.on_closed then self.on_closed(self) end
 end
 
 function ChapterListView:onClose()
@@ -366,6 +368,7 @@ function M.show(data, callbacks)
         on_select_download = callbacks.on_select_download,
         on_select = callbacks.on_select,
         on_close = callbacks.on_close,
+        on_closed = callbacks.on_closed,
     }
     UIManager:show(view)
     return WindowRegistry.track(view)

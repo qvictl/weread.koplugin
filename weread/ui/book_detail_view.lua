@@ -99,6 +99,7 @@ end
 local BookDetailView = FocusManager:extend{
     data = nil,
     on_refresh = nil,
+    on_closed = nil,
 }
 
 function BookDetailView:sectionTitle(text)
@@ -373,6 +374,7 @@ end
 
 function BookDetailView:onCloseWidget()
     UIManager:setDirty(nil, function() return "ui", self.dimen end)
+    if self.on_closed then self.on_closed(self) end
 end
 
 function BookDetailView:onClose()
@@ -386,6 +388,7 @@ function M.show(data, callbacks)
     local view = BookDetailView:new{
         data = data,
         on_refresh = callbacks.on_refresh,
+        on_closed = callbacks.on_closed,
     }
     UIManager:show(view)
     return WindowRegistry.track(view)

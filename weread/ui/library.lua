@@ -969,6 +969,9 @@ function M:showBookMenu(book)
         on_refresh = self:safeCallback(_("Get latest information"), function()
             self:refreshBookRecord(book, view)
         end),
+        on_closed = function(closed_view)
+            if self._book_detail_view == closed_view then self._book_detail_view = nil end
+        end,
     })
     self._book_detail_view = view
     return view
@@ -1464,10 +1467,12 @@ function M:showChapterList(book, on_close)
                 end)
             end,
             on_close = function()
-                if self._chapter_list_view == view then
+                if on_close then on_close() end
+            end,
+            on_closed = function(closed_view)
+                if self._chapter_list_view == closed_view then
                     self._chapter_list_view = nil
                 end
-                if on_close then on_close() end
             end,
         })
         state.view = view

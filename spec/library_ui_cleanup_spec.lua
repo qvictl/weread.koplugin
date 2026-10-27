@@ -56,11 +56,12 @@ end
 
 local detail_view = { id = "detail" }
 local chapter_view = { id = "chapters" }
+local detail_callbacks, chapter_callbacks
 package.preload["weread.ui.book_detail_view"] = function()
-    return { show = function() return detail_view end }
+    return { show = function(_data, callbacks) detail_callbacks = callbacks return detail_view end }
 end
 package.preload["weread.ui.chapter_list_view"] = function()
-    return { show = function() return chapter_view end }
+    return { show = function(_data, callbacks) chapter_callbacks = callbacks return chapter_view end }
 end
 
 local Library = require("weread.ui.library")
@@ -128,5 +129,36 @@ host.shelf_view = shelf_view
 host:openFile(nil)
 expect(#closed == 0 and host.shelf_view == shelf_view,
     "invalid open request unexpectedly closed the bookshelf")
+
+-- Closing a view releases the plugin's reference to it.
+closed, closed_set = {}, {}
+host:showBookMenu(book)
+host:showChapterList(book)
+chapter_callbacks.on_closed(chapter_view)
+detail_callbacks.on_closed(detail_view)
+expect(host._chapter_list_view == nil and host._book_detail_view == nil,
+    "closed views stayed referenced by the plugin")
+
+-- A scan started from the settings menu reports its result without
+-- opening the cache management page; an open page is rebuilt.
+package.preload["ui/widget/pathchooser"] = function() return {} end
+package.preload["weread.lib.scan"] = function() return {} end
+host.refreshCacheManagement = require("weread.ui.cache").refreshCacheManagement
+local cache_pages, messages = 0, {}
+host.showCacheManagement = function(self)
+    cache_pages = cache_pages + 1
+    self.cache_menu = { id = "cache page " .. cache_pages }
+end
+host.showTransientInfo = function(_self, text) messages[#messages + 1] = text end
+host:refreshCacheManagement("Scan complete")
+expect(cache_pages == 0 and messages[1] == "Scan complete",
+    "scan result opened a cache page the user never opened")
+host:showCacheManagement()
+host:refreshCacheManagement("Cache cleared")
+expect(cache_pages == 2 and closed[#closed].id == "cache page 1",
+    "open cache page was not rebuilt")
+closed_set[host.cache_menu] = true
+host:refreshCacheManagement("Cache cleared")
+expect(cache_pages == 2 and host.cache_menu == nil, "closed cache page was reopened")
 
 print(("library_ui_cleanup_spec: %d checks"):format(checks))

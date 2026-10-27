@@ -624,12 +624,16 @@ function M:showCacheManagement()
     self.cache_menu = self:showTrackedList(_("Cache management"), items, _("No cached items"))
 end
 
+-- Rebuild the cache management page if it is open. A scan or cleanup run
+-- from elsewhere (the settings menu) only reports its result: it must not
+-- open a page the user never asked for.
 function M:refreshCacheManagement(message)
-    if self.cache_menu then
-        UIManager:close(self.cache_menu)
-        self.cache_menu = nil
+    local menu = self.cache_menu
+    self.cache_menu = nil
+    if menu and UIManager:isWidgetShown(menu) then
+        UIManager:close(menu)
+        self:showCacheManagement()
     end
-    self:showCacheManagement()
     if message then
         self:showTransientInfo(message)
     end
