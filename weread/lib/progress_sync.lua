@@ -6,6 +6,10 @@ local ProgressSync = {}
 ProgressSync.__index = ProgressSync
 
 local OPEN_DELAY_SECONDS = 0.6
+-- A cloud jump into another chapter file is persisted for the ReaderUI that
+-- opens that file (a new plugin instance); it expires after this long, which
+-- also covers downloading the chapter first.
+local PENDING_JUMP_TTL_SECONDS = 10 * 60
 local RESUME_RECHECK_SECONDS = 5 * 60
 local PULL_RETRY_DELAY_SECONDS = 15
 local PULL_MAX_RETRIES = 3
@@ -377,12 +381,17 @@ function ProgressSync:_apply_remote(remote, context, options)
             fraction = target.fraction,
             remote = copy(remote),
             notify = options.manual == true,
+            created_at = self.now(),
         }
+        -- Opening the chapter file replaces this ReaderUI and this plugin
+        -- instance; the new one picks the jump up from the book record (F8).
+        self:_persist(context.book_id, { pending_jump = self.pending_jump })
         self.state = "switching_chapter"
         local open_ok, opened, open_error = pcall(
             self.open_chapter, context.book, target.chapter)
         if not open_ok or opened == false then
             self.pending_jump = nil
+            self:_persist(context.book_id, { pending_jump = false })
             self.state = "error"
             return false, (open_ok and open_error or opened)
                 or "target_chapter_unavailable"
@@ -1143,6 +1152,19 @@ end
 
 function ProgressSync:_apply_pending_jump(book_id)
     local pending = self.pending_jump
+    if not pending then
+        local ok, book = pcall(stored_book, self.settings, tostring(book_id))
+        pending = ok and type(book) == "table" and type(book.pending_jump) == "table"
+            and book.pending_jump or nil
+        if pending then
+            if self.now() - (tonumber(pending.created_at) or 0)
+                > PENDING_JUMP_TTL_SECONDS then
+                self:_persist(book_id, { pending_jump = false })
+                return false
+            end
+            pending.book_id = pending.book_id or book_id
+        end
+    end
     if not pending or tostring(pending.book_id) ~= tostring(book_id) then
         return false
     end
@@ -1153,6 +1175,7 @@ function ProgressSync:_apply_pending_jump(book_id)
         return false
     end
     self.pending_jump = nil
+    self:_persist(book_id, { pending_jump = false })
     local ok, err = self.goto_fraction(pending.fraction)
     if not ok then
         self.state = "error"
@@ -1181,7 +1204,9 @@ end
 
 function ProgressSync:cancel_pending_jump(reason)
     if not self.pending_jump then return false end
+    local book_id = self.pending_jump.book_id
     self.pending_jump = nil
+    if book_id then self:_persist(book_id, { pending_jump = false }) end
     self.dirty = false
     self.state = "unverified"
     self:_clear_verified(tostring(reason or "pending_jump_cancelled"))

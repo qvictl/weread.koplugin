@@ -1294,6 +1294,56 @@ test("teardown cancels timers and keeps unsent positions", function()
     eq(#f.uploads, 0, "nothing runs after teardown")
 end)
 
+test("a chapter jump survives the plugin instance that requested it (F8)", function()
+    local now = 1000
+    local f = fixture({
+        bookId = "book",
+        progress = 25,
+        chapterUid = 22,
+        chapterIdx = 2,
+        chapterOffset = 150,
+        updateTime = 10,
+    }, { now = function() return now end })
+    local current_chapter = chapters[1]
+    f.sync.get_file_context = function() return 1, current_chapter, false end
+    f.sync.open_chapter = function() return true end
+    f.document.page = 50
+    f.sync:on_reader_ready()
+    f.drain()
+    f.choices[1].use_remote()
+    eq(f.values.books.book.pending_jump.chapter_uid, 22, "jump persisted")
+    -- The chapter file opens in a new ReaderUI with a new plugin instance.
+    f.sync.pending_jump = nil
+    current_chapter = chapters[2]
+    now = now + 30
+    f.sync:on_reader_ready()
+    f.drain()
+    eq(f.jumps[#f.jumps], 0.5, "new instance applies the cloud offset")
+    eq(f.sync:status().verified, true, "and verifies")
+    eq(#f.choices, 1, "no second conflict dialog")
+    eq(f.values.books.book.pending_jump, nil, "persisted jump consumed")
+end)
+
+test("a stale persisted chapter jump is ignored", function()
+    local now = 1000
+    local f = fixture({
+        bookId = "book",
+        progress = 50,
+        chapterUid = 22,
+        chapterIdx = 2,
+        chapterOffset = 150,
+        updateTime = 10,
+    }, { now = function() return now end })
+    f.sync.get_file_context = function() return 2, chapters[2], false end
+    f.values.books.book.pending_jump = {
+        book_id = "book", chapter_uid = 22, fraction = 0.5, created_at = 0,
+    }
+    f.sync:on_reader_ready()
+    f.drain()
+    eq(#f.jumps, 0, "expired jump not applied")
+    eq(f.values.books.book.pending_jump, nil, "expired jump removed")
+end)
+
 print(string.format(
     "progress_sync_spec: %d checks, %d failure(s)", checks, failures))
 os.exit(failures == 0 and 0 or 1)
