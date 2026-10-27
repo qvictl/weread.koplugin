@@ -331,12 +331,13 @@ downloader._active_job = transferred
 downloader:_beginStandby()
 downloader:_ensureProgressDialog(transferred)
 trapper:wrap(function() downloader:_step(transferred) end)
-resumed({ xhtml = "<p>source</p>", state = { css = "body{}" },
-    book = { book_id = "book", psvts = "fresh" } })
-expect(child_pending and transferred.state.css == "body{}"
+-- With images enabled one worker fetches the text and the images.
+resumed({ xhtml = "<p>final</p>", assets = {}, state = { css = "body{}" },
+    book = { book_id = "book", psvts = "fresh" }, finalized = true })
+expect(transferred.state.css == "body{}"
     and transferred.book.psvts == "fresh" and transferred.book.token == nil,
     "source result lost CSS/session changes or retained stale credentials")
-resumed({ xhtml = "<p>final</p>", assets = {}, state = { css = "body{}" } })
+expect(child_pending == nil, "a second worker was forked for the chapter images")
 expect(transferred.bodies["1"] == "<p>final</p>" and transferred.index == 2
     and #transferred.selected == 1, "finalized child result was not saved in the parent")
 dialog.options.buttons[1][1].callback()
@@ -357,5 +358,217 @@ dl.trapper = { dismissableRunInSubprocess = function() return false end }
 local worker_ok, worker_err = pcall(downloader._runInterruptible, downloader, dl, function() end)
 expect(not worker_ok and tostring(worker_err):find("could not start download worker", 1, true)
     and not dl.cancelled, "worker launch failure was mistaken for user cancellation")
+
+-- Low memory: wait (yielding to the UI) before forking, then fork once it frees up.
+do
+    local gate_calls = 0
+    downloader.memory_gate = function()
+        gate_calls = gate_calls + 1
+        return gate_calls >= 3, gate_calls >= 3 and 200000 or 10000
+    end
+    local waiting = { book = {}, total = 1, trapper = trapper }
+    downloader:_ensureProgressDialog(waiting)
+    local value
+    local before = #scheduled
+    trapper:wrap(function()
+        value = downloader:_runInterruptible(waiting, function() return "unused" end)
+    end)
+    expect(child_pending == nil and #scheduled == before + 1, "fork happened under memory pressure")
+    table.remove(scheduled)()
+    expect(child_pending == nil and #scheduled == before + 1, "second low-memory check did not wait")
+    table.remove(scheduled)()
+    expect(child_pending ~= nil, "fork did not resume once memory freed up")
+    resumed("after-wait")
+    expect(value == "after-wait", "result lost after waiting for memory")
+end
+
+-- Memory never frees up: the job stops instead of skipping the chapter.
+do
+    local gate_calls = 0
+    downloader.memory_gate = function()
+        gate_calls = gate_calls + 1
+        return false, 50 * 1024, 96 * 1024
+    end
+    local starved = { book = {}, total = 1, trapper = trapper }
+    downloader:_ensureProgressDialog(starved)
+    local ok, err
+    trapper:wrap(function()
+        ok, err = pcall(downloader._runInterruptible, downloader, starved, function() end)
+    end)
+    expect(dialog.title:find("Waiting for free memory", 1, true)
+        and dialog.title:find("50 MB free, 96 MB needed", 1, true),
+        "low-memory wait did not show a stage: " .. tostring(dialog.title))
+    local waits = 0
+    while ok == nil and #scheduled > 0 do
+        table.remove(scheduled)()
+        waits = waits + 1
+    end
+    expect(waits == 6 and gate_calls == 7, "low-memory wait did not back off 6 times")
+    expect(child_pending == nil, "forked although memory never recovered")
+    expect(ok == false and tostring(err):find("weread_low_memory", 1, true),
+        "starved download did not stop with a low-memory error")
+
+    -- Resumable job: pause with the checkpoint kept, never count a failure.
+    local infos_before = #messages
+    local resumable = {
+        book = {}, chapters = { { chapterUid = 9 } }, total = 1, index = 1,
+        failed = {}, resumable = true, workspace = {}, standby_guard = true,
+        completed_count = 0,
+    }
+    local reason
+    resumable.on_complete = function(_ok, value) reason = value end
+    downloader._active_job = resumable
+    downloader:_beginStandby()
+    expect(downloader:_retryChapterSource(resumable, err) == false,
+        "low memory was retried as a chapter failure")
+    expect(#resumable.failed == 0 and resumable.index == 1,
+        "low memory skipped the chapter")
+    expect(reason == "low_memory" and downloader._active_job == nil
+        and downloader._standby_ref == 0, "low memory did not pause the resumable job")
+    expect(#messages == infos_before + 1
+        and messages[#messages]:find("Completed chapters were kept", 1, true)
+        and messages[#messages]:find("restart KOReader", 1, true),
+        "low-memory pause did not explain how to continue")
+
+    -- Non-resumable job: stop cleanly.
+    local plain = {
+        book = {}, chapters = { { chapterUid = 9 } }, total = 1, index = 1,
+        failed = {}, standby_guard = true,
+    }
+    plain.on_complete = function(_ok, value) reason = value end
+    downloader._active_job = plain
+    downloader:_beginStandby()
+    downloader:_failChapter(plain, err)
+    expect(#plain.failed == 0 and reason == "low_memory"
+        and downloader._active_job == nil and downloader._standby_ref == 0,
+        "low memory did not stop the non-resumable job cleanly")
+    expect(messages[#messages]:find("Download stopped: not enough free memory", 1, true),
+        "low-memory stop was not reported")
+    downloader.memory_gate = function() return true end
+end
+
+-- Cancelling while waiting for memory wakes the job at once and never forks.
+do
+    downloader.memory_gate = function() return false, 1000, 98304 end
+    local waiting = { book = {}, total = 1, trapper = trapper }
+    downloader:_ensureProgressDialog(waiting)
+    local returned, value = false, "unset"
+    trapper:wrap(function()
+        value = downloader:_runInterruptible(waiting, function() return "unused" end)
+        returned = true
+    end)
+    expect(not returned and dialog.dismiss_callback ~= nil,
+        "memory wait is not cancellable from the dialog")
+    local pending_timer = table.remove(scheduled)
+    dialog.options.buttons[1][1].callback()
+    expect(returned and value == nil and waiting.cancelled and child_pending == nil,
+        "cancel during the memory wait did not stop the job")
+    pending_timer() -- the late timer must not resume the finished coroutine
+    expect(child_pending == nil, "late memory-wait timer resumed the job")
+    downloader.memory_gate = function() return true end
+end
+
+-- The default gate collects garbage and honours max(96 MB, heap + 48 MB).
+do
+    local MemoryGate = require("weread.lib.memory_gate")
+    expect(MemoryGate.fork_requirement_kb(10 * 1024) == 96 * 1024,
+        "small heaps must still keep the 96 MB floor")
+    expect(MemoryGate.fork_requirement_kb(64 * 1024) == 112 * 1024,
+        "large heaps must add 48 MB of headroom")
+    local ok, available, required = MemoryGate.check_fork(function()
+        return "MemTotal: 480000 kB\nMemAvailable: 90000 kB\n"
+    end)
+    expect(ok == false and available == 90000 and required >= 96 * 1024,
+        "90 MB available must not pass the fork gate")
+    ok = MemoryGate.check_fork(function() return "MemAvailable: 400000 kB\n" end)
+    expect(ok == true, "plenty of memory must pass the fork gate")
+    expect(MemoryGate.check_fork(function() return nil end) == true,
+        "unknown memory must not block downloads")
+    expect(MemoryGate.parse_rss_kb("Name:\treader\nVmRSS:\t  99196 kB\n") == 99196,
+        "VmRSS was not parsed")
+    local snapshot_downloader = Downloader:new{
+        read_meminfo = function() return "MemAvailable: 123 kB\n" end,
+        read_self_status = function() return "VmRSS: 456 kB\n" end,
+    }
+    local avail, rss = snapshot_downloader:_memorySnapshot()
+    expect(avail == 123 and rss == 456, "memory snapshot did not use injected readers")
+end
+
+-- The worker child reseeds its PRNG and postpones its first GC cycle before
+-- running the task (F1 copy-on-write, F12 identical random parameters).
+do
+    local order = {}
+    local inline_trapper = {
+        dismissableRunInSubprocess = function(_self, task) return true, task() end,
+    }
+    local child_dl = { book = {}, total = 1, trapper = inline_trapper }
+    downloader.prepare_worker_child = function() order[#order + 1] = "prepare" end
+    local value = downloader:_runInterruptible(child_dl, function()
+        order[#order + 1] = "task"
+        return "value"
+    end)
+    expect(value == "value" and order[1] == "prepare" and order[2] == "task",
+        "child preparation did not run before the task")
+    downloader.prepare_worker_child = nil
+
+    math.randomseed(42)
+    local parent_draw = math.random(0, 1000000)
+    math.randomseed(42)
+    local child_draw = downloader:_runInterruptible(child_dl, function()
+        return math.random(0, 1000000)
+    end)
+    expect(child_draw ~= parent_draw, "worker child inherited the parent PRNG sequence")
+    local child_pause = collectgarbage("setpause", 200)
+    collectgarbage("restart")
+    expect(child_pause >= 200 and child_pause <= 1000 and child_pause ~= 200,
+        "worker child did not postpone its first GC cycle: " .. tostring(child_pause))
+end
+
+-- One fork per chapter: the worker runs source + images, the parent never
+-- forks again; without images only the source runs in the worker.
+do
+    local forks, calls = 0, {}
+    local inline_trapper = {
+        wrap = function(_self, callback) callback() end,
+        dismissableRunInSubprocess = function(_self, task)
+            forks = forks + 1
+            return true, task()
+        end,
+    }
+    Content.fetch_single_chapter_source = function(_client, _settings, _book, chapter)
+        calls[#calls + 1] = "source"
+        return "<p>source " .. tostring(chapter.chapterUid) .. "</p>"
+    end
+    Content.finalize_single_chapter_content = function(_c, _s, _b, _chapter, xhtml)
+        calls[#calls + 1] = "finalize"
+        return xhtml:gsub("source", "final"), { { href = "images/a.png" } }
+    end
+    local images_enabled = true
+    downloader.settings.get = function(_self, key, default)
+        if key == "cache" then return { download_book_images = images_enabled } end
+        return default
+    end
+    local function one_chapter_job()
+        return {
+            book = { book_id = "book" }, chapters = { { chapterUid = 7 } },
+            total = 1, index = 1, selected = {}, bodies = {}, state = {},
+            assets = {}, failed = {}, trapper = inline_trapper,
+        }
+    end
+    local job = one_chapter_job()
+    downloader:_step(job)
+    expect(forks == 1 and calls[1] == "source" and calls[2] == "finalize",
+        "source and images did not run in a single worker")
+    expect(job.bodies["7"] == "<p>final 7</p>" and #job.assets == 1 and job.index == 2,
+        "single-worker chapter result was not staged")
+
+    images_enabled = false
+    forks, calls = 0, {}
+    job = one_chapter_job()
+    downloader:_step(job)
+    expect(forks == 1 and #calls == 2 and calls[1] == "source" and calls[2] == "finalize",
+        "text-only chapter did not finalize in the parent after one worker")
+    expect(job.bodies["7"] == "<p>final 7</p>", "text-only chapter was not staged")
+end
 
 print(("downloader_lifecycle_spec: %d checks"):format(checks))

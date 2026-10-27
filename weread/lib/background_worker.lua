@@ -6,6 +6,7 @@
 local FFIUtil = require("ffi/util")
 local UIManager = require("ui/uimanager")
 local lfs = require("libs/libkoreader-lfs")
+local MemoryGate = require("weread.lib.memory_gate")
 
 local ok_json, Json = pcall(require, "json")
 if not ok_json then Json = require("rapidjson") end
@@ -18,6 +19,17 @@ local DEFAULT_TIMEOUT_SECONDS = 180
 local DEFAULT_CANCEL_GRACE_SECONDS = 5
 local DEFAULT_POLL_INTERVAL = 0.25
 local MEMORY_COOLDOWN_SECONDS = 30
+
+-- Seconds on a clock that stops while the device is suspended. Timeouts must
+-- not use wall-clock time: after a long suspend every running job would look
+-- stalled and be killed on resume (the child was frozen too).
+local function monotonic_seconds()
+    local ok, time = pcall(require, "ui/time")
+    if ok and type(time.now) == "function" and type(time.to_number) == "function" then
+        return time.to_number(time.now())
+    end
+    return os.time()
+end
 
 local function read_file(path)
     local file = io.open(path, "rb")
@@ -47,16 +59,7 @@ local function ensure_dir(path)
     return lfs.mkdir(path)
 end
 
-local function available_memory_kb(raw)
-    local values = {}
-    for key, value in tostring(raw or ""):gmatch("([%a_]+):%s*(%d+)%s*kB") do
-        values[key] = tonumber(value)
-    end
-    if values.MemAvailable then return values.MemAvailable end
-    if values.MemFree then
-        return values.MemFree + (values.Buffers or 0) + (values.Cached or 0)
-    end
-end
+local available_memory_kb = MemoryGate.parse_available_kb
 
 local function memory_error(value)
     local text = tostring(value or ""):lower()
@@ -97,6 +100,7 @@ function Worker:new(options)
         poll_interval = tonumber(options.poll_interval)
             or DEFAULT_POLL_INTERVAL,
         now = options.now or os.time,
+        clock = options.clock or options.now or monotonic_seconds,
         read_memory = options.read_memory or function()
             return read_file("/proc/meminfo")
         end,
@@ -239,7 +243,7 @@ function Worker:_launch(request)
     end
     self.job = {
         request = request, pid = pid, started_at = now,
-        last_progress_at = now, progress_path = progress_path,
+        last_progress_at = self.clock(), progress_path = progress_path,
         result_path = result_path, cancel_path = cancel_path,
     }
     if type(request.options.on_launch) == "function" then
@@ -292,7 +296,7 @@ function Worker:cancel(request, reason)
     if not job.cancel_requested_at then
         job.request.cancel_reason = reason or "cancelled"
         local ok = atomic_write(job.cancel_path, "1")
-        job.cancel_requested_at = self.now()
+        job.cancel_requested_at = self.clock()
         if not ok then
             pcall(self.runner.terminate, job.pid)
             job.terminated = true
@@ -309,13 +313,14 @@ function Worker:_poll()
     if progress and raw ~= job.last_progress_raw
         and tostring(progress.task_token or "") == job.request.token then
         job.last_progress_raw = raw
-        job.last_progress_at = tonumber(progress.updated_at) or self.now()
+        -- When the parent saw progress, not the child's wall-clock stamp.
+        job.last_progress_at = self.clock()
         if type(job.request.options.on_progress) == "function" then
             pcall(job.request.options.on_progress, progress)
         end
     end
 
-    local now = self.now()
+    local now = self.clock()
     if job.cancel_requested_at and not job.terminated
         and now - job.cancel_requested_at >= self.cancel_grace then
         pcall(self.runner.terminate, job.pid)

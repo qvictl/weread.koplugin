@@ -4,6 +4,11 @@ local WeRead = require("weread.lib.protocol")
 local logger = require("weread.lib.logger")
 
 local Content = {}
+-- Request timeouts {block, total} in seconds for the book download path. The
+-- client default has no total limit, so a trickling server could keep a
+-- download worker alive forever (F10).
+local CONTENT_TIMEOUT = { 15, 60 }
+local FILE_TIMEOUT = { 20, 120 }
 local b64chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
 -- Forward declarations used by the resumable-download checkpoint helpers.
 local xml_escape
@@ -202,21 +207,32 @@ local function basename(path)
     return tostring(path or ""):match("([^/]+)$") or tostring(path or "")
 end
 
+-- Asset file names end up raw in src="../images/<name>" and on the Kindle's
+-- FAT storage, so keep them to case-insensitively unique, URL/XML-safe ASCII.
+-- "cover.*" is reserved for the cover image save_book_epub() adds itself.
+local function asset_name_taken(used, candidate)
+    local key = candidate:lower()
+    return used[key] or used[candidate] or key:match("^cover%.") ~= nil
+end
+
 local function unique_asset_name(used, name, ext)
-    local base = filename_safe(name)
+    local base = filename_safe(name):gsub("[^%w%._-]", "_"):gsub("_+", "_")
+    if base:gsub("[_%.]", "") == "" then base = "img" end
     if not base:lower():match(ext:gsub("%.", "%%.") .. "$") then
         base = base .. ext
     end
     local candidate = base
     local index = 2
-    while used[candidate] do
+    while asset_name_taken(used, candidate) do
         local stem = base:gsub("%.[^%.]+$", "")
         candidate = stem .. "-" .. tostring(index) .. ext
         index = index + 1
     end
-    used[candidate] = true
+    used[candidate:lower()] = true
     return candidate
 end
+
+Content._unique_asset_name = unique_asset_name -- exposed for specs
 
 local function write_file(path, data)
     local file, err = io.open(path, "wb")
@@ -312,13 +328,47 @@ function Content.full_download_rendered_chapter_path(workspace, chapter, chapter
     return workspace.rendered_text_dir .. "/" .. workspace_chapter_name(chapter, chapter_index)
 end
 
+-- Checkpoint files are written whole by atomic_write and always end with
+-- this tag (see full_download_chapter_xhtml). The marker sits in the first
+-- few hundred bytes.
+local CHECKPOINT_HEAD_BYTES = 512
+local CHECKPOINT_TAIL = "</html>"
+-- Chapters written this close to the newest checkpoint may not have reached
+-- the storage before a crash or hard power-off (FAT keeps their size but not
+-- necessarily their data), so their full digest is checked again.
+local CHECKPOINT_RECENT_SECONDS = 60
+local LAST_WRITTEN_NAME = "last-written"
+
+local function lfs_module()
+    local ok, lfs = pcall(require, "libs/libkoreader-lfs")
+    if not ok or type(lfs) ~= "table" or not lfs.attributes then
+        ok, lfs = pcall(require, "lfs")
+    end
+    if ok and type(lfs) == "table" and lfs.attributes then return lfs end
+end
+
+-- Size plus the head and tail of a file, without reading the whole file.
+local function probe_checkpoint_file(path)
+    local file = path and io.open(path, "rb")
+    if not file then return nil end
+    local size = file:seek("end")
+    local head, tail = "", ""
+    if size then
+        file:seek("set", 0)
+        head = file:read(math.min(size, CHECKPOINT_HEAD_BYTES)) or ""
+        file:seek("set", math.max(0, size - #CHECKPOINT_TAIL))
+        tail = file:read(#CHECKPOINT_TAIL) or ""
+    end
+    local closed = file:close()
+    if not closed then return nil end
+    return size, head, tail
+end
+
 function Content.full_download_rendered_chapter_exists(workspace, chapter, chapter_index)
     local path = Content.full_download_rendered_chapter_path(workspace, chapter, chapter_index)
-    local file = path and io.open(path, "rb")
-    if not file then return false end
-    local xhtml = file:read("*a") or ""
-    local closed = file:close()
-    return closed and xhtml:find(workspace_chapter_marker(chapter), 1, true) ~= nil
+    local size, head, tail = probe_checkpoint_file(path)
+    return size ~= nil and head:find(workspace_chapter_marker(chapter), 1, true) ~= nil
+        and tail == CHECKPOINT_TAIL
 end
 
 local function read_full_download_checkpoint(path)
@@ -334,18 +384,29 @@ local function read_full_download_checkpoint(path)
     return uid, length, digest
 end
 
-function Content.full_download_chapter_exists(workspace, chapter, chapter_index)
+-- A checkpoint is complete when its .meta names this chapter and the chapter
+-- file has the recorded length, the chapter marker and the closing tag. Pass
+-- verify_digest to also re-read the file and compare its SHA-256 (slow on the
+-- device: pure Lua, a few seconds per MB). The .meta format is unchanged
+-- since v1.6.0, so existing workspaces resume as they are.
+function Content.full_download_chapter_exists(workspace, chapter, chapter_index, verify_digest)
     local path = Content.full_download_chapter_path(workspace, chapter, chapter_index)
-    local file = path and io.open(path, "rb")
+    local uid, length, digest = read_full_download_checkpoint(
+        Content.full_download_checkpoint_path(workspace, chapter, chapter_index))
+    if not path or uid ~= basename_safe(chapter and chapter.chapterUid or "unknown") then
+        return false
+    end
+    local marker = workspace_chapter_marker(chapter)
+    if not verify_digest then
+        local size, head, tail = probe_checkpoint_file(path)
+        return size == length and head:find(marker, 1, true) ~= nil
+            and tail == CHECKPOINT_TAIL
+    end
+    local file = io.open(path, "rb")
     if not file then return false end
     local xhtml = file:read("*a") or ""
     local closed = file:close()
-    if not closed or xhtml:find(workspace_chapter_marker(chapter), 1, true) == nil then
-        return false
-    end
-    local uid, length, digest = read_full_download_checkpoint(
-        Content.full_download_checkpoint_path(workspace, chapter, chapter_index))
-    return uid == basename_safe(chapter and chapter.chapterUid or "unknown")
+    return closed and xhtml:find(marker, 1, true) ~= nil
         and length == #xhtml
         and digest == Crypto.sha256_hex(xhtml)
 end
@@ -400,7 +461,12 @@ function Content.save_full_download_chapter(workspace, chapter, chapter_index, x
     local checkpoint_path = Content.full_download_checkpoint_path(workspace, chapter, chapter_index)
     if not path or not checkpoint_path then return nil, "missing full-book workspace" end
     local chapter_xhtml = full_download_chapter_xhtml(chapter, chapter_index, xhtml)
-    local ok, err = atomic_write(path, chapter_xhtml)
+    -- Record which chapter is being written before writing it, so a resume
+    -- re-verifies its digest even if the clock or file times are off.
+    local ok, err = atomic_write(workspace.checkpoint_dir .. "/" .. LAST_WRITTEN_NAME,
+        "index=" .. tostring(tonumber(chapter_index) or 0) .. "\n")
+    if not ok then error(err or "could not checkpoint chapter") end
+    ok, err = atomic_write(path, chapter_xhtml)
     if not ok then error(err or "could not checkpoint chapter") end
     local checkpoint = table.concat({
         "uid=" .. basename_safe(chapter and chapter.chapterUid or "unknown"),
@@ -447,13 +513,65 @@ function Content.load_full_download_css(workspace)
     return css
 end
 
-function Content.full_download_completed_chapters(workspace, chapters)
-    local completed = {}
-    for chapter_index, chapter in ipairs(chapters or {}) do
-        if Content.full_download_chapter_exists(workspace, chapter, chapter_index) then
-            completed[chapter_index] = true
+-- Chapter indexes whose digest must be checked again: the one recorded as
+-- being written last, plus every checkpoint whose .meta changed within
+-- CHECKPOINT_RECENT_SECONDS of the newest one. Returns nil (check them all)
+-- when neither is known, e.g. a v1.6.0 workspace without file times.
+local function recent_full_download_checkpoints(workspace, chapters)
+    local recent, known = {}, false
+    local file = workspace and workspace.checkpoint_dir
+        and io.open(workspace.checkpoint_dir .. "/" .. LAST_WRITTEN_NAME, "rb")
+    if file then
+        local index = tonumber((file:read("*a") or ""):match("index=(%d+)"))
+        file:close()
+        if index then
+            recent[index] = true
+            known = true
         end
     end
+    local lfs = lfs_module()
+    if lfs then
+        local times, newest = {}, nil
+        for chapter_index, chapter in ipairs(chapters or {}) do
+            local ok, modified = pcall(lfs.attributes, Content.full_download_checkpoint_path(
+                workspace, chapter, chapter_index), "modification")
+            modified = ok and tonumber(modified) or nil
+            if modified then
+                times[chapter_index] = modified
+                if not newest or modified > newest then newest = modified end
+            end
+        end
+        if newest then
+            known = true
+            for chapter_index, modified in pairs(times) do
+                if modified >= newest - CHECKPOINT_RECENT_SECONDS then
+                    recent[chapter_index] = true
+                end
+            end
+        end
+    end
+    return known and recent or nil
+end
+
+-- Cheap enough for the UI loop on a large book: one small .meta read and a
+-- head/tail probe per chapter; only recently written chapters are hashed.
+function Content.full_download_completed_chapters(workspace, chapters)
+    local completed = {}
+    local recent = recent_full_download_checkpoints(workspace, chapters)
+    local hashed, count = 0, 0
+    for chapter_index, chapter in ipairs(chapters or {}) do
+        local verify_digest = recent == nil or recent[chapter_index] == true
+        if Content.full_download_chapter_exists(
+            workspace, chapter, chapter_index, verify_digest) then
+            completed[chapter_index] = true
+            count = count + 1
+            if verify_digest then hashed = hashed + 1 end
+        end
+    end
+    logger.info("full-book checkpoints verified:",
+        "chapters=", tostring(#(chapters or {})),
+        "completed=", tostring(count),
+        "digest_checked=", tostring(hashed))
     return completed
 end
 
@@ -489,7 +607,7 @@ function Content.full_download_workspace_used_asset_names(workspace)
     local used = {}
     for _, asset in ipairs(Content.full_download_workspace_assets(workspace)) do
         local name = basename(asset.href)
-        if name ~= "" then used[name] = true end
+        if name ~= "" then used[name:lower()] = true end
     end
     return used
 end
@@ -715,36 +833,60 @@ local function checked_body(response_text)
     return body
 end
 
+-- Base64 decoding with a byte lookup table. Accepts the standard and the
+-- URL-safe alphabet, ignores padding and any other byte, and drops trailing
+-- bits that do not fill a byte (same output as the original bit-string
+-- implementation, which allocated ~46x its input in garbage, F1.4).
+local B64_VALUES = {}
+for index = 1, #b64chars do B64_VALUES[b64chars:byte(index)] = index - 1 end
+B64_VALUES[("-"):byte()] = 62
+B64_VALUES[("_"):byte()] = 63
+local B64_CHUNK_BYTES = 3 * 1024 -- below LuaJIT's unpack() limit
+local unpack_bytes = table.unpack or unpack
+
 local function base64_decode(data)
-    data = data:gsub("-", "+"):gsub("_", "/")
-    local pad = #data % 4
-    if pad > 0 then
-        data = data .. string.rep("=", 4 - pad)
+    data = tostring(data or "")
+    if data:find("[^A-Za-z0-9+/_%-]") then
+        data = data:gsub("[^A-Za-z0-9+/_%-]", "")
     end
-    data = data:gsub("[^" .. b64chars .. "=]", "")
-    return (data:gsub(".", function(char)
-        if char == "=" then
-            return ""
+    local byte, char, floor = string.byte, string.char, math.floor
+    local values = B64_VALUES
+    local parts, part_count = {}, 0
+    local out, out_count = {}, 0
+    local length = #data
+    local full = length - length % 4
+    for index = 1, full, 4 do
+        local a, b, c, d = byte(data, index, index + 3)
+        local n = values[a] * 262144 + values[b] * 4096 + values[c] * 64 + values[d]
+        out[out_count + 1] = floor(n / 65536)
+        out[out_count + 2] = floor(n / 256) % 256
+        out[out_count + 3] = n % 256
+        out_count = out_count + 3
+        if out_count >= B64_CHUNK_BYTES then
+            part_count = part_count + 1
+            parts[part_count] = char(unpack_bytes(out, 1, out_count))
+            out_count = 0
         end
-        local bits = ""
-        local index = b64chars:find(char, 1, true) - 1
-        for bit = 6, 1, -1 do
-            bits = bits .. (index % 2 ^ bit - index % 2 ^ (bit - 1) > 0 and "1" or "0")
-        end
-        return bits
-    end):gsub("%d%d%d?%d?%d?%d?%d?%d?", function(bits)
-        if #bits ~= 8 then
-            return ""
-        end
-        local byte = 0
-        for i = 1, 8 do
-            if bits:sub(i, i) == "1" then
-                byte = byte + 2 ^ (8 - i)
-            end
-        end
-        return string.char(byte)
-    end))
+    end
+    local rest = length - full
+    if rest == 2 then
+        local a, b = byte(data, full + 1, full + 2)
+        out_count = out_count + 1
+        out[out_count] = values[a] * 4 + floor(values[b] / 16)
+    elseif rest == 3 then
+        local a, b, c = byte(data, full + 1, full + 3)
+        local n = values[a] * 4096 + values[b] * 64 + values[c]
+        out[out_count + 1] = floor(n / 1024)
+        out[out_count + 2] = floor(n / 4) % 256
+        out_count = out_count + 2
+    end
+    if out_count > 0 then
+        part_count = part_count + 1
+        parts[part_count] = char(unpack_bytes(out, 1, out_count))
+    end
+    return table.concat(parts)
 end
+Content._base64_decode = base64_decode -- exposed for specs
 
 local function swap_positions(encoded)
     local length = #encoded
@@ -1196,7 +1338,9 @@ function Content.download_remote_images(client, xhtml, used_names, progress)
             return "src=" .. quote .. "../" .. cached_href .. quote
         end
         local ok, data = pcall(function()
-            return client:get_binary(url, { referer = "https://weread.qq.com/" })
+            return client:get_binary(url, {
+                referer = "https://weread.qq.com/", timeout = FILE_TIMEOUT,
+            })
         end)
         if not ok or not data or #data == 0 then
             return "src=" .. quote .. src .. quote
@@ -1232,7 +1376,7 @@ function Content.download_chapter_assets(client, book, chapter, used_names)
     elseif tar_url:match("^/") then
         tar_url = "https://weread.qq.com" .. tar_url
     end
-    local raw = client:get_binary(tar_url, { referer = referer })
+    local raw = client:get_binary(tar_url, { referer = referer, timeout = FILE_TIMEOUT })
     local assets = {}
     local src_map = {}
     for entry_index, entry in ipairs(tar_entries(raw)) do
@@ -1394,6 +1538,7 @@ function Content.download_chapter_assets_to_files(client, book, chapter, used_na
     client:download_to_file(tar_url, tar_path, {
         referer = referer,
         max_bytes = MAX_TAR_ENTRY_BYTES,
+        timeout = FILE_TIMEOUT,
     })
     local input = assert(io.open(tar_path, "rb"))
     local signature = input:read(4) or ""
@@ -1434,6 +1579,7 @@ function Content.download_remote_images_to_files(client, xhtml, used_names, work
             client:download_to_file(url, incoming, {
                 referer = "https://weread.qq.com/",
                 max_bytes = 64 * 1024 * 1024,
+                timeout = FILE_TIMEOUT,
             })
         end)
         if not ok then
@@ -1474,7 +1620,9 @@ end
 function Content.ensure_reader_state(client, book)
     local book_id = book.book_id or book.bookId
     local reader_url = book.reader_url or WeRead.reader_url(book_id)
-    local reader_html = client:get_text(reader_url, { referer = reader_url })
+    local reader_html = client:get_text(reader_url, {
+        referer = reader_url, timeout = CONTENT_TIMEOUT,
+    })
     local state = Content.extract_reader_state(reader_html, function(encoded)
         return client:json_decode(encoded)
     end)
@@ -1513,7 +1661,7 @@ function Content.fetch_catalog(client, book)
     local reader_url = book.reader_url or WeRead.reader_url(book_id)
     local catalog = client:post_json("https://weread.qq.com/web/book/chapterInfos", {
         bookIds = { tostring(book_id) },
-    }, { referer = reader_url })
+    }, { referer = reader_url, timeout = CONTENT_TIMEOUT })
     local chapters = Content.readable_chapters(Content.normalize_chapters(catalog, book_id))
     book.chapters = chapters
     return chapters
@@ -1534,9 +1682,10 @@ function Content.fetch_chapter_shard(client, _settings, book, chapter, endpoint)
         sc = 1,
         style = is_style_shard,
     })
-    local text, code = client:request({
+    local text, code, _headers, status = client:request({
         url = "https://weread.qq.com" .. endpoint,
         method = "POST",
+        timeout = CONTENT_TIMEOUT,
         headers = {
             ["Content-Type"] = "application/json;charset=UTF-8",
             ["Origin"] = "https://weread.qq.com",
@@ -1545,7 +1694,10 @@ function Content.fetch_chapter_shard(client, _settings, book, chapter, endpoint)
         body = client:json_encode(params),
     })
     if not code or code < 200 or code >= 300 then
-        error(endpoint .. " failed: HTTP " .. tostring(code or "unknown"))
+        -- Keep the transport status ("timeout", "wantread", ...) so the
+        -- downloader can tell a network outage from a server answer.
+        error(endpoint .. " failed: HTTP " .. tostring(code or "unknown")
+            .. ((not code and status) and (" (" .. tostring(status) .. ")") or ""))
     end
     if text == "{}" then
         error(endpoint .. " returned empty object")

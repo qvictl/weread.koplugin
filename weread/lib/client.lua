@@ -34,11 +34,18 @@ local function scalar_header_value(headers, name)
     return value
 end
 
-local function http_error(client, code, text, headers)
-    text = text or ""
+-- `status` is LuaSocket's transport result when no HTTP status arrived
+-- ("timeout", "wantread", "closed", "connection refused", ...). Keep it in
+-- the message: "HTTP nil" alone hides why the request failed.
+local function http_error(client, code, text, headers, status)
+    text = type(text) == "string" and text or ""
     local content_type = tostring(header_value(headers, "content-type") or "unknown")
+    local head = "HTTP " .. tostring(code)
+    if code == nil and status ~= nil and tostring(status) ~= "" then
+        head = head .. " (" .. tostring(status):gsub("[%c]+", " "):sub(1, 120) .. ")"
+    end
     local parts = {
-        "HTTP " .. tostring(code),
+        head,
         "content_type=" .. content_type,
         "body_bytes=" .. tostring(#text),
     }
@@ -94,9 +101,30 @@ local function log_error(err)
     return text
 end
 
+-- Enough to see errCode/errMsg or the start of an HTML error page. Full reader
+-- pages are hundreds of KB, bloat crash.log on the device's slow storage and
+-- contain the user's reading data (F8).
+local LOG_BODY_MAX_BYTES = 300
+-- Only this much of a body is cleaned up, so a huge page costs no more.
+local LOG_BODY_SCAN_BYTES = 4096
+
+local function log_body_excerpt(text)
+    text = type(text) == "string" and text or ""
+    local excerpt = text:sub(1, LOG_BODY_SCAN_BYTES)
+    excerpt = excerpt:gsub("<[Ss][Cc][Rr][Ii][Pp][Tt].-</[Ss][Cc][Rr][Ii][Pp][Tt]%s*>", " ")
+        :gsub("<[Ss][Tt][Yy][Ll][Ee].-</[Ss][Tt][Yy][Ll][Ee]%s*>", " ")
+        :gsub("<[^>]*>", " ")
+        :gsub("[%c%s]+", " ")
+    excerpt = excerpt:match("^%s*(.-)%s*$") or ""
+    if #excerpt > LOG_BODY_MAX_BYTES or #text > LOG_BODY_SCAN_BYTES then
+        excerpt = excerpt:sub(1, LOG_BODY_MAX_BYTES) .. "...(truncated)"
+    end
+    return excerpt
+end
+
 local function log_response(label, context, text)
     context = context or {}
-    text = text or ""
+    text = type(text) == "string" and text or ""
     logger.err(
         label,
         "method=", tostring(context.method or "unknown"),
@@ -105,7 +133,7 @@ local function log_response(label, context, text)
         "status=", tostring(context.code or "unknown"),
         "content_type=", tostring(header_value(context.headers, "content-type") or "unknown"),
         "body_bytes=", tostring(#text),
-        "response_body=", text
+        "response_body=", log_body_excerpt(text)
     )
 end
 
@@ -408,14 +436,25 @@ function Client:download_to_file(url, path, opts)
 
     local bytes = 0
     local max_bytes = tonumber(opts.max_bytes)
+    -- This sink replaces socketutil's, so enforce the total timeout here:
+    -- a trickling server must not keep a worker alive forever (F10).
+    local total_timeout = type(opts.timeout) == "table" and tonumber(opts.timeout[2]) or nil
+    local first_chunk_at
     local function reopen()
         if handle then handle:close() end
         handle, open_err = io.open(part_path, "wb")
         if not handle then error(open_err or "could not reset download file") end
         bytes = 0
+        first_chunk_at = nil
     end
     local function sink(chunk)
         if not chunk then return 1 end
+        if total_timeout and total_timeout >= 0 then
+            first_chunk_at = first_chunk_at or os.time()
+            if os.time() - first_chunk_at > total_timeout then
+                return nil, "sink timeout"
+            end
+        end
         if max_bytes and bytes + #chunk > max_bytes then
             return nil, "download exceeds size limit"
         end
@@ -442,7 +481,7 @@ function Client:download_to_file(url, path, opts)
     request_opts.accept = nil
     request_opts.referer = nil
 
-    local ok, text, code, resp_headers = pcall(function()
+    local ok, text, code, resp_headers, status = pcall(function()
         return self:request_follow(request_opts)
     end)
     if handle then handle:close() end
@@ -453,7 +492,7 @@ function Client:download_to_file(url, path, opts)
     end
     if not code or code < 200 or code >= 300 then
         pcall(os.remove, part_path)
-        error(http_error(self, code, text, resp_headers))
+        error(http_error(self, code, text, resp_headers, status))
     end
     if bytes == 0 then
         pcall(os.remove, part_path)
@@ -480,7 +519,7 @@ function Client:post_json(url, data, opts)
             ["Origin"] = "https://weread.qq.com",
             ["Referer"] = referer or "https://weread.qq.com/",
         }})
-    local text, code, resp_headers = self:request(req_opts)
+    local text, code, resp_headers, status = self:request(req_opts)
     if code and code >= 200 and code < 300 then
         return self:decode_http_json(text, {
             method = "POST",
@@ -490,7 +529,7 @@ function Client:post_json(url, data, opts)
             headers = resp_headers,
         }), code, resp_headers
     end
-    error(http_error(self, code, text, resp_headers))
+    error(http_error(self, code, text, resp_headers, status))
 end
 
 function Client:get_text(url, opts)
@@ -504,11 +543,11 @@ function Client:get_text(url, opts)
             ["Accept"] = accept or "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
             ["Referer"] = referer or "https://weread.qq.com/",
         }})
-    local text, code, resp_headers = self:request(req_opts)
+    local text, code, resp_headers, status = self:request(req_opts)
     if code and code >= 200 and code < 300 then
         return text, code, resp_headers
     end
-    error(http_error(self, code, text, resp_headers))
+    error(http_error(self, code, text, resp_headers, status))
 end
 
 function Client:get_public_text(url, opts)
@@ -520,11 +559,11 @@ function Client:get_public_text(url, opts)
             ["Referer"] = header_value(opts.headers, "Referer") or opts.referer or "https://mp.weixin.qq.com/",
         }
     })
-    local text, code, resp_headers, _status, final_url = self:request_follow(
+    local text, code, resp_headers, status, final_url = self:request_follow(
         merge_req_opts(req_opts, { url = url, method = "GET" })
     )
     if not code or code < 200 or code >= 300 then
-        error(http_error(self, code, text, resp_headers))
+        error(http_error(self, code, text, resp_headers, status))
     end
     return text, {
         code = code,
@@ -543,13 +582,13 @@ function Client:get_binary(url, opts)
             ["Referer"] = header_value(opts.headers, "Referer") or opts.referer or "https://weread.qq.com/",
         }
     })
-    local text, code, resp_headers = self:request_follow(
+    local text, code, resp_headers, status = self:request_follow(
         merge_req_opts(req_opts, { url = url, method = "GET" })
     )
     if code and code >= 200 and code < 300 then
         return text, code, resp_headers
     end
-    error(http_error(self, code, text, resp_headers))
+    error(http_error(self, code, text, resp_headers, status))
 end
 
 function Client:renew_cookie()
@@ -707,7 +746,7 @@ function Client:get_mp_articles(book_id, max_idx, count, wr_ticket)
         custom_headers["x-wrpa-0"] = wrpa
     end
 
-    local text, code, resp_headers = self:request({
+    local text, code, resp_headers, status = self:request({
         url = url,
         method = "GET",
         headers = custom_headers,
@@ -725,7 +764,7 @@ function Client:get_mp_articles(book_id, max_idx, count, wr_ticket)
         end
         return data, nil
     end
-    error(http_error(self, code, text, resp_headers))
+    error(http_error(self, code, text, resp_headers, status))
 end
 
 function Client:get_mp_content(review_id, opts)
@@ -744,7 +783,7 @@ function Client:get_mp_content(review_id, opts)
         if wrpa ~= "" then custom_headers["x-wrpa-0"] = wrpa end
     end
 
-    local text, code, resp_headers = self:request({
+    local text, code, resp_headers, status = self:request({
         url = url,
         method = "GET",
         headers = custom_headers,
@@ -759,7 +798,7 @@ function Client:get_mp_content(review_id, opts)
             url = url,
         }
     end
-    error(http_error(self, code, text, resp_headers))
+    error(http_error(self, code, text, resp_headers, status))
 end
 
 function Client:report_read(payload, referer)
