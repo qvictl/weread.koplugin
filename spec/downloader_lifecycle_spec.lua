@@ -331,12 +331,13 @@ downloader._active_job = transferred
 downloader:_beginStandby()
 downloader:_ensureProgressDialog(transferred)
 trapper:wrap(function() downloader:_step(transferred) end)
-resumed({ xhtml = "<p>source</p>", state = { css = "body{}" },
-    book = { book_id = "book", psvts = "fresh" } })
-expect(child_pending and transferred.state.css == "body{}"
+-- With images enabled one worker fetches the text and the images.
+resumed({ xhtml = "<p>final</p>", assets = {}, state = { css = "body{}" },
+    book = { book_id = "book", psvts = "fresh" }, finalized = true })
+expect(transferred.state.css == "body{}"
     and transferred.book.psvts == "fresh" and transferred.book.token == nil,
     "source result lost CSS/session changes or retained stale credentials")
-resumed({ xhtml = "<p>final</p>", assets = {}, state = { css = "body{}" } })
+expect(child_pending == nil, "a second worker was forked for the chapter images")
 expect(transferred.bodies["1"] == "<p>final</p>" and transferred.index == 2
     and #transferred.selected == 1, "finalized child result was not saved in the parent")
 dialog.options.buttons[1][1].callback()
@@ -521,6 +522,53 @@ do
     collectgarbage("restart")
     expect(child_pause >= 200 and child_pause <= 1000 and child_pause ~= 200,
         "worker child did not postpone its first GC cycle: " .. tostring(child_pause))
+end
+
+-- One fork per chapter: the worker runs source + images, the parent never
+-- forks again; without images only the source runs in the worker.
+do
+    local forks, calls = 0, {}
+    local inline_trapper = {
+        wrap = function(_self, callback) callback() end,
+        dismissableRunInSubprocess = function(_self, task)
+            forks = forks + 1
+            return true, task()
+        end,
+    }
+    Content.fetch_single_chapter_source = function(_client, _settings, _book, chapter)
+        calls[#calls + 1] = "source"
+        return "<p>source " .. tostring(chapter.chapterUid) .. "</p>"
+    end
+    Content.finalize_single_chapter_content = function(_c, _s, _b, _chapter, xhtml)
+        calls[#calls + 1] = "finalize"
+        return xhtml:gsub("source", "final"), { { href = "images/a.png" } }
+    end
+    local images_enabled = true
+    downloader.settings.get = function(_self, key, default)
+        if key == "cache" then return { download_book_images = images_enabled } end
+        return default
+    end
+    local function one_chapter_job()
+        return {
+            book = { book_id = "book" }, chapters = { { chapterUid = 7 } },
+            total = 1, index = 1, selected = {}, bodies = {}, state = {},
+            assets = {}, failed = {}, trapper = inline_trapper,
+        }
+    end
+    local job = one_chapter_job()
+    downloader:_step(job)
+    expect(forks == 1 and calls[1] == "source" and calls[2] == "finalize",
+        "source and images did not run in a single worker")
+    expect(job.bodies["7"] == "<p>final 7</p>" and #job.assets == 1 and job.index == 2,
+        "single-worker chapter result was not staged")
+
+    images_enabled = false
+    forks, calls = 0, {}
+    job = one_chapter_job()
+    downloader:_step(job)
+    expect(forks == 1 and #calls == 2 and calls[1] == "source" and calls[2] == "finalize",
+        "text-only chapter did not finalize in the parent after one worker")
+    expect(job.bodies["7"] == "<p>final 7</p>", "text-only chapter was not staged")
 end
 
 print(("downloader_lifecycle_spec: %d checks"):format(checks))
