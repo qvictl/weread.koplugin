@@ -3,6 +3,7 @@ local WeRead = require("weread.lib.protocol")
 
 local logger = require("weread.lib.logger").scoped("ReadReport")
 
+local MemoryGate = require("weread.lib.memory_gate")
 local ok_ffiutil, ffiutil = pcall(require, "ffi/util")
 if not ok_ffiutil then
     ffiutil = nil
@@ -183,6 +184,10 @@ function ReadReport:new(options)
         now = options.now or os.time,
         session_id = tostring({}) .. ":" .. tostring((options.now or os.time)()),
         subprocess = options.subprocess or make_subprocess_runner(),
+        -- function() -> ok, available_kb; checked before every fork.
+        memory_gate = options.memory_gate or function()
+            return MemoryGate.check(MemoryGate.DEFAULT_MIN_AVAILABLE_KB)
+        end,
         state = "stopped",
         generation = 0,
         count = 0,
@@ -566,9 +571,17 @@ function ReadReport:_tick(generation, task)
             elapsed_seconds = elapsed,
             session_open = session_open,
         }
-        local spawned, spawn_err = self:_start_job(
+        local spawned, spawn_err, unsupported = self:_start_job(
             book_id, allow_renewal, generation, task, position, credit)
         if spawned then
+            return
+        end
+        if not unsupported then
+            -- The fork failed or memory is low. Never fall back to running
+            -- the blocking network pipeline on the UI loop: skip this tick.
+            self.state = "waiting_for_memory"
+            self:_log_skip(spawn_err)
+            self:_schedule_next(generation, task)
             return
         end
         if not self.logged_inline_fallback then
@@ -676,7 +689,11 @@ end
 function ReadReport:_start_job(book_id, allow_renewal, generation, task, position, credit)
     local runner = self.subprocess
     if not runner then
-        return false, "no subprocess support"
+        return false, "no subprocess support", true
+    end
+    local memory_ok, available_kb = self.memory_gate()
+    if not memory_ok then
+        return false, "low memory (" .. tostring(available_kb) .. " kB available)"
     end
     credit = credit or {}
     local pid, read_fd = runner.run(function(_pid, child_write_fd)
