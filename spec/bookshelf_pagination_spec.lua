@@ -122,6 +122,7 @@ local shelf = {}
 for index = 1, 1000 do
     shelf[index] = { bookId = tostring(index), title = "Book " .. tostring(index) }
 end
+local books_reads = 0
 local shelf_settings = { sort_order = "time_desc", paginated = true, view_mode = "list" }
 local host = {
     shelf_regular = shelf,
@@ -129,7 +130,10 @@ local host = {
     settings = {
         set = function() end, flush = function() end,
         get = function(_self, key, default)
-            if key == "books" then return {} end
+            if key == "books" then
+                books_reads = books_reads + 1
+                return {}
+            end
             if key == "shelf" then return shelf_settings end
             return default
         end,
@@ -153,7 +157,9 @@ expect(shown[1].data.page_size == 10, "bookshelf used the wrong page size")
 expect(#shown[1].data.books == 1000, "pagination discarded full shelf search data")
 
 local prepared_books = shown[1].data.books
+expect(books_reads == 1, "first shelf render did not load book records exactly once")
 shown[1].callbacks.on_page_changed(7)
+expect(books_reads == 1, "page turn reloaded every book record")
 expect(shown[2].data.page == 7, "bookshelf page change was not retained")
 expect(shown[2].data.books == prepared_books,
     "page change recomputed the prepared bookshelf")

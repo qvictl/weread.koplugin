@@ -396,9 +396,15 @@ function M:showShelfView(mode, keyword, old_view, options)
     self.shelf_view_mode = mode
     self.shelf_search_keyword = keyword
     self.shelf_view_pages = self.shelf_view_pages or { books = 1, public_account = 1 }
-    local saved_books = BookRecords.all(self.settings)
+    -- Loading every book record is expensive. A prepared shelf (page turns,
+    -- mode switches, cover refreshes) already carries the download state, so
+    -- only load the records when the shelf is actually filtered again.
+    local saved_books
     local downloaded_cache = {}
     local function filtered(source, with_download_state)
+        if with_download_state and not saved_books then
+            saved_books = BookRecords.all(self.settings)
+        end
         local result = {}
         local sorted = sortBooks(source or {}, self.settings:get("shelf").sort_order)
         for _i, book in ipairs(sorted) do
