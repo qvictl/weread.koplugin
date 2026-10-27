@@ -1,4 +1,5 @@
 -- KOReader event lifecycle and reader-state orchestration.
+local CatalogMemo = require("weread.lib.catalog_memo")
 local Content = require("weread.lib.content")
 local logger = require("weread.lib.logger").scoped("Prefetch")
 local UIManager = require("ui/uimanager")
@@ -375,7 +376,7 @@ function M:ensureChaptersLoaded(book)
     if type(book.chapters) == "table" and #book.chapters > 0 then
         local book_id = book.book_id or book.bookId
         if self.library_db and book_id then
-            self.library_db:putChapters(book_id, book.chapters)
+            CatalogMemo.put_chapters(self.library_db, book_id, book.chapters)
         end
         local catalog_path = Content.catalog_cache_path(self.settings, book)
         if catalog_path and not file_exists(catalog_path) then
@@ -390,11 +391,10 @@ function M:ensureChaptersLoaded(book)
     end
 
     local book_id = book.book_id or book.bookId
-    local chapters = Content.load_catalog_cache(
-        self.client, self.settings, book)
+    local chapters = CatalogMemo.load(self.client, self.settings, book)
     if type(chapters) == "table" and #chapters > 0 then
         if self.library_db then
-            self.library_db:putChapters(book_id, chapters)
+            CatalogMemo.put_chapters(self.library_db, book_id, chapters)
         end
         return chapters
     end

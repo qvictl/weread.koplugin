@@ -1,3 +1,4 @@
+local CatalogMemo = require("weread.lib.catalog_memo")
 local Content = require("weread.lib.content")
 local PositionMapper = require("weread.lib.position_mapper")
 local WeRead = require("weread.lib.protocol")
@@ -1363,11 +1364,10 @@ function ReadReport:_build_context(book_id, force, book, opts)
     -- otherwise the TTL check below can never pass and every report would
     -- refetch the whole reader page.
     if type(book.chapters) ~= "table" or #book.chapters == 0 then
-        local chapters = Content.load_catalog_cache(
-            self.client, self.settings, book)
+        local chapters = CatalogMemo.load(self.client, self.settings, book)
         if type(chapters) == "table" and #chapters > 0 then
             if self.library_db then
-                self.library_db:putChapters(book_id, chapters)
+                CatalogMemo.put_chapters(self.library_db, book_id, chapters)
             end
         else
             chapters = self.library_db
@@ -1413,7 +1413,7 @@ function ReadReport:_build_context(book_id, force, book, opts)
             log("warn", "save chapter catalog cache failed:", tostring(cache_err))
         end
         if self.library_db then
-            self.library_db:putChapters(book_id, chapters)
+            CatalogMemo.put_chapters(self.library_db, book_id, chapters)
         end
     end
     self:_merge_remote_progress(book_id, book)
