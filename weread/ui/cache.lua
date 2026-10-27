@@ -18,6 +18,81 @@ local file_exists = PluginUtil.file_exists
 
 local M = {}
 
+-- Deleting or moving a book's directory under a running download makes the
+-- job write into a stale path, and its completion brings the record back.
+-- A background prefetch has no cancel button, so stop it here; the user can
+-- retry as soon as its worker has exited.
+function M:refuseWhileDownloading()
+    local downloader = self.downloader
+    if downloader and downloader._active_job then
+        if downloader._active_job.prefetch and downloader.cancelPrefetch then
+            downloader:cancelPrefetch("cache_cleanup")
+        end
+        self:showInfo(_("A download is in progress. Cancel it or wait for it to finish first."))
+        return true
+    end
+    return false
+end
+
+-- POSIX single-quote a shell argument. string.format("%q") is Lua quoting,
+-- not shell quoting: "$" and backticks still expand inside its double quotes.
+local function shell_quote(value)
+    return "'" .. tostring(value):gsub("'", "'\\''") .. "'"
+end
+
+local function normalize_dir(path)
+    return (tostring(path or ""):gsub("/+$", ""))
+end
+
+-- Delete `path` recursively without a shell. Symbolic links are removed
+-- themselves and never followed, so a link inside a book directory cannot
+-- take files outside it along.
+local function delete_tree(lfs, path)
+    local stat = lfs.symlinkattributes or lfs.attributes
+    local attr = stat(path)
+    if not attr then return true end
+    if attr.mode ~= "directory" then
+        local ok, err = os.remove(path)
+        return ok ~= nil, err
+    end
+    local ok_iter, iter, dir_obj = pcall(lfs.dir, path)
+    if not ok_iter then return false, iter end
+    local failure
+    for entry in iter, dir_obj do
+        if entry ~= "." and entry ~= ".." then
+            local ok, err = delete_tree(lfs, path .. "/" .. entry)
+            if not ok then failure = failure or err or "delete failed" end
+        end
+    end
+    local removed, err = (lfs.rmdir or os.remove)(path)
+    if not removed then return false, failure or err end
+    return failure == nil, failure
+end
+
+-- Remove a book's cache directory. The directory is resolved from stored
+-- paths and may be anything a record points at, so only a per-book directory
+-- is deleted: it must be named after the book id, must not be a download
+-- root, and must not contain relative components. A record whose files sit
+-- directly in the download root or in a user library folder is left alone.
+function M:removeBookDir(book_id, book)
+    local dir = normalize_dir(Content.book_resolved_dir(self.settings, book_id, book))
+    local name = dir:match("([^/]+)$")
+    local is_root = dir == normalize_dir(self.settings.cache_dir)
+        or (self.settings.default_cache_dir ~= nil
+            and dir == normalize_dir(self.settings.default_cache_dir))
+    if dir == "" or dir:sub(1, 1) ~= "/" or is_root
+        or name ~= Content.book_dir_name(book_id)
+        or dir:find("/%.%.?/") then
+        logger.warn("book cache not removed: not a per-book directory:", dir)
+        return false
+    end
+    local lfs = require("libs/libkoreader-lfs")
+    if lfs.attributes(dir, "mode") ~= "directory" then return true end
+    local ok, err = delete_tree(lfs, dir)
+    if not ok then logger.warn("book cache not fully removed:", dir, tostring(err)) end
+    return ok
+end
+
 function M:setMPImageDownload(enabled)
     local cache = self.settings:get("cache")
     cache.download_mp_images = enabled == true
@@ -37,7 +112,7 @@ function M:validateDownloadDir(path)
         return false, _("Invalid path.")
     end
     if not lfs.attributes(path, "mode") then
-        os.execute("mkdir -p " .. string.format("%q", path))
+        os.execute("mkdir -p " .. shell_quote(path))
         if not lfs.attributes(path, "mode") then
             return false, _("Directory does not exist and could not be created.")
         end
@@ -115,6 +190,7 @@ function M:offerMoveBooksToNewDir(old_dir, new_dir)
 end
 
 function M:moveBooksToNewDir(movable, new_dir)
+    if self:refuseWhileDownloading() then return end
     self:showBusy(_("Moving cached books..."))
     UIManager:scheduleIn(0.1, function()
         local books = BookRecords.all(self.settings)
@@ -200,9 +276,9 @@ function M:moveBookDir(src, dst)
     end
     local parent = dst:match("^(.*)/[^/]+$")
     if parent then
-        os.execute("mkdir -p " .. string.format("%q", parent))
+        os.execute("mkdir -p " .. shell_quote(parent))
     end
-    local status = os.execute("mv -f " .. string.format("%q", src) .. " " .. string.format("%q", dst))
+    local status = os.execute("mv -f " .. shell_quote(src) .. " " .. shell_quote(dst))
     if status == true or status == 0 then
         return true
     end
@@ -510,7 +586,7 @@ function M:showCacheManagement()
                 text = _("Clear all public account cache? Downloaded articles and cached article lists will be deleted."),
                 ok_text = _("Clear"),
                 ok_callback = function()
-                    self:clearAllMPCache()
+                    if not self:clearAllMPCache() then return end
                     self:refreshCacheManagement(_("Public account cache cleared"))
                 end,
             })
@@ -524,7 +600,7 @@ function M:showCacheManagement()
                 text = _("Clear all cache? Downloaded books and articles, underlines, thoughts, and matching progress will be deleted."),
                 ok_text = _("Clear"),
                 ok_callback = function()
-                    self:clearAllCache()
+                    if not self:clearAllCache() then return end
                     self:refreshCacheManagement(_("Cache cleared"))
                 end,
             })
@@ -673,7 +749,7 @@ function M:confirmClearBookCache(book_id, title, on_cleared)
         text = T(_("Clear cache for \"%1\"?\nDownloaded files, underlines, thoughts, and matching progress will be deleted."), title),
         ok_text = _("Clear"),
         ok_callback = function()
-            self:clearBookCache(book_id)
+            if not self:clearBookCache(book_id) then return end
             if on_cleared then
                 on_cleared()
                 self:showTransientInfo(_("Cache cleared"))
@@ -741,11 +817,11 @@ function M:clearBookAnnotationData(book_id, book)
 end
 
 function M:clearBookCache(book_id)
+    if self:refuseWhileDownloading() then return false end
     local book = BookRecords.get(self.settings, book_id)
     local path_to_remove = book and (book.cached_full_book or book.cached_file)
-    local cache_dir = Content.book_resolved_dir(self.settings, book_id, book)
     self:clearBookAnnotationData(book_id, book)
-    os.execute("rm -rf " .. string.format("%q", cache_dir))
+    self:removeBookDir(book_id, book)
     if book then
         BookRecords.delete(self.settings, book_id)
         self.settings:flush()
@@ -761,9 +837,11 @@ function M:clearBookCache(book_id)
         end)
     end
     self:refreshShelfCacheIndicators()
+    return true
 end
 
 function M:clearAllMPCache()
+    if self:refuseWhileDownloading() then return false end
     -- Delete each MP book's real directory (which may sit under an old download
     -- root) rather than scanning only the current cache_dir, and only touch
     -- plugin-owned entries tracked in the books table.
@@ -787,7 +865,7 @@ function M:clearAllMPCache()
     local deleted = {}
     for book_id, book in pairs(books) do
         if WeRead.is_mp_book(book_id) then
-            os.execute("rm -rf " .. string.format("%q", Content.book_resolved_dir(self.settings, book_id, book)))
+            self:removeBookDir(book_id, book)
             deleted[#deleted + 1] = book_id
         end
     end
@@ -796,9 +874,11 @@ function M:clearAllMPCache()
     end
     self.settings:flush()
     self:refreshShelfCacheIndicators()
+    return true
 end
 
 function M:clearAllCache()
+    if self:refuseWhileDownloading() then return false end
     local books = BookRecords.all(self.settings)
     pcall(function()
         local ReadCollection = require("readcollection")
@@ -818,13 +898,14 @@ function M:clearAllCache()
     end)
     for book_id, book in pairs(books) do
         self:clearBookAnnotationData(book_id, book)
-        os.execute("rm -rf " .. string.format("%q", Content.book_resolved_dir(self.settings, book_id, book)))
+        self:removeBookDir(book_id, book)
     end
     local ids = {}
     for book_id in pairs(books) do ids[#ids + 1] = book_id end
     BookRecords.put_many(self.settings, {}, ids)
     self.settings:flush()
     self:refreshShelfCacheIndicators()
+    return true
 end
 
 return M
