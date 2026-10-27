@@ -184,7 +184,7 @@ test("open WeRead book wins over a pinned manual target", function()
         is_cookie_configured = function() return true end,
     }
     report.detect_book = function() return "openbook" end
-    local id, _title, source = report:resolve_target()
+    local id, _, source = report:resolve_target()
     eq(id, "openbook", "open book is the report target")
     eq(source, "current_document", "source follows the open book")
 end)
@@ -486,10 +486,10 @@ test("progress upload runs in a background job and is polled", function()
     eq(outcome.error_kind, "pending", "upload is pending")
     eq(runner.forks, 1, "one background job")
     eq(#records, 0, "nothing sent on the UI loop")
-    accepted, outcome = report:upload_position("book", position, 0)
+    outcome = select(2, report:upload_position("book", position, 0))
     eq(outcome.error_kind, "pending", "same snapshot polls the running job")
     eq(runner.forks, 1, "polling does not fork again")
-    local _a, other = report:upload_position("book", { chapter_uid = 7, percent = 5 }, 0)
+    local _, other = report:upload_position("book", { chapter_uid = 7, percent = 5 }, 0)
     eq(other.error_kind, "busy", "a different snapshot waits")
 
     runner.child(42, 7)
@@ -500,7 +500,7 @@ test("progress upload runs in a background job and is polled", function()
     for _i, fn in ipairs(scheduled) do fn() end
     accepted = report:upload_position("book", position, 0)
     eq(accepted, true, "final result is returned once")
-    _a, outcome = report:upload_position("book", position, 0)
+    _, outcome = report:upload_position("book", position, 0)
     eq(outcome.error_kind, "pending", "a new call starts a new upload")
 end)
 

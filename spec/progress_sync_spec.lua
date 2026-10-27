@@ -153,20 +153,20 @@ end
 
 local Mapper = require("weread.lib.position_mapper")
 local actual = require("spec.helpers.yan_word_counts")
-local function position(uid, fraction)
+local function yan_position(uid, fraction)
     return assert(Mapper.local_to_remote(actual, fraction, {current_chapter_uid=uid}))
 end
-local function remote(uid, offset)
+local function yan_remote(uid, offset)
     return assert(Mapper.normalize_remote({progress=0, chapterUid=uid, chapterOffset=offset}, "book", "web", actual))
 end
 test("saved next chapter opening tolerates the previous chapter boundary", function()
-    eq(Mapper.compare(position(6, 1/60), remote(5, 3555), 2), "same",
+    eq(Mapper.compare(yan_position(6, 1/60), yan_remote(5, 3555), 2), "same",
         "actual saved opening does not prompt")
 end)
 
 test("compare uses unrounded local progress at the two percent boundary", function()
-    local local_position = position(6, 1/60)
-    local remote_position = remote(6, 14515)
+    local local_position = yan_position(6, 1/60)
+    local remote_position = yan_remote(6, 14515)
     local exact_gap = remote_position.percent - local_position.fraction*100
     eq(exact_gap < 2, true, "actual difference is within policy")
     eq(Mapper.compare(local_position, remote_position, 2), "same", "no false conflict caused by flooring")
@@ -175,8 +175,8 @@ end)
 test("a different nearby chapter remains available to manual sync", function()
     local f = fixture(nil)
     f.sync.get_chapters = function() return actual end
-    local a=position(3,1); a.book_id="book"
-    local b=remote(5,3555)
+    local a=yan_position(3,1); a.book_id="book"
+    local b=yan_remote(5,3555)
     f.sync:_resolve(a,b,{book_id="book",book=f.values.books.book,chapters=actual},{manual=true})
     eq(#f.choices, 1, "manual sync can choose a genuinely different chapter")
     local opened
@@ -192,9 +192,9 @@ end)
 test("manual sync offers a choice even when automatic conflict prompts are disabled", function()
     local f = fixture(nil)
     f.values.sync.ask_on_conflict = false
-    local a = position(3, 1)
+    local a = yan_position(3, 1)
     a.book_id = "book"
-    f.sync:_resolve(a, remote(5, 3555), {
+    f.sync:_resolve(a, yan_remote(5, 3555), {
         book_id = "book", book = f.values.books.book, chapters = actual,
     }, { manual = true })
     eq(#f.choices, 1, "manual action still offers position recovery")
@@ -202,9 +202,9 @@ end)
 
 test("exact matching manual progress needs no choice despite integer percent", function()
     local f = fixture(nil)
-    local a = position(6, 1/60)
+    local a = yan_position(6, 1/60)
     a.book_id = "book"
-    f.sync:_resolve(a, remote(6, a.chapter_offset), {
+    f.sync:_resolve(a, yan_remote(6, a.chapter_offset), {
         book_id = "book", book = f.values.books.book, chapters = actual,
     }, { manual = true })
     eq(#f.choices, 0, "exact position does not prompt")
@@ -1177,7 +1177,7 @@ end)
 
 test("resume network work waits for Wi-Fi and gives up quietly (F4)", function()
     local online = false
-    local checks = 0
+    local link_checks = 0
     local f = fixture({
         bookId = "book",
         progress = 25,
@@ -1187,7 +1187,7 @@ test("resume network work waits for Wi-Fi and gives up quietly (F4)", function()
         updateTime = 10,
     }, {
         is_online = function()
-            checks = checks + 1
+            link_checks = link_checks + 1
             return online
         end,
     })
@@ -1197,9 +1197,9 @@ test("resume network work waits for Wi-Fi and gives up quietly (F4)", function()
     online = false
     f.document.page = 40
     f.sync:on_suspend()
-    checks = 0
+    link_checks = 0
     f.sync:on_resume()
-    eq(checks, 0, "resume handler itself checks nothing")
+    eq(link_checks, 0, "resume handler itself checks nothing")
     local delays = {}
     while #f.queue > 0 do
         delays[#delays + 1] = f.queue[1].delay

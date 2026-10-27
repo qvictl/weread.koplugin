@@ -511,7 +511,7 @@ function ReadReport:start(reason)
         self:_tick(generation, task)
     end
     self.task = task
-    local _elapsed, session_open = self:_reading_credit(book_id)
+    local _, session_open = self:_reading_credit(book_id)
     -- Open the server session immediately. The first accepted report credits
     -- nothing; the following ticks credit time actually spent in the session.
     local first_delay = session_open and self:_interval() or 1

@@ -150,34 +150,34 @@ do
     local host = {
         showInfo = function(_self, text) host_calls[#host_calls + 1] = text end,
     }
-    local login = QRLogin:new(host, poll_client, {}, {
+    local bg_login = QRLogin:new(host, poll_client, {}, {
         subprocess = runner, scheduler = scheduler,
     })
     local completed
-    login._complete = function(_self, result) completed = result end
-    login.qr_dialog = {}
-    login.started_at = os.time()
-    expect(login:_start_poll_job("uid", login.generation), "poll job starts")
+    bg_login._complete = function(_self, result) completed = result end
+    bg_login.qr_dialog = {}
+    bg_login.started_at = os.time()
+    expect(bg_login:_start_poll_job("uid", bg_login.generation), "poll job starts")
     expect(poll_count == 0, "no request on the UI loop")
     runner.child(42, 7)
     expect(poll_count == 3, "child keeps polling through timeouts")
     runner.done = true
     for _i, fn in ipairs(scheduled) do fn() end
     expect(completed and completed.webLoginVid == "v", "parent completes the login")
-    expect(login.login_cookies and login.login_cookies.wr_poll == "1",
+    expect(bg_login.login_cookies and bg_login.login_cookies.wr_poll == "1",
         "cookies merged in the child reach the parent")
 
     -- Suspend ends a running session and kills its process.
     runner.terminated = false
     runner.done = false
-    login.qr_dialog = nil
-    login.started_at = os.time()
-    expect(login:_start_poll_job("uid", login.generation), "second poll job starts")
-    local generation = login.generation
-    expect(login:on_suspend() == true, "suspend cancels an active session")
+    bg_login.qr_dialog = nil
+    bg_login.started_at = os.time()
+    expect(bg_login:_start_poll_job("uid", bg_login.generation), "second poll job starts")
+    local generation = bg_login.generation
+    expect(bg_login:on_suspend() == true, "suspend cancels an active session")
     expect(runner.terminated == true, "poll process killed")
-    expect(login.generation ~= generation and login.poll_job == nil, "session invalidated")
-    expect(login:on_suspend() == false, "nothing to cancel when idle")
+    expect(bg_login.generation ~= generation and bg_login.poll_job == nil, "session invalidated")
+    expect(bg_login:on_suspend() == false, "nothing to cancel when idle")
 end
 
 print("qr_login_spec: " .. checks .. " checks passed")
