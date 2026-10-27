@@ -123,6 +123,37 @@ local function clear_auth_store(store)
     store:saveSetting("account", deepcopy(defaults.account))
 end
 
+local function signature(value, out)
+    if type(value) ~= "table" then
+        out[#out + 1] = type(value) .. ":" .. tostring(value)
+        return
+    end
+    local keys = {}
+    for key in pairs(value) do keys[#keys + 1] = key end
+    table.sort(keys, function(a, b) return tostring(a) < tostring(b) end)
+    out[#out + 1] = "{"
+    for _, key in ipairs(keys) do
+        out[#out + 1] = tostring(key) .. "="
+        signature(value[key], out)
+    end
+    out[#out + 1] = "}"
+end
+
+local AUTH_KEYS = { "cookies", "api_key", "wr_ticket", "wr_wrpa", "account" }
+
+-- Compact fingerprint of the stored credentials. Callers may have mutated the
+-- live cookie table in place before calling update_auth (Cookie.merge_set_cookie
+-- does), so change detection compares against what was last flushed rather
+-- than against the in-memory store.
+local function auth_signature(store)
+    local out = {}
+    for _, key in ipairs(AUTH_KEYS) do
+        out[#out + 1] = key
+        signature(store:readSetting(key, nil), out)
+    end
+    return table.concat(out, "\n")
+end
+
 function Settings:new()
     local Environment = require("weread.lib.mock_environment")
     local environment = Environment.active()
@@ -238,6 +269,7 @@ function Settings:new()
     if legacy_changed then
         obj.store:flush()
     end
+    obj._flushed_auth = auth_signature(obj.store)
     return setmetatable(obj, self)
 end
 
@@ -329,6 +361,7 @@ end
 
 function Settings:flush()
     self.store:flush()
+    self._flushed_auth = auth_signature(self.store)
 end
 
 function Settings:get_device_fingerprint()
@@ -354,10 +387,12 @@ function Settings:get_device_fingerprint()
     return fingerprint
 end
 
+-- Returns true when the stored credentials differ from the last flushed
+-- state. Unchanged values (for example a Set-Cookie that repeats the current
+-- wr_skey) do not flush weread.lua.
 function Settings:update_auth(credentials, options)
     credentials = credentials or {}
     options = options or {}
-    local changed = false
 
     if type(credentials.cookies) == "table" then
         local cookies = credentials.cookies
@@ -367,21 +402,19 @@ function Settings:update_auth(credentials, options)
             cookies = deepcopy(cookies)
         end
         self:set("cookies", cookies)
-        changed = true
     end
 
     for _, key in ipairs({ "api_key", "wr_ticket", "wr_wrpa" }) do
         local value = credentials[key]
         if type(value) == "string" then
             self:set(key, value)
-            changed = true
         end
     end
     if type(credentials.account) == "table" then
         self:set("account", deepcopy(credentials.account))
-        changed = true
     end
 
+    local changed = auth_signature(self.store) ~= self._flushed_auth
     if changed and options.flush ~= false then
         self:flush()
     end
