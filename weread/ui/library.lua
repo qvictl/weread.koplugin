@@ -648,68 +648,11 @@ sortBooks = function(books, sort_order)
     return sorted
 end
 
-function M:showShelfPage()
-    local books = self.shelf_books or {}
-    if #books == 0 then
-        self:showInfo(_("Your WeRead shelf is empty."))
-        return
-    end
-    local menu, buildItems
-    local function refresh()
-        menu:switchItemTable(nil, buildItems())
-    end
-    buildItems = function()
-        local items = self:shelfToolbarItems(true, refresh)
-        local sorted = sortBooks(books, self.settings:get("shelf").sort_order)
-        local saved_books = BookRecords.all(self.settings)
-        local downloaded_cache = {}
-        self._shelf_saved_books = saved_books
-        for _i, book in ipairs(sorted) do
-            if self:bookMatchesFilters(book, saved_books, downloaded_cache) then
-                local book_id = book.book_id or book.bookId
-                local is_cached = self:isBookDownloaded(book, saved_books, downloaded_cache)
-                local right_text
-                if book.readUpdateTime and book.readUpdateTime > 0 then
-                    right_text = os.date("%Y-%m-%d", book.readUpdateTime)
-                elseif book.finishReading == 1 then
-                    right_text = _("Done")
-                else
-                    right_text = ""
-                end
-                local function rightStatus(cached)
-                    if cached then
-                        return right_text ~= "" and "✓  " .. right_text or "✓"
-                    end
-                    return right_text
-                end
-                table.insert(items, {
-                    text = book.title or book.bookId or _("Untitled"),
-                    mandatory = rightStatus(is_cached),
-                    mandatory_func = function()
-                        local current = self._shelf_saved_books and self._shelf_saved_books[book_id]
-                        return rightStatus(self:bookRecordHasDownload(current))
-                    end,
-                    callback = self:safeCallback(book.title or book.bookId or _("Untitled"), function()
-                        self:showBookRecord(book)
-                    end),
-                })
-            end
-        end
-        return items
-    end
-    menu = self:showList(_("WeRead Bookshelf"), buildItems(), _("Your WeRead shelf is empty."))
-    self.shelf_menu = menu
-    self._shelf_refresh = refresh
-end
-
+-- Called by the downloader after every completion (including background
+-- prefetches while reading) and after cache cleanups. The bookshelf reads
+-- download state when it is filtered next, so there is nothing to refresh
+-- here; loading every book record on each call only cost time.
 function M:refreshShelfCacheIndicators()
-    self._shelf_saved_books = BookRecords.all(self.settings)
-    if self.shelf_menu and self._shelf_refresh then
-        local ok, err = pcall(self._shelf_refresh)
-        if not ok then
-            logger.warn("refresh shelf cache indicators failed:", log_error(err))
-        end
-    end
 end
 
 function M:showBookRecord(book)
@@ -1066,52 +1009,6 @@ function M:showBookReviews(book)
     end
 
     loadReviews("recommended", nil)
-end
-
-function M:showShelfTabs()
-    local items = {
-        {
-            text = _("Books"),
-            post_text = T(_("%1 books"), tostring(#self.shelf_regular)),
-            callback = self:safeCallback(_("Books"), function()
-                self.shelf_books = self.shelf_regular
-                self:showShelfPage()
-            end),
-        },
-        {
-            text = _("Public Accounts"),
-            post_text = T(_("%1 accounts"), tostring(#self.shelf_mp)),
-            callback = self:safeCallback(_("Public Accounts"), function()
-                self:showMPShelfPage()
-            end),
-        },
-    }
-    self:showList(_("WeRead Bookshelf"), items, _("Your WeRead shelf is empty."))
-end
-
-function M:showMPShelfPage()
-    local books = self.shelf_mp or {}
-    if #books == 0 then
-        self:showInfo(_("No items."))
-        return
-    end
-    local menu, buildItems
-    local function refresh() menu:switchItemTable(nil, buildItems()) end
-    buildItems = function()
-        local items = self:shelfToolbarItems(false, refresh)
-        local sorted = sortBooks(books, self.settings:get("shelf").sort_order)
-        for _i, book in ipairs(sorted) do
-            table.insert(items, {
-                text = book.title or book.bookId or _("Untitled"),
-                post_text = book.author or "",
-                callback = self:safeCallback(book.title or book.bookId or _("Untitled"), function()
-                    self:showMPAccount(book)
-                end),
-            })
-        end
-        return items
-    end
-    menu = self:showList(_("Public Accounts"), buildItems(), _("No items."))
 end
 
 function M:showMPAccount(book)
