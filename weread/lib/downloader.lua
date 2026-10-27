@@ -804,6 +804,7 @@ function Downloader:start(book, chapters, suffix, options)
                     self.settings, book)
                 dl.state.workspace = dl.workspace
                 dl.state.css = Content.load_full_download_css(dl.workspace)
+                dl.saved_css = dl.state.css
                 dl.state.used_asset_names = Content.full_download_workspace_used_asset_names(
                     dl.workspace)
                 self:_restoreFullDownloadCheckpoint(dl)
@@ -1180,7 +1181,12 @@ function Downloader:_finishChapter(dl)
     dl.state = result.state
     local uid = tostring(chapter.chapterUid or dl.index)
     if dl.resumable then
-        Content.save_full_download_css(dl.workspace, dl.state.css)
+        -- The stylesheet comes with the first chapter; rewrite it only when
+        -- it changed instead of once per chapter.
+        if dl.state.css ~= dl.saved_css then
+            Content.save_full_download_css(dl.workspace, dl.state.css)
+            dl.saved_css = dl.state.css
+        end
         Content.save_full_download_chapter(dl.workspace, chapter, dl.index, xhtml)
         dl.completed[dl.index] = true
         dl.completed_count = dl.completed_count + 1

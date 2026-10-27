@@ -13,10 +13,17 @@ local archive_calls = {}
 package.preload["logger"] = function()
     return { info = function() end, warn = function() end, err = function() end }
 end
+local digest_calls = 0
+local function fake_digest(data)
+    local sum = 0
+    for index = 1, #data do sum = (sum * 31 + data:byte(index)) % 4294967296 end
+    return ("%08x%08x"):format(#data, sum)
+end
 package.preload["weread.lib.crypto"] = function()
     return {
         sha256_hex = function(data)
-            return ("%08x%08x"):format(#data, #data * 31)
+            digest_calls = digest_calls + 1
+            return fake_digest(data)
         end,
     }
 end
@@ -32,10 +39,18 @@ package.preload["ffi/util"] = function()
         end,
     }
 end
+local lfs_reports_times = true
 package.preload["lfs"] = function()
     local function quoted(path) return string.format("%q", path) end
     return {
         attributes = function(path, attribute)
+            if attribute == "modification" then
+                if not lfs_reports_times then return nil end
+                local probe = io.popen("stat -c %Y " .. quoted(path) .. " 2>/dev/null")
+                local value = tonumber(probe:read("*l") or "")
+                probe:close()
+                return value
+            end
             local probe = io.popen("test -d " .. quoted(path)
                 .. " && echo directory || (test -f " .. quoted(path) .. " && echo file)")
             local mode = probe:read("*l")
@@ -159,6 +174,79 @@ io.open = original_open
 expect(not close_ok, "checkpoint committed after close reported a disk error")
 expect(Content.full_download_chapter_exists(workspace, chapters[1], 1),
     "previous complete checkpoint was invalidated after close failure")
+
+-- Resume verification cost (F4): only recently written chapters are hashed.
+local function age_checkpoint(index, seconds_ago)
+    local meta = Content.full_download_checkpoint_path(workspace, chapters[index], index)
+    assert(os.execute(("touch -d @%d %q"):format(os.time() - seconds_ago, meta)))
+end
+local function set_last_written(index)
+    local file = assert(io.open(workspace.checkpoint_dir .. "/last-written", "wb"))
+    if index then file:write("index=" .. index .. "\n") end
+    file:close()
+    if not index then os.remove(workspace.checkpoint_dir .. "/last-written") end
+end
+local many = {}
+for index = 1, 6 do
+    many[index] = { chapterUid = 500 + index, title = "Many " .. index }
+end
+chapters = many
+for index = 1, 6 do
+    Content.save_full_download_chapter(workspace, many[index], index, "<p>many " .. index .. "</p>")
+end
+for index = 1, 5 do age_checkpoint(index, 3600) end
+digest_calls = 0
+completed = Content.full_download_completed_chapters(workspace, many)
+expect(completed[1] and completed[6] and #completed == 6, "aged checkpoints were not accepted")
+expect(digest_calls == 1, "resume hashed more than the last written chapter: " .. digest_calls)
+
+-- A v1.6.0 workspace has no last-written record; file times still find the
+-- newest checkpoint.
+set_last_written(nil)
+digest_calls = 0
+completed = Content.full_download_completed_chapters(workspace, many)
+expect(#completed == 6 and digest_calls == 1,
+    "legacy workspace did not fall back to the newest checkpoint time")
+-- Without file times either, every chapter gets the old full check.
+lfs_reports_times = false
+digest_calls = 0
+completed = Content.full_download_completed_chapters(workspace, many)
+expect(#completed == 6 and digest_calls == 6,
+    "unknown write order did not fall back to hashing every chapter")
+lfs_reports_times = true
+-- The last-written record alone also selects the chapter to hash.
+set_last_written(3)
+for index = 1, 6 do age_checkpoint(index, 3600) end
+digest_calls = 0
+completed = Content.full_download_completed_chapters(workspace, many)
+expect(#completed == 6 and digest_calls >= 1 and digest_calls <= 6,
+    "last-written record broke verification")
+
+-- Same size, damaged data: the tail probe rejects an old chapter, the digest
+-- rejects the last written one.
+local function damage(index, offset_from_end)
+    local path = Content.full_download_chapter_path(workspace, many[index], index)
+    local file = assert(io.open(path, "r+b"))
+    local size = file:seek("end")
+    file:seek("set", size - offset_from_end)
+    file:write("\0")
+    file:close()
+end
+damage(2, 2)
+set_last_written(6)
+for index = 1, 5 do age_checkpoint(index, 3600) end
+age_checkpoint(6, 0)
+damage(6, 30)
+digest_calls = 0
+completed = Content.full_download_completed_chapters(workspace, many)
+expect(not completed[2], "chapter with a damaged tail was accepted")
+expect(not completed[6], "last written chapter with damaged data was accepted")
+expect(completed[1] and completed[5], "undamaged chapters were rejected")
+expect(digest_calls == 1, "only the damaged last written chapter should be hashed")
+local seventh = { chapterUid = 507 }
+expect(not Content.full_download_chapter_exists(workspace, seventh, 7),
+    "chapter without a checkpoint was accepted")
+chapters = { { chapterUid = 11, title = "One" }, { chapterUid = 22, title = "Two" } }
 
 local output = Content.save_book_epub(settings, book, chapters,
     { __workspace_text_dir = workspace.rendered_text_dir }, "full", {}, "body{color:black}")
