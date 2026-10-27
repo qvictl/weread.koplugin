@@ -189,6 +189,32 @@ expect(values.account.name == "new-user" and settings:is_api_configured(),
 expect(settings:is_cookie_configured(),
     "modern wr_gid login cookie was not recognized")
 
+local flushes_before_noop = flush_count
+expect(settings:update_auth({
+    cookies = { wr_gid = "12345" },
+    api_key = "new-key",
+    account = { name = "new-user" },
+}) == false and flush_count == flushes_before_noop,
+    "unchanged credentials must not report a change or flush")
+expect(settings:merge_set_cookie("wr_gid=12345; Path=/") == false
+    and flush_count == flushes_before_noop,
+    "a Set-Cookie repeating the stored value must not flush")
+expect(settings:update_auth({ wr_ticket = "rotated" }) == true
+    and values.wr_ticket == "rotated" and flush_count == flushes_before_noop + 1,
+    "a changed credential must be stored and flushed once")
+-- Cookie.merge_set_cookie mutates the live stored table before update_auth
+-- runs; the rotation must still be detected and flushed.
+expect(settings:merge_set_cookie("wr_skey=rotated-skey; Path=/") == true
+    and values.cookies.wr_skey == "rotated-skey"
+    and flush_count == flushes_before_noop + 2,
+    "an in-place cookie rotation was not flushed")
+expect(settings:update_auth({ wr_ticket = "pending" }, { flush = false }) == true
+    and flush_count == flushes_before_noop + 2,
+    "flush=false must not flush")
+expect(settings:update_auth({ wr_ticket = "pending" }) == true
+    and flush_count == flushes_before_noop + 3,
+    "an unflushed earlier change must be flushed by the next update")
+
 expect(settings:set_download_dir("/external/books") == "/external/books",
     "custom download directory was not selected")
 expect(values.download_dir == "/external/books",
