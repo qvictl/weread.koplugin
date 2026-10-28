@@ -6,7 +6,11 @@ local function expect(value, label)
     assert(value, label)
 end
 local function quote(path) return "'" .. path:gsub("'", "'\\''") .. "'" end
-local function mkdir(path) assert(os.execute("mkdir -p -- " .. quote(path)) == 0) end
+local function command_ok(command)
+    local ok = os.execute(command)
+    return ok == true or ok == 0
+end
+local function mkdir(path) assert(command_ok("mkdir -p -- " .. quote(path))) end
 local function read(path)
     local file = io.open(path, "rb")
     if not file then return nil end
@@ -16,8 +20,8 @@ local function write(path, bytes)
     local file = assert(io.open(path, "wb")); assert(file:write(bytes)); assert(file:close())
 end
 local function mode(path)
-    if os.execute("test -L " .. quote(path)) == 0 then return "link" end
-    if os.execute("test -d " .. quote(path)) == 0 then return "directory" end
+    if command_ok("test -L " .. quote(path)) then return "link" end
+    if command_ok("test -d " .. quote(path)) then return "directory" end
     if read(path) then return "file" end
 end
 package.preload["libs/libkoreader-lfs"] = function()
@@ -35,7 +39,7 @@ package.preload["libs/libkoreader-lfs"] = function()
     }
 end
 package.preload["ffi/util"] = function()
-    return { purgeDir = function(path) return os.execute("rm -rf -- " .. quote(path)) == 0 end }
+    return { purgeDir = function(path) return command_ok("rm -rf -- " .. quote(path)) end }
 end
 package.preload["weread.lib.logger"] = function()
     return { info = function() end, warn = function() end, err = function() end }
