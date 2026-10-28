@@ -620,6 +620,16 @@ test("legacy settings store pending uploads in the books table", function()
     eq(f.values.books.book.pending_upload_position, nil, "cleared after upload")
 end)
 
+test("the per-book store returns a pending upload on resume (control)", function()
+    local f = fixture(cloud(25))
+    f.open()
+    f.book.pending_upload_position = { percent = 40 }
+    f.sync:on_close_document()
+    f.sync:on_resume()
+    f.drain()
+    eq(#f.uploads, 1, "pending position from the per-book store uploaded once")
+end)
+
 test("a broken book store does not break resume", function()
     local f = fixture(cloud(25))
     f.open()

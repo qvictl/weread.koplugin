@@ -118,6 +118,22 @@ do
     client:request({ url = "https://weread.qq.com/web/a", skip_cookie = true })
     expect(header(fake.requests[#fake.requests].headers, "Cookie") == nil, "skip_cookie still sent cookies")
 
+    -- Credential headers passed by the caller are dropped (and logged) for a
+    -- non-https URL, and kept for https.
+    respond({ code = 200, body = "" })
+    client:request({ url = "http://weread.qq.com/web/a", headers = {
+        Authorization = "Bearer XXX-token", Cookie = "wr_vid=XXX-explicit", ["X-Skey"] = "XXX-skey", Accept = "a/b",
+    } })
+    local plain = fake.requests[#fake.requests].headers
+    expect(header(plain, "Authorization") == nil and header(plain, "Cookie") == nil and header(plain, "X-Skey") == nil,
+        "explicit credential headers were sent over http")
+    expect(header(plain, "Accept") == "a/b", "a non-credential header was dropped")
+    expect(fake.log_text():find("HTTP credentials dropped", 1, true), "dropping credentials was not logged")
+    respond({ code = 200, body = "" })
+    client:request({ url = "https://weread.qq.com/web/a", headers = { Authorization = "Bearer XXX-token" } })
+    expect(header(fake.requests[#fake.requests].headers, "Authorization") == "Bearer XXX-token",
+        "https request lost its explicit credential header")
+
     local empty = Client:new(Fake.settings({ cookies = {} }))
     respond({ code = 200, body = "" })
     empty:request({ url = "https://weread.qq.com/web/a" })
@@ -388,11 +404,12 @@ do
 
     -- Failures must leave an existing good file untouched and no .part behind.
     local failures = {
-        { label = "empty body", response = { code = 200, body = "" } },
+        { label = "empty body", response = { code = 200, body = "" }, needle = "empty body" },
         { label = "HTTP 404", response = { code = 404, body = "not found" }, needle = "HTTP 404" },
         { label = "transport raise", response = { raise = "connection reset" }, needle = "connection reset" },
         { label = "transport status", response = { fail = "timeout" }, needle = "timeout" },
-        { label = "size limit", response = { code = 200, chunks = { "abc", "def" } }, opts = { max_bytes = 4 } },
+        { label = "size limit", response = { code = 200, chunks = { "abc", "def" } }, opts = { max_bytes = 4 },
+            needle = "size limit" },
     }
     for _, case in ipairs(failures) do
         write_file(dest, "previous good copy")

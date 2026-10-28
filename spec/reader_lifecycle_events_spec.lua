@@ -716,8 +716,11 @@ do
 
     -- Benign endings are logged quietly with no notice.
     host.downloader.isPromotedPrefetch = function() return false end
+    -- Includes the reasons maybePrefetchNextChapter passes to cancelPrefetch
+    -- itself (last chapter, prefetch switched off, context gone).
     for _, reason in ipairs({ "cancelled", "document_closed", "replaced", "manual_download",
-        "setting_disabled", "next_chapter_cached" }) do
+        "setting_disabled", "next_chapter_cached", "prefetch_not_applicable", "prefetch_context_missing",
+        "no_next_chapter" }) do
         local notices = count(calls, "notice:")
         options.on_complete(false, reason)
         expect(count(calls, "notice:") == notices, "no failure notice for " .. reason)
@@ -725,6 +728,7 @@ do
     expect(contains(infos, "ended without completion:"), "benign ending is logged at info")
 
     for reason, text in pairs({
+        offline = "Network is not connected",
         low_memory = "Not enough free memory; prefetch skipped",
         worker_unavailable = "Background prefetch is unavailable",
         worker_timeout = "Background prefetch timed out",
@@ -739,8 +743,11 @@ do
     -- download, but only while the same document is still open.
     scheduled = {}
     host.downloader.isPromotedPrefetch = function() return true end
+    local offline_notices = count(calls, "notice:Next chapter prefetch failed: Network is not connected")
     options.on_complete(false, "offline")
     expect(#scheduled == 1 and scheduled[1].delay == 1.1, "failed promoted prefetch schedules a retry")
+    expect(count(calls, "notice:Next chapter prefetch failed: Network is not connected") == offline_notices + 1,
+        "failed promoted prefetch tells the reader the network is down")
     run_scheduled()
     expect(index_of(calls, "download_read:2") ~= nil, "retry downloads and opens the next chapter")
 
