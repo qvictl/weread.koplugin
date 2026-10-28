@@ -21,26 +21,29 @@ local settings = { data_dir = "/tmp", get = function() return { user_vid = user 
 local db = LibraryDB:new(settings)
 local path = db:databasePath()
 
-expect(db:cacheShelf({ { bookId = "old", title = "Old" } }), "seed shelf write failed")
-expect(db:cacheShelf({
-    { bookId = "b1", title = "One" },
-    { title = "entry without an id" },
-    { book_id = "b2", title = "Two" },
-}, {}), "an id-less shelf entry aborted the snapshot")
-local shelf = db:getShelf()
-expect(#shelf == 2 and shelf[1].bookId == "b1" and shelf[2].book_id == "b2",
-    "id-less entry was not skipped or the snapshot was rolled back")
+-- Clean the temporary database up even when an expectation fails.
+local ok, err = pcall(function()
+    expect(db:cacheShelf({ { bookId = "old", title = "Old" } }), "seed shelf write failed")
+    expect(db:cacheShelf({
+        { bookId = "b1", title = "One" },
+        { title = "entry without an id" },
+        { book_id = "b2", title = "Two" },
+    }, {}), "an id-less shelf entry aborted the snapshot")
+    local shelf = db:getShelf()
+    expect(#shelf == 2 and shelf[1].bookId == "b1" and shelf[2].book_id == "b2",
+        "id-less entry was not skipped or the snapshot was rolled back")
 
--- An entry the JSON encoder rejects aborts the write (and keeps the previous
--- snapshot): encode() reports its error instead of a payload.
-local unencodable = newproxy(true)
-getmetatable(unencodable).__tostring = function() error("cannot encode this value") end
-expect(not db:cacheShelf({ { bookId = "b3", title = "Three" }, { bookId = "bad", broken = unencodable } }, {}),
-    "an unencodable entry did not fail the shelf write")
-shelf = db:getShelf()
-expect(#shelf == 2 and shelf[1].bookId == "b1", "a failed write replaced the previous snapshot")
-db:close()
-
+    -- An entry the JSON encoder rejects aborts the write (and keeps the previous
+    -- snapshot): encode() reports its error instead of a payload.
+    local unencodable = newproxy(true)
+    getmetatable(unencodable).__tostring = function() error("cannot encode this value") end
+    expect(not db:cacheShelf({ { bookId = "b3", title = "Three" }, { bookId = "bad", broken = unencodable } }, {}),
+        "an unencodable entry did not fail the shelf write")
+    shelf = db:getShelf()
+    expect(#shelf == 2 and shelf[1].bookId == "b1", "a failed write replaced the previous snapshot")
+end)
+pcall(db.close, db)
 os.remove(path); os.remove(path .. "-wal"); os.remove(path .. "-shm")
 helper.cleanup()
+if not ok then error(err, 0) end
 print(("library_db_shelf_without_id_spec: %d checks"):format(checks))
