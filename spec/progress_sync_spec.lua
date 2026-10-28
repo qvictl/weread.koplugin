@@ -473,6 +473,145 @@ test("remote choice jumps and verifies before reporting", function()
     eq(position.percent, 50, "report sees jumped position")
 end)
 
+-- Cloud jumps vs. the reader's own page turns. KOReader announces a
+-- GotoPercent with a PageUpdate dispatched synchronously inside the call
+-- (ReaderRolling:_gotoPage) and may repeat it for the same page later (a
+-- re-render repositions on the saved xpointer). Only those echoes of the
+-- jump are "already synced"; a page turn is reading however soon it comes.
+local function jumped_to_cloud(options)
+    options = options or {}
+    local f = fixture({
+        bookId = "book",
+        progress = 50,
+        chapterUid = 33,
+        chapterIdx = 3,
+        chapterOffset = 100,
+        updateTime = 10,
+    })
+    if options.sync_echo ~= false then
+        local goto_fraction = f.sync.goto_fraction
+        f.sync.goto_fraction = function(fraction)
+            local ok, err = goto_fraction(fraction)
+            f.sync:on_page_update() -- the jump's own PageUpdate
+            return ok, err
+        end
+    end
+    f.sync:on_reader_ready()
+    f.drain()
+    f.choices[1].use_remote()
+    eq(f.document.page, 50, "jumped to the cloud page")
+    eq(f.sync:status().verified, true, "cloud jump verifies")
+    eq(f.sync:status().dirty, false, "the jump itself is not a change")
+    return f
+end
+
+local function closed_upload(f)
+    f.sync:on_close_document()
+    return f.values.books.book.pending_upload_position
+end
+
+test("the cloud jump's own echo is not uploaded", function()
+    local f = jumped_to_cloud()
+    f.drain()
+    f.sync:on_page_update() -- the echo after the call (re-render)
+    eq(f.sync:status().dirty, false, "echo of the landed page is not a change")
+    eq(f.sync:status().local_position.percent, 50, "local position is the landed page")
+    eq(f.values.books.book.last_local_position.percent, 50,
+        "landed position persisted without a timer")
+    eq(closed_upload(f), nil, "nothing queued for upload at close")
+end)
+
+test("the landed position is recorded even when no echo reaches the plugin", function()
+    local f = jumped_to_cloud({ sync_echo = false })
+    eq(f.sync:status().local_position.percent, 50, "landed position captured after the call")
+    f.sync:on_page_update()
+    eq(f.sync:status().dirty, false, "a late echo is still recognised")
+    eq(closed_upload(f), nil, "nothing queued for upload at close")
+end)
+
+test("a page turn 10 ms after the cloud jump is uploaded", function()
+    local f = jumped_to_cloud()
+    -- Before any timer can fire: the reader turns the page right away.
+    f.document.page = 51
+    f.sync:on_page_update()
+    eq(f.sync:status().dirty, true, "an immediate page turn is a change")
+    f.drain() -- whatever the jump scheduled must not swallow it
+    eq(f.sync:status().dirty, true, "the page turn stays unsynced")
+    eq(f.sync:status().local_position.percent, 51, "local position follows the reader")
+    local pending = closed_upload(f)
+    eq(pending and pending.percent, 51, "close queues the turned page for upload")
+end)
+
+test("a page turn after the echo is uploaded", function()
+    local f = jumped_to_cloud()
+    f.sync:on_page_update() -- echo
+    f.drain()
+    f.document.page = 52
+    f.sync:on_page_update()
+    eq(f.sync:status().dirty, true, "page turn after the echo is a change")
+    local pending = closed_upload(f)
+    eq(pending and pending.percent, 52, "close queues the turned page for upload")
+end)
+
+test("duplicate echoes of the jump target do not cause an upload", function()
+    local f = jumped_to_cloud()
+    for _i = 1, 3 do
+        f.sync:on_page_update()
+        f.drain()
+    end
+    eq(f.sync:status().dirty, false, "repeated echoes are no change")
+    eq(f.sync.jump_echo, nil, "echo marker consumed")
+    eq(closed_upload(f), nil, "nothing queued for upload at close")
+end)
+
+test("echo suppression does not leak to the reader returning to the jump target", function()
+    local f = jumped_to_cloud()
+    f.document.page = 51
+    f.sync:on_page_update()
+    eq(f.sync.jump_echo, nil, "a different position clears the echo marker")
+    -- That page is uploaded and accepted: the session is clean again.
+    f.sync:_upload_snapshot(f.sync:status().local_position, "test")
+    f.drain()
+    eq(#f.uploads, 1, "page 51 uploaded")
+    eq(f.sync:status().dirty, false, "accepted upload clears dirty")
+    -- The reader pages back to exactly where the cloud jump landed.
+    f.document.page = 50
+    f.sync:on_page_update()
+    eq(f.sync:status().dirty, true, "returning to the jump target is reading")
+    local pending = closed_upload(f)
+    eq(pending and pending.percent, 50, "close queues the returned-to page")
+end)
+
+test("a real sync clears an unconsumed echo marker", function()
+    local f = jumped_to_cloud({ sync_echo = false })
+    eq(f.sync.jump_echo ~= nil, true, "marker set by the jump")
+    f.sync:sync_now()
+    f.drain()
+    eq(f.sync.jump_echo, nil, "marker cleared by the next pull")
+end)
+
+test("a cloud jump that throws reports the error and keeps tracking pages", function()
+    local f = fixture({
+        bookId = "book",
+        progress = 50,
+        chapterUid = 33,
+        chapterIdx = 3,
+        chapterOffset = 100,
+        updateTime = 10,
+    })
+    f.sync.goto_fraction = function() error("reader gone") end
+    f.sync:on_reader_ready()
+    f.drain()
+    local ok, err = f.sync:_jump_to(0.5)
+    eq(ok, false, "throwing jump fails")
+    eq(tostring(err):find("reader gone", 1, true) ~= nil, true, "error carried")
+    eq(f.sync.jumping, false, "jump bracket closed")
+    f.sync.local_position = f.sync:capture_local()
+    f.document.page = 60
+    f.sync:on_page_update()
+    eq(f.sync:status().dirty, true, "page updates still count after the failure")
+end)
+
 test("busy read report is retried with the immutable snapshot", function()
     local f = fixture({
         bookId = "book",
