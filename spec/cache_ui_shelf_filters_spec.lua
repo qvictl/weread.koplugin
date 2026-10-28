@@ -102,7 +102,11 @@ expect(host:shelfFilterSummary() == "Finished / Downloaded", "combined filters w
 filters.reading, filters.download = nil, nil
 
 local changed = 0
-local function on_changed() changed = changed + 1 end
+local callback_filters
+local function on_changed()
+    changed = changed + 1
+    callback_filters = { reading = filters.reading, download = filters.download }
+end
 host:showShelfFilterOptions(on_changed)
 dialog = shown[#shown]
 expect(dialog.title == "Filter by" and #dialog.buttons == 5, "filter dialog not shown")
@@ -124,6 +128,8 @@ local function tap(index)
     run_ticks()
     expect(closed[#closed] == dialog and #closed == closed_before + 1, "the filter dialog was not closed")
     expect(flushes == flushes_before + 1 and changed == changes + 1, "the filter change was not saved")
+    expect(callback_filters.reading == filters.reading and callback_filters.download == filters.download,
+        "the shelf refreshed with stale filters")
 end
 tap(2) -- finished
 expect(filters.reading == "finished" and store.shelf.filter_reading == "finished" and changed == before_changes + 1,
@@ -145,10 +151,15 @@ expect(filters.download == "not_downloaded" and store.shelf.filter_download == "
     "clearing a filter touched the other dimension")
 expect(not dialog.buttons[3][1].checked_func() and dialog.buttons[5][1].checked_func(),
     "checked marks do not follow a cleared filter")
-tap(1) -- All clears everything
-expect(filters.reading == nil and filters.download == nil and store.shelf.filter_download == nil,
+tap(2) -- Restore both dimensions before All clears everything.
+expect(filters.reading == "finished" and filters.download == "not_downloaded"
+        and store.shelf.filter_reading == "finished" and store.shelf.filter_download == "not_downloaded",
+    "both filters must be active before selecting All")
+tap(1)
+expect(filters.reading == nil and filters.download == nil
+        and store.shelf.filter_reading == nil and store.shelf.filter_download == nil,
     "All did not clear every filter")
-expect(changed == before_changes + 5, "not every filter change refreshed the shelf")
+expect(changed == before_changes + 6, "not every filter change refreshed the shelf")
 
 -- 4. Download state of shelf books.
 expect(host:bookRecordHasDownload(nil) == false and host:bookRecordHasDownload("x") == false,

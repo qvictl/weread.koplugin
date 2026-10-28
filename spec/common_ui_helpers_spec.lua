@@ -216,8 +216,10 @@ expect(ran == 1, "link-only task did not run")
 -- A link-only task without a link is reported offline; silent_offline
 -- skips the notice.
 link_up = false
+local offline_shown_before = #shown
 expect(host:runOnlineTask("Sync", function() ran = ran + 1 end, nil, { link_only = true }) == false
-        and #scheduled == 0 and probes.online == 0 and last_shown().text:find("No network connection", 1, true),
+        and #scheduled == 0 and probes.online == 0 and #shown == offline_shown_before + 1
+        and last_shown().text:find("No network connection", 1, true),
     "link-only task without a link was scheduled or not reported")
 local shown_before = #shown
 expect(host:runOnlineTask("Sync", function() ran = ran + 1 end, nil, { link_only = true, silent_offline = true })
