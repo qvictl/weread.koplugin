@@ -996,6 +996,32 @@ do
     expect(#l.client.requests == 0, "offline fallback sends no HTTP")
 end
 
+for _, failure_at in ipairs({ "flush", "account notification" }) do
+    reset_ui()
+    local l = new_login()
+    l.settings.account = { user_vid = "old" }
+    function l.settings:get(key, default) return self[key] or default end
+    function l.settings:update_auth(credentials)
+        self.account = credentials.account
+        if failure_at == "flush" then error("storage flush failed") end
+    end
+    if failure_at == "account notification" then
+        function l.host:onWeReadAccountChanged() error("account notification failed") end
+    end
+    -- Mirror the real common helper: errors from parent delivery return
+    -- through on_failure after the settings account ID may have changed.
+    function l.host:_runNetworkRequest(_text, _label, task, success, failure)
+        local ok, value = pcall(task)
+        if not ok then failure(value, false); return end
+        local delivered, err = pcall(success, value)
+        if not delivered then failure(err, false) end
+    end
+    l:_complete({ succeed = true, webLoginVid = "new", accessToken = "token" }, l.generation)
+    expect(l.settings.account.user_vid == "new", failure_at .. " occurs after account mutation")
+    expect(contains(l.host.infos[1], failure_at .. " failed"), failure_at .. " failure is never silently discarded")
+    expect(l.host.refreshed == 0 and l.generation == 1, failure_at .. " failure ends the session without success UI")
+end
+
 -- Exercise the real common network boundary, with the production mock-endpoint
 -- shortcut absent: link checks must never enter the synchronous DNS probe.
 do

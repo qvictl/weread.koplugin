@@ -383,7 +383,11 @@ function QRLogin:_run_protocol_request(busy_text, generation, task, on_success, 
         end, function(result)
             if not valid() then return end
             self.login_cookies = result.cookies
-            on_success(result.value)
+            -- Applying a new account can itself fail after changing its ID
+            -- (e.g. settings flush). Report that failure here, before the
+            -- shared helper mistakes our partial apply for an external switch.
+            local ok, err = pcall(on_success, result.value)
+            if not ok and generation == self.generation then on_failure(err) end
         end, function(err, cancelled)
             if not valid() then return end
             if cancelled then self:cancel(); return end

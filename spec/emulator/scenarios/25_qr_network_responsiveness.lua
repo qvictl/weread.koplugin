@@ -177,4 +177,26 @@ return function(H)
         H.equal(account(), "900000", "retry can switch accounts intentionally")
         H.close_dialogs()
     end)
+    H.step("settings flush failure is reported after account mutation", function()
+        reset()
+        local saved_flush, generation
+        H.call(function()
+            saved_flush = plugin.settings.flush
+            plugin.settings.flush = function() error("synthetic persistence failure") end
+            generation = plugin.qr_login.generation
+            plugin.qr_login:_complete(good, generation)
+        end)
+        local ok, err = pcall(function() H.wait_text("synthetic persistence failure", 10) end)
+        H.call(function() plugin.settings.flush = saved_flush end)
+        if not ok then error(err, 0) end
+        H.equal(account(), "900000", "fault occurs after the in-memory account changed")
+        H.check(plugin.qr_login.generation > generation and plugin.qr_login.started_at == nil,
+            "failed credential persistence ends the session")
+        local success = H.tr("WeRead login successful.\n\nAccount: %1\nCookie: %2\nOfficial API key: %3")
+            :match("^([^\n]+)")
+        H.check(not H.has_text(success), "failed persistence displays no login success")
+        H.close_dialogs()
+        reset()
+    end)
+
 end
