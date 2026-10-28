@@ -713,7 +713,7 @@ def schedule_needs_eval(pr: Dict[str, Any], sticky: Optional[Dict[str, Any]], no
     head, blockers = m.group(1), set(filter(None, m.group(2).split(",")))
     if head != pr["head"]["sha"]:
         return True, "head moved"
-    if blockers <= {"threads", "ai", "protection"}:
+    if "protection" in blockers or blockers <= {"threads", "ai"}:
         # No event fires when a thread is resolved, nor (in general) when
         # CodeRabbit's check suite completes on a SHA that already has one.
         return True, "approved or only blocked by AI review / threads / unreadable protection"
