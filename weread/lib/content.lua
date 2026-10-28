@@ -249,15 +249,6 @@ end
 
 Content._unique_asset_name = unique_asset_name -- exposed for specs
 
-local function write_file(path, data)
-    local file, err = io.open(path, "wb")
-    if not file then
-        error(err)
-    end
-    file:write(data)
-    file:close()
-end
-
 local function make_path(path)
     local ok, util = pcall(require, "util")
     if ok and util and util.makePath then
@@ -636,8 +627,14 @@ function Content.create_download_workspace(settings, book)
         book_dir, os.time(), math.random(100000, 999999))
     local incoming_dir = workspace .. "/incoming"
     local asset_dir = workspace .. "/images"
-    make_path(incoming_dir)
-    make_path(asset_dir)
+    local prepared, err = pcall(function()
+        make_path(incoming_dir)
+        make_path(asset_dir)
+    end)
+    if not prepared then
+        remove_tree(workspace)
+        error(err, 0)
+    end
     return {
         path = workspace,
         incoming_dir = incoming_dir,
@@ -2304,7 +2301,7 @@ local function mp_article_asset_name(book, article)
 end
 
 function Content.download_mp_images_to_files(
-        client, settings, book, article, body_html, progress)
+        client, settings, book, article, body_html, progress, asset_name)
     body_html = tostring(body_html or "")
     local html_path = Content.mp_article_path(settings, book, article)
     local article_dir = html_path:match("^(.*)/[^/]+$")
@@ -2312,7 +2309,7 @@ function Content.download_mp_images_to_files(
         error("Could not resolve public-account article directory")
     end
 
-    local asset_name = mp_article_asset_name(book, article)
+    asset_name = asset_name or mp_article_asset_name(book, article)
     local asset_dir = article_dir .. "/" .. asset_name
     make_path(asset_dir)
 
@@ -2476,7 +2473,8 @@ p {
 </body>
 </html>]]
 
-    write_file(path, html)
+    local saved, save_err = atomic_write(path, html)
+    if not saved then error(save_err or "could not save article HTML", 0) end
     return path
 end
 
@@ -2578,7 +2576,7 @@ function Content.fetch_mp_article_html(client, settings, book, article, opts)
     local cache = settings:get("cache", {})
     if cache.download_mp_images then
         body = Content.download_mp_images_to_files(
-            client, settings, book, article, body, opts.progress)
+            client, settings, book, article, body, opts.progress, opts.asset_name)
     else
         body = Content.strip_mp_images(body)
     end

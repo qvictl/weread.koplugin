@@ -68,6 +68,17 @@ class MockTests(unittest.TestCase):
         self.assertEqual(overall["readTimes"], {"1704038400": 7200})  # Injected current year: 2024
         self.assertEqual(self.gateway("/readdata/detail", mode="invalid")[0], 400)
 
+    def test_synthetic_mp_content_and_bounded_image_host(self):
+        status, html = self.request("/web/mp/content?reviewId=mock-mp-article")
+        self.assertEqual(status, 200)
+        self.assertIn(b"Synthetic article body.", html)
+        self.assertIn(b"https://mmbiz.qpic.cn/mock/illustration.png", html)
+        status, image = self.request("/__proxy?url=https%3A%2F%2Fmmbiz.qpic.cn%2Fmock%2Fillustration.png")
+        self.assertEqual(status, 200)
+        self.assertTrue(image.startswith(b"\x89PNG"))
+        self.assertEqual(self.request("/web/mp/content?reviewId=unknown")[0], 400)
+        self.assertEqual(self.request("/__proxy?url=https%3A%2F%2Fmmbiz.qpic.cn%2Fapi%2FuserInfo")[0], 501)
+
     def test_synthetic_mp_article_list(self):
         before = self.request("/__state")[1]["started_counts"].get("/web/mp/articles", 0)
         status, result = self.request("/web/mp/articles?bookId=MP_WXS_900000&maxIdx=0&count=100")

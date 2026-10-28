@@ -49,18 +49,12 @@ local function widget_class(kind, extra)
         }
     end
 end
-local progress_reports = {}
 package.preload["ui/bidi"] = function() return {} end
 package.preload["ui/widget/infomessage"] = widget_class("info")
 package.preload["ui/widget/menu"] = widget_class("menu")
 package.preload["ui/widget/confirmbox"] = widget_class("confirm", { movable = { {} } })
 package.preload["ui/widget/inputdialog"] = widget_class("input")
 package.preload["ui/widget/textviewer"] = widget_class("textviewer")
-package.preload["ui/widget/progressbardialog"] = widget_class("progress", {
-    show = function(self) shown[#shown + 1] = self end,
-    reportProgress = function(_self, value) progress_reports[#progress_reports + 1] = value end,
-    close = function(self) closed[self] = true end,
-})
 package.preload["weread.lib.logger"] = function()
     return { info = function() end, warn = function() end, err = function() end }
 end
@@ -527,24 +521,20 @@ expect(calls_named("mp") == mp_calls + 1, "refresh row did not reload the articl
 
 list.item_table[1].callback()
 expect(opened[#opened] == "/mp/a1.html", "cached article did not open")
-content.mp_progress = { 1, 3 }
+local before_downloads = #downloads
 list.item_table[2].callback()
 drain()
-local bar = last_of("progress")
-expect(bar and bar.progress_max == 3 and closed[bar] and progress_reports[1] == 1 and progress_reports[2] == 3,
-    "article image progress was not shown and closed")
-expect(opened[#opened] == "/mp/a2.html" and records["MP_WXS_2"].cache_dir == "/mp/MP_WXS_2",
-    "downloaded article did not open or persist its directory")
-content.mp_progress, content.mp_error = nil, "HTTP 404"
+local mp_download = downloads[#downloads]
+expect(#downloads == before_downloads + 1 and mp_download.book == account
+        and mp_download.chapters[1] == articles[2] and mp_download.suffix == "article",
+    "uncached article did not enter shared downloader")
+expect(mp_download.options.mp_article and mp_download.options.single_chapter and mp_download.options.open_on_complete,
+    "article job lost worker/publication/open options")
 local opened_count = #opened
-host:downloadMPArticleAndRead(account, articles[2])
-drain()
-expect(#opened == opened_count and has(last_message(), "Download failed") and has(last_message(), "HTTP 404")
-        and host.busy_message == nil, "article download failure was not reported")
-content.mp_error = nil
 login.cookie = false
 host:downloadMPArticleAndRead(account, articles[2])
-expect(#scheduled == 1 and #opened == opened_count, "article download ran without the cookie login")
+expect(#scheduled == 1 and #opened == opened_count and #downloads == before_downloads + 1,
+    "article download ran without cookie login")
 drain()
 login.cookie = true
 
