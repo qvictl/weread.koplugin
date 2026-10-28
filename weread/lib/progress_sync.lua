@@ -644,8 +644,15 @@ function ProgressSync:_finish_upload(entry, ok, accepted, outcome)
         end
         return
     end
-    local error_message = ok and type(outcome) == "table"
-        and outcome.error or outcome
+    -- pcall puts a thrown error in the second value (`accepted`).
+    local error_message
+    if not ok then
+        error_message = accepted
+    elseif type(outcome) == "table" then
+        error_message = outcome.error
+    else
+        error_message = outcome
+    end
     if is_current then self.state = "error" end
     -- Keep it pending for the next resume/open.
     if not entry.persisted and not newer then
