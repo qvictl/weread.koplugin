@@ -49,6 +49,13 @@ class MockTests(unittest.TestCase):
                                         empty_shelf=False, empty_annotations=False, shelf_idless_entry=False,
                                         qr_mode="succeed", qr_delay=0))
 
+    def test_synthetic_cookie_renewal(self):
+        status, result = self.request("/web/login/renewal", {"rq": "%2Fweb%2Fbook%2Fread", "ql": False})
+        self.assertEqual(status, 200)
+        self.assertEqual(result, {"succ": 1})
+        self.assertEqual(self.request("/web/login/renewal", {"rq": "wrong", "ql": False})[0], 400)
+        self.assertEqual(self.request("/web/login/renewal", {"rq": "%2Fweb%2Fbook%2Fread", "ql": True})[0], 400)
+
     def test_synthetic_mp_article_list(self):
         before = self.request("/__state")[1]["started_counts"].get("/web/mp/articles", 0)
         status, result = self.request("/web/mp/articles?bookId=MP_WXS_900000&maxIdx=0&count=100")

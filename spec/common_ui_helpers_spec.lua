@@ -80,6 +80,7 @@ local Common = require("weread.ui.common")
 
 local function new_host(fields)
     local host = fields or {}
+    host._runNetworkRequest = host._runNetworkRequest or require("spec.helpers.immediate_network_request")
     for key, value in pairs(Common) do
         if host[key] == nil then host[key] = value end
     end
@@ -226,8 +227,8 @@ expect(host:runOnlineTask("Sync", function() ran = ran + 1 end, nil, { link_only
         == false and #scheduled == 0 and #shown == shown_before and ran == 1,
     "silent offline task was scheduled or showed a notice")
 
--- 7. Network actions report their result or error.
-set_network({ isOnline = function() return true end })
+-- 7. Network actions report their result or error without UI DNS checks.
+set_network({ isConnected = function() return true end, isOnline = function() error("UI DNS used") end })
 host:runNetworkAction("Refresh", function() return "Refreshed 3 books." end)
 run_scheduled()
 expect(last_shown().text == "Refreshed 3 books.", "action result not shown")
@@ -239,6 +240,26 @@ run_scheduled()
 expect(last_shown().text:find("Refresh failed:\n", 1, true) == 1 and last_shown().text:find("timeout", 1, true),
     "failed action not shown")
 expect(logged.err[#logged.err]:find("network action failed: Refresh", 1, true), "failed action not logged")
+
+local parent_value
+host:runNetworkAction("Apply", function() return { count = 3 } end, function(result)
+    parent_value = result.count
+    return "Parent saved 3"
+end)
+run_scheduled()
+expect(parent_value == 3 and last_shown().text == "Parent saved 3", "parent result application did not produce notice")
+host:runNetworkAction("Saved", function() return { count = 4 } end, function(result)
+    parent_value = result.count
+end)
+run_scheduled()
+expect(parent_value == 4 and last_shown().text == "Saved", "parent-only result leaked a data table into the notice")
+local before_cancel = #shown
+local cancelled_task_ran = false
+host.cancel_network_request = true
+host:runNetworkAction("Cancel", function() cancelled_task_ran = true end)
+run_scheduled()
+host.cancel_network_request = nil
+expect(not cancelled_task_ran and #shown == before_cancel, "cancelled action ran or reopened UI")
 
 -- 8. Lists.
 expect(host:showList("Books", {}) == nil and last_shown().text == "No items.", "empty list not explained")

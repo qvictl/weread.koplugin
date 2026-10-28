@@ -1783,16 +1783,17 @@ function M:parseReaderURLWithUI(url)
         local psvts = html:match([["psvts"%s*:%s*"([^"]+)"]])
         local pclts = html:match([["pclts"%s*:%s*"([^"]+)"]])
         local token = html:match([["token"%s*:%s*"([^"]+)"]])
-        if not book_id then
-            return _("Reader HTML loaded, but bookId was not found.")
-        end
+        return { book_id = book_id, title = title, psvts = psvts, pclts = pclts, token = token }
+    end, function(parsed)
+        local book_id, title = parsed.book_id, parsed.title
+        if not book_id then return _("Reader HTML loaded, but bookId was not found.") end
         local record = BookRecords.get(self.settings, book_id) or {}
         record.book_id = book_id
         record.title = title
         record.reader_url = url
-        record.psvts = psvts
-        record.pclts = pclts
-        record.token = token
+        record.psvts = parsed.psvts
+        record.pclts = parsed.pclts
+        record.token = parsed.token
         record.updated_at = os.time()
         BookRecords.put(self.settings, book_id, record)
         self.settings:flush()

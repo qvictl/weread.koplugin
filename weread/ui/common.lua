@@ -216,16 +216,20 @@ function M:_runNetworkRequest(busy_text, error_label, task, on_success, on_failu
     end)
 end
 
-function M:runNetworkAction(label, action)
+-- action runs in the request child; apply_result runs on the UI loop and may
+-- persist records or produce the final notice after account/auth validation.
+function M:runNetworkAction(label, action, apply_result)
     self:runOnlineTask(label, function()
-        local ok, result = pcall(action)
-        if ok then
-            self:showInfo(result or label)
-        else
-            logger.err("network action failed:", label, log_error(result))
-            self:showInfo(T(_("%1 failed:\n%2"), label, display_error(result)))
-        end
-    end)
+        self:_runNetworkRequest(label, label, action, function(result)
+            local message = result
+            if apply_result then message = apply_result(result) end
+            self:showInfo(message or label)
+        end, function(err, cancelled)
+            if cancelled then return end
+            logger.err("network action failed:", label, log_error(err))
+            self:showInfo(T(_("%1 failed:\n%2"), label, display_error(err)))
+        end)
+    end, 0.1, { link_only = true })
 end
 
 function M:showList(title, items, empty_text, options)
@@ -286,6 +290,7 @@ function M:renewCookieWithUI()
     end
     self:runNetworkAction(_("Renew cookie"), function()
         self.client:renew_cookie()
+    end, function()
         logger.info("cookie renewed")
         return _("WeRead cookie renewed.")
     end)
