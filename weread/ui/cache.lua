@@ -422,7 +422,12 @@ function M:showShelfFilterOptions(on_changed)
                     UIManager:nextTick(function()
                         UIManager:close(dialog)
                         -- Toggle within the dimension: re-tapping clears it, else select.
-                        filters[opt.dim] = (filters[opt.dim] == opt.value) and nil or opt.value
+                        -- (`cond and nil or v` would always yield v.)
+                        if filters[opt.dim] == opt.value then
+                            filters[opt.dim] = nil
+                        else
+                            filters[opt.dim] = opt.value
+                        end
                         self:saveShelfFilters()
                         on_changed()
                     end)
