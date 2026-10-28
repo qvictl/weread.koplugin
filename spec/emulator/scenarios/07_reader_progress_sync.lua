@@ -10,6 +10,9 @@
 --       position, which the next open uploads (F3: nothing at close);
 --   (c) no automatic action ever moves the cloud backwards (F6), also when a
 --       stale pending upload meets a cloud that moved further ahead.
+-- A page turned on the very next UI tick after the cloud jump (far inside
+-- the 150 ms window that used to be taken for the jump's own echo) is
+-- reading: it is uploaded after Suspend/Resume.
 local BOOK_ID = "900001"
 local TOTAL_WORDS = 6 * 1800
 
@@ -237,29 +240,84 @@ return function(H)
     end)
 
     local followed_percent
-    H.step("(b) manual sync follows the cloud", function()
+    local turned_percent
+    H.step("(b) manual sync follows the cloud, the page is turned right away", function()
         local plugin = H.plugin()
+        -- Seam: the reader's page-forward handler runs on the UI tick right
+        -- after the cloud jump returns, the earliest a tap can be handled.
+        local jump = {}
+        H.call(function()
+            local sync = plugin.progress_sync
+            local goto_fraction = sync.goto_fraction
+            sync.goto_fraction = function(fraction)
+                sync.goto_fraction = goto_fraction
+                local ok, err = goto_fraction(fraction)
+                jump.ms = H.now_ms()
+                jump.page = H.reader():getCurrentPage()
+                local landed = sync:capture_local()
+                jump.percent = landed and landed.fraction * 100
+                UIManager:nextTick(function()
+                    jump.turn_ms = H.now_ms()
+                    -- What the tap_forward zone runs (a real tap would only
+                    -- dismiss the "Jumped to WeRead progress" notice).
+                    H.reader().rolling:onGotoViewRel(1)
+                    jump.turned_page = H.reader():getCurrentPage()
+                end)
+                return ok, err
+            end
+        end)
         H.call(function() plugin:onWeReadSyncProgress() end)
         H.wait_until("manual sync dialog", dialog_shown, 20)
         tap_exact(tr("Use WeRead progress"))
-        H.wait_until("verified at the cloud position", function()
-            return plugin.progress_sync.verified and plugin.progress_sync.state == "verified"
+        H.wait_until("page turned right after the cloud jump", function()
+            return jump.turned_page ~= nil
         end, 10)
-        -- The jump re-captures the local position 0.15 s later; a reader
-        -- turns pages after seeing the new page, not inside that window.
-        H.sleep(0.5)
-        H.close_dialogs() -- "Jumped to WeRead progress" notice
-        followed_percent = local_percent()
+        local gap = jump.turn_ms - jump.ms
+        H.metric("turn_after_jump_ms", gap)
+        H.check(gap < 150, "page turned inside the old 150 ms echo window", tostring(gap))
+        H.check(jump.turned_page > jump.page, "page turn moved forward",
+            tostring(jump.page), "->", tostring(jump.turned_page))
+        followed_percent = jump.percent
         H.check(followed_percent and math.abs(followed_percent - 58.3) < 3,
             "reader jumped near the cloud's 58.3 %", tostring(followed_percent))
         H.metric("followed_percent", string.format("%.2f", followed_percent))
+        -- Well past the old window: the turn must still count as reading.
+        H.sleep(0.5)
+        H.close_dialogs() -- "Jumped to WeRead progress" notice
+        local state = H.call(function() return plugin.progress_sync:status() end)
+        H.equal(state.verified, true, "verified at the cloud position")
+        H.equal(state.dirty, true, "the immediate page turn is unsynced reading")
+        turned_percent = local_percent()
+        H.check(turned_percent > followed_percent + 0.05, "local position follows the turned page",
+            string.format("jump=%.2f turned=%.2f", followed_percent, turned_percent))
         H.equal(#uploads(), 0, "following the cloud uploads nothing")
-        H.shot("07-06-followed-cloud")
+        H.shot("07-06-followed-cloud-turned")
+    end)
+
+    H.step("(b) the page turned right after the jump is uploaded", function()
+        H.broadcast("Suspend")
+        H.broadcast("Resume")
+        -- Resume waits a few seconds for Wi-Fi before network work.
+        local entry = H.wait_until("upload of the turned page", function()
+            local list = uploads()
+            return list[#list]
+        end, 30)
+        H.log("uploaded:", describe(entry))
+        H.check(math.abs(cloud_percent(entry) - turned_percent) < 0.5,
+            "uploaded the page turned right after the jump", describe(entry),
+            string.format("local=%.2f", turned_percent))
+        H.check(cloud_percent(entry) > followed_percent + 0.05,
+            "upload is past the jump target", describe(entry))
+        H.wait_until("turned page accepted", function()
+            local sync = H.plugin().progress_sync
+            return not sync.dirty and sync.uploading == nil
+        end, 15)
     end)
 
     local read_to
     H.step("(b) read forward, close: persisted, not sent at close", function()
-        for _i = 1, 3 do turn_page_forward() end
+        -- One page was already turned right after the jump.
+        for _i = 1, 2 do turn_page_forward() end
         H.sleep(0.3)
         read_to = local_percent()
         H.check(read_to > 58.4, "read past the cloud position", tostring(read_to))
@@ -275,11 +333,12 @@ return function(H)
     end)
 
     H.step("(b) reopen uploads the newer position", function()
+        local uploads_before = #uploads()
         H.call(function() H.plugin():openFile(book_path) end)
         wait_reader_ready()
         local entry = H.wait_until("upload of the newer position", function()
             local list = uploads()
-            return list[#list]
+            return #list > uploads_before and list[#list]
         end, 30)
         H.log("uploaded:", describe(entry))
         H.check(cloud_percent(entry) > 58.4, "uploaded position is ahead of the old cloud", describe(entry))
@@ -345,7 +404,8 @@ return function(H)
         -- to /web/book/read with the same position: count positions.
         local distinct = 0
         for _key in pairs(uploaded) do distinct = distinct + 1 end
-        H.equal(distinct, 1, "distinct positions uploaded in the whole scenario")
+        -- The page turned right after the jump, then the position read to.
+        H.equal(distinct, 2, "distinct positions uploaded in the whole scenario")
         H.metric("history_entries", #list)
         local final = H.mock_state().progress[BOOK_ID]
         H.equal(tonumber(final.chapterUid), 6, "cloud keeps the newest (other-device) chapter")

@@ -21,7 +21,9 @@ package.preload["pluginshare"] = function() return {} end
 package.preload["ui/uimanager"] = function()
     return {
         scheduleIn = function(_self, delay, callback)
-            expect(delay >= 0.1, "footnote processing used a blocking schedule delay")
+            -- A zero-delay chain keeps UIManager's task loop busy and never
+            -- polls input (see FINALIZE_YIELD_S in the downloader).
+            expect(delay > 0, "footnote processing used a zero-delay step that starves input")
             scheduled[#scheduled + 1] = callback
         end,
         preventStandby = function() end,
@@ -129,13 +131,10 @@ local dl = {
     },
 }
 
+-- Both chapters fit in one finalize batch (the clock does not move), so the
+-- phase finishes in this step and yields once before packaging.
 downloader:_startFootnotes(dl)
-expect(#scheduled == 1, "footnote phase did not schedule its first chapter")
-scheduled[1]()
-expect(#scheduled == 2, "first chapter did not yield before continuing")
-scheduled[2]()
-expect(#scheduled == 3, "second chapter did not yield before completion")
-scheduled[3]()
+expect(#scheduled == 1, "footnote phase did not yield exactly once before packaging")
 
 expect(dl.footnotes_done == true, "footnote phase did not complete")
 expect(network_accesses == 0, "full-book footnote processing accessed the network")
@@ -195,7 +194,8 @@ local function run_resumable_footnotes(resumable_dl)
         expect(steps < 100 and scheduled[before + steps], "footnote phase stalled")
         scheduled[before + steps]()
     end
-    -- scan step + one transform step per chapter + completion step
+    -- one budgeted batch scans and transforms both chapters
+    expect(steps == 1, "small resumable footnote phase took more than one batch")
     return steps
 end
 
@@ -239,8 +239,9 @@ expect(resumable_rendered["11"] == resumable_raw["11"]
     and resumable_rendered["22"] == resumable_raw["22"],
     "footnote validation fallback did not stage original chapters for packaging")
 
--- Resumable rescans are split into small scheduled steps (F2/F4): a large
--- book must not be scanned in one synchronous UI step.
+-- Resumable rescans are split into time-budgeted scheduled steps (F2/F4): a
+-- large book must not be scanned in one synchronous UI step. Detailed batch
+-- budget, cancellation and ordering checks: downloader_finalize_batching_spec.
 do
     local many = {}
     resumable_raw = {}
@@ -248,10 +249,15 @@ do
         many[chapter_index] = { chapterUid = 100 + chapter_index, chapterIdx = chapter_index }
         resumable_raw[tostring(100 + chapter_index)] = "<p>chapter " .. chapter_index .. "</p>"
     end
+    -- Each scan costs 70 ms on the injected clock: the 200 ms budget is
+    -- spent after the third chapter of a batch.
+    local now_us = 0
+    downloader.clock = function() return now_us end
     local original_scan = Footnotes.scan_chapter
     local scans_per_step, current_step_scans = {}, 0
     Footnotes.scan_chapter = function(...)
         current_step_scans = current_step_scans + 1
+        now_us = now_us + 70 * 1000
         return original_scan(...)
     end
     local job = new_resumable_footnote_job()
@@ -267,9 +273,16 @@ do
         scans_per_step[#scans_per_step + 1] = current_step_scans
     end
     Footnotes.scan_chapter = original_scan
-    expect(#scans_per_step == 3 and scans_per_step[1] == 4 and scans_per_step[2] == 4
-        and scans_per_step[3] == 2, "footnote rescans were not batched 4 per step")
-    expect(job.footnote_job and #job.footnote_job.chapters == 10,
+    downloader.clock = nil
+    expect(#scans_per_step == 4 and scans_per_step[1] == 3 and scans_per_step[2] == 3
+        and scans_per_step[3] == 3 and scans_per_step[4] == 1,
+        "footnote rescans were not batched by the 200 ms budget")
+    -- The last scan batch had budget left, so the transform phase ran in it.
+    local rendered = 0
+    for chapter_index = 1, 10 do
+        if resumable_rendered[tostring(100 + chapter_index)] then rendered = rendered + 1 end
+    end
+    expect(job.footnotes_done and rendered == 10,
         "batched scan did not hand all chapters to the transform phase")
 end
 

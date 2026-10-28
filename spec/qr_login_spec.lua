@@ -180,4 +180,47 @@ do
     expect(login:on_suspend() == false, "nothing to cancel when idle")
 end
 
+-- A connection dropped while completing the login (userInfo/apikeyGet) is
+-- retried like a transient 401 and never surfaces as a Lua runtime error.
+do
+    package.loaded["socket"] = { sleep = function() end }
+    local saved
+    local attempts = {}
+    local responses = {
+        userInfo = { false, { name = "Reader" } },
+        apikeyGet = { false, { apikey = "flaky-key" } },
+    }
+    local function decode(_self, body) return body end
+    local flaky_client = {
+        request = function(_self, opts)
+            local stage = opts.url:find("userInfo", 1, true) and "userInfo" or "apikeyGet"
+            attempts[stage] = (attempts[stage] or 0) + 1
+            local response = table.remove(responses[stage], 1)
+            if response == false then return nil, nil, nil, "closed" end
+            return response, 200, {}
+        end,
+        decode_http_json = decode,
+    }
+    local settings = { update_auth = function(_self, credentials) saved = credentials end }
+    local login_result = { succeed = true, webLoginVid = "vid", accessToken = "token" }
+    local flaky = QRLogin:new({}, flaky_client, settings)
+    local ok, account = pcall(flaky._complete_protocol, flaky, login_result, flaky.generation)
+    expect(ok and account.name == "Reader" and saved and saved.api_key == "flaky-key",
+        "a dropped connection while completing the login must be retried: " .. tostring(account))
+    expect(attempts.userInfo == 2 and attempts.apikeyGet == 2, "each dropped request retried once")
+
+    saved = nil
+    local dead_client = {
+        request = function() return nil, nil, nil, "closed" end,
+        decode_http_json = decode,
+    }
+    local dead = QRLogin:new({}, dead_client, settings)
+    local dead_ok, err = pcall(dead._complete_protocol, dead, login_result, dead.generation)
+    expect(not dead_ok and tostring(err):find("userInfo", 1, true)
+        and tostring(err):find("closed", 1, true)
+        and not tostring(err):find("attempt to index", 1, true),
+        "a persistent transport failure must be reported as a network error: " .. tostring(err))
+    expect(saved == nil, "no credentials saved after a transport failure")
+end
+
 print("qr_login_spec: " .. checks .. " checks passed")

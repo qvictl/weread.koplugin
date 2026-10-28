@@ -3,7 +3,8 @@
 -- Real shelf flow: /shelf/sync through the mock, the LibraryView with its
 -- page bar (26 books over several pages, Next/Previous), the group menu,
 -- taps queued before the view's first paint (must propagate, not crash),
--- and a title tap that opens the book page and its 6-chapter list.
+-- a shelf filter toggled on and off again by re-tapping it, and a title tap
+-- that opens the book page and its 6-chapter list.
 return function(H)
     local UIManager = require("ui/uimanager")
 
@@ -140,6 +141,34 @@ return function(H)
         local back = wait_shelf("all books again", group_view, function(v) return v.group_label == nil end)
         H.equal(#back.books, 26, "All view restored")
         H.check(H.has_text(all_label, back), "header back to All", all_label)
+    end)
+
+    H.step("re-tapping the active filter clears it", function()
+        local option = H.tr("Only show unfinished books")
+        local function shelf_settings()
+            return H.call(function() return plugin.settings:get("shelf") or {} end)
+        end
+        local function choose_filter(view)
+            H.call(function() view.on_filter() end)
+            tap_exact(option, function()
+                for _i, entry in ipairs(UIManager._window_stack or {}) do
+                    if H.has_text(H.tr("Filter by"), entry.widget) then return entry.widget end
+                end
+            end)
+        end
+        local view = shelf_view()
+        choose_filter(view)
+        local filtered = wait_shelf("unfinished filter on", view, function(v)
+            return v.filter_label == H.tr("Unfinished")
+        end)
+        H.equal(shelf_settings().filter_reading, "unfinished", "filter saved")
+        H.equal(#filtered.books, 26, "mock books are all unfinished")
+        choose_filter(filtered)
+        local cleared = wait_shelf("filter cleared by the second tap", filtered, function(v)
+            return v.filter_label == H.tr("All")
+        end)
+        H.equal(shelf_settings().filter_reading, nil, "cleared filter saved")
+        H.equal(#cleared.books, 26, "All view after clearing")
     end)
 
     H.step("taps before the first paint do not crash", function()
