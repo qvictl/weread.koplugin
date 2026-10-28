@@ -108,8 +108,9 @@ gh api repos/$R/branches/main/protection --jq '{approvals: .required_pull_reques
   checks: .required_status_checks.contexts}'
 ```
 
-紧急停用（网关或 AI 应用出问题）。按顺序：网关改为只报告 → 取消排队 / 运行中的网关运行 → 关闭所有打开 PR 的自动合并并核验
-一个不剩 → 需要时才把批准数改回 0。子 shell 中任何一步失败都会中止；`do-not-merge` 可以单独拦住某个 PR。
+紧急停用（网关或 AI 应用出问题）。按顺序：网关改为只报告 → 取消排队 / 运行中的网关运行并等它们真正结束（取消返回 409
+表示已经结束，跳过）→ 再关闭所有打开 PR 的自动合并 → 核验没有剩余运行和自动合并。子 shell 中任何一步失败都会中止；
+`do-not-merge` 可以单独拦住某个 PR。
 
 ```sh
 ( set -euo pipefail
@@ -119,23 +120,33 @@ gh api repos/$R/branches/main/protection --jq '{approvals: .required_pull_reques
   else
     gh api -X POST repos/$R/actions/variables -f name=REVIEW_GATE_DRY_RUN -f value=true
   fi
-  for st in queued in_progress waiting pending requested; do
-    ids=$(gh api --paginate "repos/$R/actions/workflows/review-gate.yml/runs?status=$st&per_page=100" --jq '.workflow_runs[].id')
-    for id in $ids; do gh api -X POST repos/$R/actions/runs/$id/cancel >/dev/null; done
+  active() {
+    for st in queued in_progress waiting pending requested; do
+      gh api --paginate "repos/$R/actions/workflows/review-gate.yml/runs?status=$st&per_page=100" --jq '.workflow_runs[].id'
+    done
+  }
+  ids=$(active)
+  for id in $ids; do
+    if ! gh api -X POST repos/$R/actions/runs/$id/cancel >/dev/null 2>&1; then
+      st=$(gh api repos/$R/actions/runs/$id --jq .status)   # 409: already finished
+      [ "$st" = completed ] || { echo "cannot cancel run $id ($st)" >&2; exit 1; }
+    fi
   done
+  for i in $(seq 1 20); do left=$(active); [ -z "$left" ] && break; sleep 15; done
+  if [ -n "$left" ]; then echo "review gate runs still active: $left" >&2; exit 1; fi
   ids=$(gh api --paginate "repos/$R/pulls?state=open&per_page=100" --jq '.[] | select(.auto_merge != null) | .node_id')
   for id in $ids; do
     gh api graphql -f query='mutation($id:ID!){disablePullRequestAutoMerge(input:{pullRequestId:$id}){clientMutationId}}' -f id=$id >/dev/null
   done
-  sleep 30
-  for st in queued in_progress waiting pending requested; do
-    left=$(gh api --paginate "repos/$R/actions/workflows/review-gate.yml/runs?status=$st&per_page=100" --jq '.workflow_runs[].id')
-    if [ -n "$left" ]; then echo "review gate runs still $st: $left" >&2; exit 1; fi
-  done
   left=$(gh api --paginate "repos/$R/pulls?state=open&per_page=100" --jq '.[] | select(.auto_merge != null) | .number')
   if [ -n "$left" ]; then echo "auto-merge still enabled on: $left" >&2; exit 1; fi
-  # 只有确实需要绕过批准时才执行下一条
-  gh api -X PATCH repos/$R/branches/main/protection/required_pull_request_reviews     -F required_approving_review_count=0 -F dismiss_stale_reviews=false     -F require_code_owner_reviews=false -F require_last_push_approval=false )
+  echo "review gate stopped" )
+```
+
+只有在上面的块成功结束、并且确实需要不经批准合并时，才单独执行：
+
+```sh
+gh api -X PATCH repos/$R/branches/main/protection/required_pull_request_reviews   -F required_approving_review_count=0 -F dismiss_stale_reviews=false   -F require_code_owner_reviews=false -F require_last_push_approval=false
 ```
 
 ---
