@@ -136,6 +136,13 @@ local function last_of(kind)
     end
 end
 local function last_message() local info = last_of("info") return info and info.text or "" end
+-- Text of the latest info message shown after `mark` (#shown before the action).
+local function message_since(mark)
+    for index = #shown, mark + 1, -1 do
+        if shown[index]._kind == "info" then return shown[index].text or "" end
+    end
+    return ""
+end
 local function has(text, needle) return type(text) == "string" and text:find(needle, 1, true) ~= nil end
 
 local records = {}
@@ -475,9 +482,10 @@ drain()
 expect(calls_named("mp") == 3 and has(last_message(), "scan the QR code again"),
     "failed credential renewal was not reported")
 mp_result.queue, mp_result.renew_ok = { -2041, -2041 }, true
+local mark = #shown
 host:fetchMPArticles(account)
 drain()
-expect(has(last_message(), "scan the QR code again"), "repeated mp rejection was not reported")
+expect(has(message_since(mark), "scan the QR code again"), "repeated mp rejection was not reported")
 mp_result.code = -5
 host:fetchMPArticles(account)
 drain()
@@ -571,8 +579,9 @@ expect(host:openBookForReading({ book_id = "51", cached_chapters = { b = "/r/b",
 expect(host:openBookForReading({ book_id = "52" }) == false and last_message() == "No cached file.",
     "missing cache was not reported")
 host.library_db = saved_db
+mark = #shown
 host:openFile("")
-expect(last_message() == "No cached file.", "empty path was opened")
+expect(message_since(mark) == "No cached file.", "empty path was opened")
 host.ui.document = {}
 host:openCachedBook({ full_path = "/b31/full.epub" })
 expect(opened[#opened] == "switch:/b31/full.epub", "open document was not switched")

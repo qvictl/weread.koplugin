@@ -123,7 +123,7 @@ local function new_host(opts)
     function link:getLinkFromGes(ges)
         log.link_lookups = log.link_lookups + 1
         if opts.link_raises then error("crengine busy") end
-        return links[ges.pos.x]
+        return ges.pos and links[ges.pos.x] or nil
     end
     function link:onTap() return "native" end
     local document = {
@@ -559,16 +559,24 @@ do
 
     -- Defensive path when ReaderLink is not filtered (e.g. another plugin
     -- replaced it): hidden annotations still never open a thought.
-    local unfiltered, _, unfiltered_links, unfiltered_cache = new_host({ unified = false })
+    local unfiltered, unfiltered_log, unfiltered_links, unfiltered_cache = new_host({ unified = false })
     unfiltered_links[500] = links[500]
     unfiltered_cache.show_annotations = false
     expect(unfiltered:_onThoughtTap(tap) == false and #ticks == 0,
         "an unfiltered ReaderLink let hidden thoughts open")
     unfiltered_cache.show_annotations = true
     unfiltered_cache.ignore_edge_thought_taps = true
-    expect(unfiltered:_onThoughtTap({}) == false,
-        "a gesture without a position was intercepted")
-    run_ticks()
+    local unfiltered_lookups = unfiltered_log.link_lookups
+    expect(unfiltered:_onThoughtTap({}) == false and unfiltered_log.link_lookups == unfiltered_lookups + 1,
+        "a gesture without a position was intercepted or skipped the link lookup")
+    -- A unified book never opens the legacy popup, even when ReaderLink
+    -- still returns our anchors.
+    local unified_unfiltered, unified_log, unified_links = new_host({ unified = true })
+    unified_links[500] = links[500]
+    expect(unified_unfiltered:_onThoughtTap(tap) == false and unified_log.link_lookups == 1
+            and unified_unfiltered._thought_page_cache == nil and #ticks == 0,
+        "an unfiltered ReaderLink let a unified book open the legacy popup")
+    expect(#ticks == 0, "a defensive pass-through queued a popup")
 
     local raising = new_host({ link_raises = true })
     local ok, consumed = pcall(raising._onThoughtTap, raising, tap)

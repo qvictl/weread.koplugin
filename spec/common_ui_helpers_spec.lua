@@ -200,6 +200,29 @@ expect(host:runOnlineTask("Sync", function() ran = ran + 1 end) == false and #sc
 expect(host.busy_message == nil and last_shown().text:find("No network connection", 1, true),
     "offline notice missing")
 expect(logged.warn[#logged.warn]:find("network unavailable: Sync", 1, true), "offline not logged")
+-- link_only checks the link and never the (possibly blocking) online probe.
+local probes = { online = 0, link = 0 }
+local link_up = true
+set_network({
+    isOnline = function() probes.online = probes.online + 1 return false end,
+    isConnected = function() probes.link = probes.link + 1 return link_up end,
+})
+ran = 0
+expect(host:runOnlineTask("Sync", function() ran = ran + 1 end, nil, { link_only = true }) == true
+        and #scheduled == 1 and probes.online == 0 and probes.link == 1,
+    "link-only task used the online check or was not scheduled")
+run_scheduled()
+expect(ran == 1, "link-only task did not run")
+-- A link-only task without a link is reported offline; silent_offline
+-- skips the notice.
+link_up = false
+expect(host:runOnlineTask("Sync", function() ran = ran + 1 end, nil, { link_only = true }) == false
+        and #scheduled == 0 and probes.online == 0 and last_shown().text:find("No network connection", 1, true),
+    "link-only task without a link was scheduled or not reported")
+local shown_before = #shown
+expect(host:runOnlineTask("Sync", function() ran = ran + 1 end, nil, { link_only = true, silent_offline = true })
+        == false and #scheduled == 0 and #shown == shown_before and ran == 1,
+    "silent offline task was scheduled or showed a notice")
 
 -- 7. Network actions report their result or error.
 set_network({ isOnline = function() return true end })

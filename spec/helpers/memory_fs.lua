@@ -187,6 +187,8 @@ end
 function Fs:install()
     local fs = self
     local lfs = self:lfs()
+    local real_preload = package.preload["libs/libkoreader-lfs"]
+    local real_loaded = package.loaded["libs/libkoreader-lfs"]
     package.preload["libs/libkoreader-lfs"] = function() return lfs end
     package.loaded["libs/libkoreader-lfs"] = lfs
     local real_remove, real_execute, real_open = os.remove, os.execute, io.open
@@ -201,6 +203,8 @@ function Fs:install()
         rawset(os, "remove", real_remove)
         rawset(os, "execute", real_execute)
         rawset(io, "open", real_open)
+        package.preload["libs/libkoreader-lfs"] = real_preload
+        package.loaded["libs/libkoreader-lfs"] = real_loaded
     end
 end
 

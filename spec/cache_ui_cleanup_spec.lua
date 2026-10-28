@@ -443,12 +443,13 @@ ok, err = host:clearBookAnnotationData("42", { cached_file = "/x.epub" })
 expect(ok == false and err:find("legacy db read-only", 1, true), "legacy annotation failure was not returned")
 legacy_db.fail = nil
 host._annotation_pending_prefetch = { context = { book_id = 42 } }
+local legacy_mark = #legacy_clears
 ok = host:clearBookAnnotationData(42, { cached_file = "/x.epub", cached_full_book = "/x.epub" })
 expect(ok == true and host._annotation_pending_prefetch == nil, "pending prefetch of the book was kept")
 expect(host._annotation_context == nil and host._unified_annotations_active == nil
         and type(overlay_records) == "table" and #overlay_records == 0,
     "reader annotation state of the cleared book was kept")
-expect(legacy_clears[#legacy_clears] == "/x.epub" and legacy_clears[#legacy_clears - 1] ~= "/x.epub",
+expect(#legacy_clears == legacy_mark + 1 and legacy_clears[#legacy_clears] == "/x.epub",
     "a document path was cleared twice")
 -- Without an injected store one is created from the settings.
 local created_with

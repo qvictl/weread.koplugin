@@ -200,10 +200,10 @@ host.downloader = nil
 
 -- 5. Moving: successful books follow their files, an existing target is
 -- never overwritten, a failed move stays in place.
-collection.members["/mnt/new/111/book.epub"] = nil
 offer.ok_callback()
 expect(busy[#busy] == "Moving cached books..." and #scheduled == 1, "move did not show a busy message first")
 local flushes_before = flushes
+local warnings_mark = #warnings
 run_scheduled()
 expect(busy[#busy] == "closed", "busy message stayed open")
 expect(fs:is_file("/mnt/new/111/book.epub") and fs:is_file("/mnt/new/111/7.epub")
@@ -228,8 +228,14 @@ expect(#collection.removed == 1 and collection.removed[1].path == "/mnt/old/111/
 expect(flushes > flushes_before, "moved records were not saved")
 expect(last_info():find("Moved 2 book(s). 1 skipped", 1, true) and last_info():find("1 failed", 1, true),
     "partial move was not reported: " .. last_info())
-expect(warnings[#warnings - 1]:find("target exists", 1, true) or warnings[#warnings]:find("target exists", 1, true),
-    "skipped move was not logged")
+local function logged_since(mark, needle)
+    for index = mark + 1, #warnings do
+        if warnings[index]:find(needle, 1, true) then return true end
+    end
+    return false
+end
+expect(logged_since(warnings_mark, "skip move, target exists: /mnt/new/444"), "skipped move was not logged")
+expect(logged_since(warnings_mark, "move book cache failed: /mnt/old/555"), "failed move was not logged")
 
 -- A clean move reports the destination, and no collection write happens
 -- when no book file moved.

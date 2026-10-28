@@ -213,6 +213,52 @@ do
     expect(host:_annotationChapterIndex({}, "0") == nil, "a closed document indexed")
 end
 
+-- Chapter index lookup: numeric xpointers, compareXPointers(a, b) is 1 when
+-- a precedes b, 0 when equal and -1 when a follows b (crengine order).
+do
+    local compares = 0
+    local document = { compareXPointers = function(_self, a, b)
+        compares = compares + 1
+        a, b = tonumber(a), tonumber(b)
+        if not a or not b then error("invalid xpointer") end
+        return a < b and 1 or (a == b and 0 or -1)
+    end }
+    local host = new_host()
+    host.ui.document = document
+    -- Chapter 3 shares chapter 2's TOC anchor; chapter 5 has no range.
+    local context = new_context(new_store(), {
+        chapters = { { chapterUid = "1" }, { chapterUid = "2" }, { chapterUid = "3" },
+            { chapterUid = "4" }, { chapterUid = "5" } },
+        ranges = { ["1"] = { start_xpointer = "10" }, ["2"] = { start_xpointer = "20" },
+            ["3"] = { start_xpointer = "20" }, ["4"] = { start_xpointer = "40" } },
+    })
+    expect(host:_annotationChapterIndex(context, "5") == nil and context._chapter_lookup.cursor == nil,
+        "a point before the first chapter was indexed")
+    expect(#context._chapter_lookup.starts == 3, "equal TOC anchors were not collapsed")
+    expect(host:_annotationChapterIndex(context, "10") == 1, "a chapter start was not indexed to its chapter")
+    expect(host:_annotationChapterIndex(context, "25") == 2, "equal TOC anchors did not keep the first chapter")
+    expect(host:_annotationChapterIndex(context, "45") == 4, "the last chapter was not found by binary search")
+    local lookup = context._chapter_lookup
+    -- Same-chapter page turns take the cursor fast path: one comparison on
+    -- the last chapter, two in the middle, and the lookup is not rebuilt.
+    compares = 0
+    expect(host:_annotationChapterIndex(context, "47") == 4 and compares == 1,
+        "a page turn in the last chapter did not use the cursor")
+    expect(host:_annotationChapterIndex(context, "15") == 1, "jumping back did not binary search")
+    compares = 0
+    expect(host:_annotationChapterIndex(context, "16") == 1 and compares == 2,
+        "a page turn in a middle chapter did not use the cursor")
+    expect(context._chapter_lookup == lookup, "an unchanged context rebuilt its chapter lookup")
+    -- A failing comparison aborts instead of guessing a chapter.
+    expect(host:_annotationChapterIndex(context, "bad") == nil, "a failed comparison on the cursor indexed")
+    lookup.cursor = nil
+    expect(host:_annotationChapterIndex(context, "bad") == nil, "a failed comparison in the search indexed")
+    -- New ranges rebuild the lookup.
+    context.ranges = { ["1"] = { start_xpointer = "10" }, ["5"] = { start_xpointer = "50" } }
+    expect(host:_annotationChapterIndex(context, "55") == 5 and context._chapter_lookup ~= lookup,
+        "changed ranges did not rebuild the chapter lookup")
+end
+
 -- Overlay refresh decisions.
 do
     local store = new_store()
@@ -246,6 +292,84 @@ do
     host:_refreshAnnotationOverlay()
     expect(overlay.sets == 3 and #overlay.records == 1,
         "a fully matched automatic book did not show its underlines")
+end
+
+-- Overlay window: the visible page range picks the chapters to load (plus one
+-- neighbour on each side), an unchanged window is not reloaded, a failed
+-- projection read keeps the current underlines, and legacy projections turn
+-- off the ordered index.
+do
+    local store = new_store()
+    local overlay = { setRecords = function(self, records, ordered)
+        self.sets = (self.sets or 0) + 1
+        self.records, self.ordered = records, ordered
+    end }
+    local host = new_host({ _xpointer_overlay = overlay })
+    -- Chapter N starts at xpointer N*10; page 3 has no anchor.
+    local page_anchor = { [1] = "25", [2] = "35", [4] = "55", [5] = "65" }
+    local document = {
+        current_page = 1, page_count = 9,
+        getXPointer = function(self) return page_anchor[self.current_page] end,
+        getCurrentPage = function(self) return self.current_page end,
+        getPageCount = function(self) return self.page_count end,
+        getPageXPointer = function(_self, page) return page_anchor[page] end,
+        compareXPointers = function(_self, a, b)
+            a, b = tonumber(a), tonumber(b)
+            return a < b and 1 or (a == b and 0 or -1)
+        end,
+    }
+    host.ui.document = document
+    local chapters, ranges = {}, {}
+    for index = 1, 6 do
+        chapters[index] = { chapterUid = tostring(index) }
+        ranges[tostring(index)] = { start_xpointer = tostring(index * 10) }
+        store:put("b1", "projection", "doc:" .. index, { records = { { chapter = index } } })
+    end
+    local context = new_context(store, { chapters = chapters, ranges = ranges, generation = 1 })
+    host._annotation_context = context
+    local function loaded()
+        local ids = {}
+        for _i, record in ipairs(overlay.records) do ids[#ids + 1] = record.chapter end
+        return table.concat(ids, ",")
+    end
+
+    -- Page 1 is in chapter 2, the next page starts chapter 3.
+    host:_refreshAnnotationOverlay()
+    expect(overlay.sets == 1 and overlay._annotation_window == "2:3:1" and loaded() == "1,2,3,4",
+        "the visible page window did not load its chapters and neighbours: " .. loaded())
+    expect(overlay.ordered == true, "located projections were not marked ordered")
+    host:_refreshAnnotationOverlay()
+    expect(overlay.sets == 1, "an unchanged window reloaded the projections")
+
+    -- A missing anchor for the next page keeps the window to one chapter
+    -- instead of loading the rest of the book.
+    document.current_page = 2
+    host:_refreshAnnotationOverlay()
+    expect(overlay.sets == 2 and overlay._annotation_window == "3:3:1" and loaded() == "2,3,4",
+        "a missing page anchor widened the window: " .. loaded())
+
+    -- On the last page the window runs to the last chapter.
+    document.current_page, document.page_count = 4, 4
+    host:_refreshAnnotationOverlay()
+    expect(overlay.sets == 3 and overlay._annotation_window == "5:6:1" and loaded() == "4,5,6",
+        "the last page did not extend the window to the last chapter")
+
+    -- A busy database keeps the current underlines and logs once.
+    document.current_page, document.page_count = 1, 9
+    local real_get = store.get
+    store.get = function() error("database is locked") end
+    logs.warn = {}
+    host:_refreshAnnotationOverlay()
+    expect(overlay.sets == 3 and overlay._annotation_window == "5:6:1" and #logs.warn == 1
+            and logs.warn[1]:find("database is locked", 1, true),
+        "a failed projection read changed the overlay or was not logged")
+    store.get = real_get
+
+    -- Legacy projections have no ordering guarantee.
+    store:put("b1", "projection", "doc:3", { legacy = true, records = { { chapter = 3 } } })
+    host:_refreshAnnotationOverlay()
+    expect(overlay.sets == 4 and overlay.ordered == false and loaded() == "1,2,3,4",
+        "a legacy projection was handed to the ordered index")
 end
 
 -- Prefetch worker completion: auth write-back, failures and stale requests.

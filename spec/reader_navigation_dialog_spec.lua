@@ -71,6 +71,8 @@ local function last_call() return calls[#calls] end
 -- 1. A single downloaded chapter with a successor enables every action.
 expect(host:showEndOfBookDialog("100") == true and dialogs == 1, "quick menu not shown")
 expect(loaded_for == books["100"], "chapters not loaded for the book")
+expect(options.show_chapter_nav == true and options.show_next_chapter == true,
+    "regular chapter hid the chapter navigation row")
 expect(options.enable_chapter_list and options.enable_next_chapter and options.enable_book_details
         and options.enable_sync_progress and options.annotations_visible,
     "regular chapter did not enable every action")
@@ -114,6 +116,9 @@ host:showEndOfBookDialog("100")
 expect(options.enable_chapter_list == false and options.enable_next_chapter == false
         and options.enable_book_details,
     "missing chapters left chapter actions enabled")
+-- The row stays visible (disabled) so the global quick menu keeps its layout.
+expect(options.show_chapter_nav == true and options.show_next_chapter == true,
+    "missing chapters hid the chapter navigation row")
 notice = nil
 call_count = #calls
 callbacks.on_chapter_list()
@@ -127,6 +132,9 @@ expect(notice.text == "You have reached the last chapter.", "next without chapte
 notice = nil
 host:showEndOfBookDialog("missing")
 expect(options.enable_book_details == false and options.enable_sync_progress == false, "unknown book enabled actions")
+expect(options.show_chapter_nav == true and options.show_next_chapter == true
+        and options.enable_chapter_list == false and options.enable_next_chapter == false,
+    "a local document hid or enabled the chapter navigation row")
 call_count = #calls
 callbacks.on_book_details()
 expect(#calls == call_count and notice.text == "This action requires an open WeRead book.",
