@@ -376,10 +376,13 @@ class Verdict:
 
 
 def newest(runs: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """The most recent check run. A run that has not started yet (queued,
-    `started_at` null) is newer than any started one: it was created by a later
-    push or re-run, so an older success must not count while it is pending."""
-    return max(runs, key=lambda r: (r.get("started_at") is None, r.get("started_at") or "", r.get("id") or 0))
+    """The most recent check run. A run that is not completed and has not
+    started yet (queued, `started_at` null) is newer than any started one: it
+    was created by a later push or re-run, so an older success must not count
+    while it is pending. A completed run without `started_at` is not treated
+    as newest (the Checks API does not require the field)."""
+    return max(runs, key=lambda r: (r.get("started_at") is None and r.get("status") != "completed",
+                                    r.get("started_at") or "", r.get("id") or 0))
 
 
 def latest_by_name(runs: List[Dict[str, Any]], context: str, app_id: Optional[int]) -> Optional[Dict[str, Any]]:

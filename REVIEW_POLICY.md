@@ -104,7 +104,8 @@
 
 - 插件内置更新器（`weread/lib/updater.lua`）会把 `main` 上版本号升级后的发布自动推送到设备。合入 `main` 的缺陷会直接到达读者的设备，所以**发布永远需要人**：版本号、发布 / 更新器、CI 和策略文件都是敏感路径，
   只有维护者用 `human-approved` 才能让它们自动合并，而且 CI 与 AI 审查仍须全部通过。
-- 网关的所有运行都使用默认分支上的工作流和脚本（`pull_request_target`、`workflow_run`、`check_suite`、定时任务）；
+- 网关的所有运行都使用默认分支上的工作流和脚本（`pull_request_target`、`workflow_run`、`check_suite`、定时任务；
+  手动运行会使用所选分支上的工作流文件，所以网关作业拒绝在默认分支以外手动运行，`automerge` 作业的 environment 也只允许 `main`）；
   审查和审查评论事件由没有任何权限、不检出代码的 `review-gate-relay.yml` 转发（它结束后触发 `workflow_run`）。网关从不检出或执行
   PR 的代码，所以 PR 改不了**本次**评估它的网关逻辑；修改网关、工作流和 AI 审查配置本身属于敏感路径。
 - 用 `GITHUB_TOKEN` 合并不会触发 `main` 上的 push 工作流（覆盖率基线、nightly），所以自动合并使用单独的
@@ -151,7 +152,8 @@ gh api -X PATCH repos/$R -F allow_auto_merge=true
 echo '{"deployment_branch_policy":{"protected_branches":false,"custom_branch_policies":true}}' | gh api -X PUT repos/$R/environments/review-gate --input -
 gh api -X POST repos/$R/environments/review-gate/deployment-branch-policies -f name=main -f type=branch
 gh secret set REVIEW_GATE_MERGE_TOKEN -R $R --env review-gate
-gh api -X POST repos/$R/actions/variables -f name=REVIEW_GATE_AUTOMERGE -f value=on
+gh api -X PATCH repos/$R/actions/variables/REVIEW_GATE_AUTOMERGE -f value=on \
+  || gh api -X POST repos/$R/actions/variables -f name=REVIEW_GATE_AUTOMERGE -f value=on
 
 # 3. main 需要 1 个批准；新提交使旧批准失效；不要求 CODEOWNERS
 gh api -X PATCH repos/$R/branches/main/protection/required_pull_request_reviews \
@@ -182,7 +184,7 @@ gh api -X PATCH repos/$R/branches/main/protection/required_pull_request_reviews 
 ```
 
 紧急情况（网关或 AI 应用故障且必须合并）：先设 `REVIEW_GATE_DRY_RUN=true`
-（`gh api -X POST repos/$R/actions/variables -f name=REVIEW_GATE_DRY_RUN -f value=true`），
+（`gh api -X PATCH repos/$R/actions/variables/REVIEW_GATE_DRY_RUN -f value=true || gh api -X POST repos/$R/actions/variables -f name=REVIEW_GATE_DRY_RUN -f value=true`），
 再按上面的命令回退到 0 个批准；处理完后恢复，并在 PR 中记录原因。
 
 ---

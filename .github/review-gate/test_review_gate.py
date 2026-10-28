@@ -321,6 +321,14 @@ class RequiredChecksTest(GateCase):
         self.assertFalse(self.cond("checks").ok)
         self.assertIn("`ci`（queued）", self.cond("checks").detail)
 
+    def test_completed_run_without_started_at_does_not_hide_a_newer_failure(self):
+        self.state["check_runs"] = [check("ci", "success", rid=1, at=None),
+                                    check("ci", "failure", rid=2, at="2026-10-27T10:00:00Z"),
+                                    check("tests-policy", rid=3)]
+        self.run_gate()
+        self.assertFalse(self.cond("checks").ok)
+        self.assertIn("`ci`（failure）", self.cond("checks").detail)
+
     def test_check_from_another_app_does_not_count(self):
         self.state["check_runs"][0]["app"] = {"id": 1}
         self.assertFalse(self.run_gate().ok)
@@ -492,6 +500,14 @@ class SensitivePathsTest(GateCase):
             self.add(name)
             self.run_gate()
             self.assertFalse(self.cond("sensitive").ok, name)
+
+    def test_directory_rule_covers_files_without_keywords(self):
+        config = dict(CONFIG, sensitive_paths=CONFIG["sensitive_paths"] + ["plugins/kosync.koplugin/**"])
+        self.add("plugins/kosync.koplugin/KOSyncClient.lua", patch="+    local base_url = server .. path")
+        facts = rg.collect(FakeGitHub(self.state), REPO, 7)
+        c = rg.check_sensitive(facts, config)
+        self.assertFalse(c.ok)
+        self.assertIn("KOSyncClient.lua", c.detail)
 
     def test_rename_out_of_sensitive_path_blocks(self):
         self.add("tools/moved.yml", previous=".github/workflows/release.yml")
