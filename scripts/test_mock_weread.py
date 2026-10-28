@@ -65,6 +65,17 @@ class MockTests(unittest.TestCase):
                          1767196800)  # 2026-01-01, Beijing midnight
         self.assertEqual(self.gateway("/readdata/detail", mode="invalid")[0], 400)
 
+    def test_synthetic_mp_article_list(self):
+        before = self.request("/__state")[1]["started_counts"].get("/web/mp/articles", 0)
+        status, result = self.request("/web/mp/articles?bookId=MP_WXS_900000&maxIdx=0&count=100")
+        self.assertEqual(status, 200)
+        article = result["reviews"][0]["subReviews"][0]["review"]
+        self.assertEqual(article["reviewId"], "mock-mp-article")
+        self.assertEqual(article["belongBookId"], "MP_WXS_900000")
+        self.assertEqual(article["mpInfo"]["title"], "合成公众号文章")
+        self.assertEqual(self.request("/__state")[1]["started_counts"]["/web/mp/articles"], before + 1)
+        self.assertEqual(self.request("/web/mp/articles?bookId=unknown")[0], 400)
+
     def test_contract_and_real_reference_decoder(self):
         status, shelf = self.gateway("/shelf/sync")
         self.assertEqual(status, 200)

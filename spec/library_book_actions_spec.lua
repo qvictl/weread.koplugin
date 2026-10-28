@@ -653,4 +653,16 @@ host.progress_sync = nil
 host:openProgressTargetChapter(chapter_book, { chapterId = 9 })
 last_of("confirm").cancel_callback()
 
+local old_mp_list, old_info = host.showMPArticleList, host.showInfo
+local cancelled_mp_lists, cancelled_mp_notices = 0, 0
+host.showMPArticleList = function() cancelled_mp_lists = cancelled_mp_lists + 1 end
+host.showInfo = function() cancelled_mp_notices = cancelled_mp_notices + 1 end
+host.cancel_network_request, login.cookie = true, true
+host:fetchMPArticles({ book_id = "MP_WXS_1" })
+drain()
+expect(cancelled_mp_lists == 0 and cancelled_mp_notices == 0 and host.busy_message == nil,
+    "cancelled article list opened UI, showed an error or kept busy state")
+host.cancel_network_request = false
+host.showMPArticleList, host.showInfo = old_mp_list, old_info
+
 print(("library_book_actions_spec: %d checks"):format(checks))

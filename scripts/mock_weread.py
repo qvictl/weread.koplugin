@@ -128,6 +128,7 @@ class MockServer(ThreadingHTTPServer):
         self.log_path = log_path
         self.now = now or time.time
         self.events = deque(maxlen=500)
+        self.started_counts = {}
         self.progress = {}
         self.control = dict(delay=0, match="", status=503, times=0, drop=False,
                             empty_shelf=False, empty_annotations=False, shelf_idless_entry=False,
@@ -153,6 +154,8 @@ class MockServer(ThreadingHTTPServer):
         query = parse_qs(url.query)
         api = data.get("api_name", "") if path == "/api/agent/gateway" else ""
         with self.lock:
+            request_key = api or path
+            self.started_counts[request_key] = self.started_counts.get(request_key, 0) + 1
             control = self.control.copy()
             matches = not control["match"] or control["match"] in (api or path)
             fail = matches and control["times"] != 0
@@ -248,6 +251,12 @@ class MockServer(ThreadingHTTPServer):
             return 200, dict(review=review(), comments=[
                 dict(commentId=f"mock-comment-{i}", content=f"合成回复 {i}", author={"nick": "测试读者"}, createTime=1700000000)
                 for i in range(1, 3)], commentsHasMore=0)
+        if path == "/web/mp/articles" and method == "GET":
+            if book_id != "MP_WXS_900000":
+                raise ValueError("unknown synthetic public account")
+            return 200, dict(reviews=[dict(subReviews=[dict(review=dict(
+                reviewId="mock-mp-article", belongBookId=book_id, createTime=1700000000,
+                mpInfo=dict(title="合成公众号文章", originalId="mock-mp-article")))])])
         if path == "/web/book/getProgress" and method == "GET":
             return 200, self.get_progress(book_id)
         if path == "/web/book/read" and method == "POST":
@@ -364,6 +373,7 @@ class Handler(BaseHTTPRequestHandler):
             elif path.path == "/__state" and self.command == "GET":
                 with self.server.lock:
                     status, result = 200, dict(control=self.server.control.copy(), requests=list(self.server.events),
+                                               started_counts=self.server.started_counts.copy(),
                                                progress=self.server.progress.copy(),
                                                progress_history=list(self.server.progress_history))
             elif path.path == "/__progress" and self.command == "POST":
