@@ -17,19 +17,7 @@ return function(H)
     -- Taps the painted widget whose text is exactly needle (ConfirmBox
     -- messages often contain the button label as a substring).
     local function tap_exact(needle, timeout)
-        local target = H.wait_until("button '" .. needle .. "' painted", function()
-            return H.walk(function(widget, chain, depth)
-                if rawget(widget, "text") ~= needle then return nil end
-                for i = depth, 1, -1 do
-                    local d = rawget(chain[i], "dimen")
-                    if type(d) == "table" and type(d.x) == "number" and (d.w or 0) > 0 and (d.h or 0) > 0 then
-                        return d
-                    end
-                end
-            end)
-        end, timeout or 15)
-        H.log("tap", needle)
-        return H.tap_at(math.floor(target.x + target.w / 2), math.floor(target.y + target.h / 2))
+        return H.tap_exact(needle, timeout)
     end
 
     -- All requests the mock served so far (the evidence log is not capped).

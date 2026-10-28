@@ -58,7 +58,8 @@ To publish a release:
    `## 新功能与改进` heading automatically.
 3. Complete the pre-release validation above, then merge the change into
    `main` through a pull request (`main` is protected).
-4. The `CI` and `Integration` (emulator scenarios + pinned PluginLoader)
+4. The `CI` and `Integration` (emulator scenarios on the qvictl/koreader fork
+   build and on official KOReader v2026.07.1, + pinned PluginLoader)
    workflows run on the merge commit.
 5. After `Integration` succeeds, the `Release` workflow confirms that `CI` and
    `Integration` both passed for the same commit.

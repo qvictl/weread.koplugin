@@ -1,0 +1,144 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+#
+# CodeRabbit (primary AI reviewer) for qvictl/weread.koplugin. Policy: REVIEW_POLICY.md.
+# The review gate
+# (.github/workflows/review-gate.yml) counts a CodeRabbit review of the head commit and
+# blocks while CodeRabbit's latest decisive review is "Request changes".
+
+language: zh-CN
+tone_instructions: >-
+  Summaries and walkthrough in Simplified Chinese; inline comments may be English when more precise.
+  Be direct, cite file:line, state impact on a 512 MB Kindle. Label real defects as bugs.
+early_access: false
+
+reviews:
+  profile: assertive
+  # Request changes for blocking findings; approve once they are resolved and
+  # the latest commit is reviewed (the current name of the former
+  # `request_changes_workflow`). The approval counts as the required approval
+  # of `main`; the review gate approves too and dismisses bot approvals when a
+  # check fails or a thread is open (REVIEW_POLICY.md).
+  auto_approvals:
+    enabled: true
+    allow_author_approval: false
+  high_level_summary: true
+  high_level_summary_in_walkthrough: true
+  review_status: true
+  commit_status: true
+  collapse_walkthrough: true
+  changed_files_summary: true
+  sequence_diagrams: false
+  estimate_code_review_effort: true
+  assess_linked_issues: true
+  related_issues: false
+  related_prs: false
+  suggested_labels: false
+  auto_apply_labels: false
+  suggested_reviewers: false
+  auto_assign_reviewers: false
+  in_progress_fortune: false
+  poem: false
+  enable_prompt_for_ai_agents: true
+  abort_on_close: true
+  auto_review:
+    enabled: true
+    auto_incremental_review: true
+    # Never pause: the review gate needs a review of every head commit.
+    auto_pause_after_reviewed_commits: 0
+    drafts: false
+  path_filters:
+    - "!fonts/**"
+    - "!screenshots/**"
+    - "!icons/**"
+    - "!spec/fixtures/**"
+    - "!**/*.png"
+    - "!**/*.webp"
+    - "!**/*.svg"
+    - "!**/*.ttf"
+    - "!**/*.epub"
+  path_instructions:
+    - path: "{main.lua,_meta.lua,weread/**/*.lua,integrations/**/*.lua}"
+      instructions: |
+        Target devices include Kindles with 512 MB RAM (KT/PW2) shared with the framework and KOReader's single-threaded event loop. Review against these priorities, in order:
+
+        1. Memory: flag unbounded tables, caches or queues; whole-file / whole-response reads (`io.read("*a")`, full HTTP bodies) where streaming or limits are possible; string building with `..` in loops (use `table.concat`); references kept to closed documents, widgets or blitbuffers (leaks); BlitBuffers / images not freed (`bb:free()`); large upvalues captured by long-lived callbacks. Ask for a bound or an eviction rule.
+        2. UI thread: event handlers (`onXxx`), menu callbacks, `paintTo` and `UIManager:scheduleIn` callbacks must never block. Flag synchronous network (`socket.http`, `ssl.https`, `ltn12` sinks), DNS resolution (`socket.dns.toip` / `getaddrinfo` can block for the full resolver timeout on Kindle), large disk I/O, heavy SQLite queries, `os.execute` / `io.popen` on the UI path. Expect a subprocess (`Trapper:dismissableRunInSubprocess`, `util.runInSubProcess`) or chunked `scheduleIn` work.
+        3. Subprocess / fork safety: after `fork` the child must not touch the UI, framebuffer, input or SDL, must not flush settings or run `atexit`-like cleanup, must exit with `os.exit(..., true)` / `_exit` paths the codebase uses, and must not use inherited SQLite connections. Parents must reap children (no zombies), bound and validate data read back from pipes, and handle a child that never starts or dies early.
+        4. Suspend / resume lifecycle: `onSuspend`, `onResume`, `onCloseDocument`, `onCloseWidget`, `onFlushSettings` must cancel timers (`UIManager:unschedule`), stop workers and release resources; after resume Wi-Fi may be off and clocks may jump; nothing may assume the network is up.
+        5. Lua pitfalls: accidental globals (missing `local`), nil dereference of optional fields and API / JSON responses, Lua patterns built from data without escaping magic characters (`%`, `-`, `.`, `[` ...) or without `plain = true` in `string.find`, `#` on tables with holes, `pcall` that swallows errors silently, shadowing `_` (gettext) in loops, integer vs float with LuaJIT.
+        6. KOReader widget lifecycle: `dimen` must be computed before `paintTo` / `setDirty`; `setDirty` with the right widget and region; free resources in `onCloseWidget`; never show a widget twice or paint after close.
+        7. Tests vs the coverage policy (CONTRIBUTING.md, REVIEW_POLICY.md): every code change needs tests under `spec/`; a bug fix needs a regression test that fails without the fix; a user-visible change needs an emulator integration scenario; changed executable lines must reach the diff-coverage gates. Point out untested branches and tests that assert nothing.
+
+        Mark real defects as potential issues / bugs so the author must fix them or justify before resolving. Keep style nits minimal.
+
+        WeRead plugin specifics:
+        - Secrets and privacy: cookies (`wr_skey`, `wr_vid`, `wr_rt` ...), `x-wrpa-*` anti-abuse headers, Bearer tokens, API keys, account ids, QR-login state and private book content must never be logged, committed, put in error messages, crash logs or the in-app updater, or sent to any host other than the WeRead endpoints. Use `require("weread.lib.logger")`, never KOReader's `logger` directly.
+        - i18n: every user-visible string goes through `_()` with a Simplified Chinese translation in `weread/lib/i18n.lua`; templates use `T(_("... %1"), value)` (never concatenate translated fragments); loop variables use `_i`, not `_`; menu changes update `weread/ui/menu.lua` (or the owning UI module), `weread/lib/i18n.lua` and the README menu tree together, leaving no unused keys.
+        - Namespace: project modules live in `weread/lib/` (non-UI) and `weread/ui/` (UI), required as `weread.lib.*` / `weread.ui.*`; no root-level `lib/` / `ui/` modules.
+        - Storage: `settings/weread.lua` holds only small bounded config; growing collections go to the plugin's SQLite databases with migrations.
+        - `UIManager:scheduleIn(0)` blocks the event loop: expect >= 0.1 s for cooperative work.
+        - Non-public WeRead APIs need a reproducible Python verification script in `scripts/` before the Lua implementation.
+    - path: "{weread/lib/updater.lua,weread/ui/updater.lua}"
+      instructions: |
+        In-app updater: pushes releases to devices. Review with extra care, it merges without a human. Check origin / integrity verification of downloads, atomic replace with rollback, no update without user consent, and that the version comparison cannot be downgraded or spoofed.
+    - path: "{weread/lib/client.lua,weread/lib/cookie.lua,weread/lib/crypto.lua,weread/lib/qr_login.lua,weread/lib/worker_settings.lua,weread/lib/protocol.lua}"
+      instructions: |
+        Credentials, cookies, signing and crypto: review with extra care. Check that secrets never reach logs or errors, cookies are scoped to WeRead hosts and stripped on cross-origin redirects, crypto helpers are correct for edge cases (empty input, multi-block, UTF-8), and that QR-login polling has timeouts and cancellation.
+    - path: "spec/**"
+      instructions: |
+        Tests: check they exercise the behaviour the PR changes (not only mocks), that a bug fix's regression test would fail without the fix, that they are deterministic (no sleeps / timing assumptions, no real network), clean up temp files and global state, and stay fast. Flag weakened assertions or deleted tests.
+
+        Emulator scenarios (`spec/emulator/scenarios/`) must cover user-visible fixes and features and run against the local mock WeRead service, never the real one.
+    - path: "scripts/**"
+      instructions: |
+        Scripts: Python verification scripts must not print or store real API keys, cookies, tokens, full cURL commands or account identifiers. Release / coverage / policy scripts: check that no gate is weakened.
+    - path: "{.github,.ci}/**"
+      instructions: |
+        CI / policy / release tooling: review with extra care (it merges without a human). Check for: weakened or skipped required checks, `pull_request_target` or `workflow_run` jobs that check out or execute PR code, secrets or write tokens exposed to untrusted code, script injection via `${{ github.event.* }}` in `run:`, unpinned or new third-party actions, broadened `permissions:`, and changes that would let a PR approve or merge itself.
+    - path: "{REVIEW_POLICY.md,CONTRIBUTING.md,CLAUDE.md,.coderabbit.yaml,.github/PULL_REQUEST_TEMPLATE.md}"
+      instructions: |
+        Policy documents (review / coverage / contribution rules, AI reviewer configuration): review with extra care. Check consistency between REVIEW_POLICY.md, CONTRIBUTING.md, the PR template, .coderabbit.yaml and the review gate config; flag any loosening of a rule that is not called out in the PR description.
+    - path: "{CHANGELOG.md,_meta.lua}"
+      instructions: |
+        Release version / changelog: releases are published to devices by the in-app updater, so check version bumps carefully. `_meta.lua` and `main.lua` versions must match and CHANGELOG.md needs the matching `## [X.Y.Z]` section.
+  tools:
+    luacheck:
+      enabled: true
+    shellcheck:
+      enabled: true
+    ruff:
+      enabled: true
+    actionlint:
+      enabled: true
+    zizmor:
+      enabled: true
+    gitleaks:
+      enabled: true
+    yamllint:
+      enabled: true
+    markdownlint:
+      enabled: true
+    languagetool:
+      enabled: false
+
+chat:
+  auto_reply: true
+  art: false
+
+knowledge_base:
+  opt_out: false
+  web_search:
+    enabled: true
+  code_guidelines:
+    enabled: true
+    filePatterns:
+      - "REVIEW_POLICY.md"
+      - "CONTRIBUTING.md"
+      - "CLAUDE.md"
+      - "docs/testing.md"
+  learnings:
+    scope: local
+  issues:
+    scope: local
+  pull_requests:
+    scope: local

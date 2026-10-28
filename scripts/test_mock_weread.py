@@ -4,7 +4,8 @@ import json
 import threading
 import time
 import unittest
-from urllib.error import HTTPError
+from http.client import RemoteDisconnected
+from urllib.error import HTTPError, URLError
 from urllib.request import ProxyHandler, Request, build_opener
 
 from fetch_weread_epub import decode_content_shards, decode_style_shard, weread_e
@@ -44,7 +45,7 @@ class MockTests(unittest.TestCase):
         return self.request("/api/agent/gateway", dict(api_name=api, **params))
 
     def setUp(self):
-        self.request("/__control", dict(delay=0, match="", status=503, times=0,
+        self.request("/__control", dict(delay=0, match="", status=503, times=0, drop=False,
                                         empty_shelf=False, empty_annotations=False, shelf_idless_entry=False,
                                         qr_mode="succeed", qr_delay=0))
 
@@ -96,6 +97,46 @@ class MockTests(unittest.TestCase):
         self.request("/__control", dict(shelf_idless_entry=False, empty_shelf=True, empty_annotations=True))
         self.assertEqual(self.gateway("/shelf/sync")[1]["books"], [])
         self.assertEqual(self.gateway("/book/underlines", bookId=BOOK_ID, chapterUid=1)[1]["underlines"], [])
+
+    def test_downgrade_redirect_and_request_log(self):
+        import urllib.parse
+        import urllib.request
+
+        class NoRedirect(urllib.request.HTTPRedirectHandler):
+            def redirect_request(self, *_args, **_kwargs):
+                return None  # never follow: the target is a real http URL
+
+        self.addCleanup(self.request, "/__control", dict(downgrade_path=""))
+        self.request("/__control", dict(downgrade_path="/web/book/getProgress"))
+        opener = build_opener(ProxyHandler({}), NoRedirect)
+        target = "https://weread.qq.com/web/book/getProgress?bookId=" + BOOK_ID
+        with self.assertRaises(HTTPError) as caught:
+            opener.open(self.base + "/__proxy?url=" + urllib.parse.quote(target, safe=""), timeout=3)
+        self.assertEqual(caught.exception.code, 302)
+        self.assertEqual(caught.exception.headers["Location"], "http://weread.qq.com/web/book/getProgress?bookId="
+                         + BOOK_ID)
+        plain = "http://weread.qq.com/web/book/getProgress?bookId=" + BOOK_ID
+        self.assertEqual(self.request("/__proxy?url=" + urllib.parse.quote(plain, safe=""))[0], 200,
+                         "plain http is answered (only https redirects)")
+        events = self.request("/__state")[1]["requests"][-2:]
+        self.assertEqual([(e["scheme"], e["status"], e["cookie"]) for e in events],
+                         [("https", 302, False), ("http", 200, False)])
+        self.assertEqual(self.request("/__control", dict(downgrade_path=1))[0], 400)
+        # Positive control for the cookie flag: a request that carries one.
+        with self.opener.open(Request(self.base + "/__proxy?url=" + urllib.parse.quote(plain, safe=""),
+                                      headers={"Cookie": "wr_vid=XXX-synthetic"}), timeout=3) as response:
+            self.assertEqual(response.status, 200)
+        last = self.request("/__state")[1]["requests"][-1]
+        self.assertEqual((last["scheme"], last["cookie"]), ("http", True))
+
+    def test_drop_closes_the_connection_without_a_response(self):
+        self.request("/__control", dict(match="/api/userInfo", times=1, drop=True))
+        with self.assertRaises((RemoteDisconnected, ConnectionError, URLError)):
+            self.request("/api/userInfo")
+        self.assertEqual(self.request("/api/userInfo")[0], 200, "times=1 drops only the next request")
+        events = [e for e in self.request("/__state")[1]["requests"] if e["path"] == "/api/userInfo"]
+        self.assertEqual([e["status"] for e in events][-2:], [0, 200])
+        self.assertEqual(self.request("/__control", dict(drop="yes"))[0], 400)
 
     def test_qr_login_modes(self):
         status, page = self.request("/__proxy?url=https%3A%2F%2Fweread.qq.com%2Fr%2Fweread-skills")

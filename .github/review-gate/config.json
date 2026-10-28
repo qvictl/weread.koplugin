@@ -1,0 +1,11 @@
+{
+  "_comment": "Review gate settings for qvictl/weread.koplugin (logic: review_gate.py, policy: REVIEW_POLICY.md).",
+  "merge_method": "SQUASH",
+  "merge_method_overrides": [
+    {
+      "head_ref": "sync/upstream-*",
+      "method": "MERGE"
+    }
+  ],
+  "sync_head_prefix": "sync/upstream-"
+}

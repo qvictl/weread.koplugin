@@ -27,8 +27,9 @@
 
 ## 测试
 
-本仓库欢迎人或 AI 编写的 PR，以测试把关：必需检查 `ci`、`integration`（KOReader 模拟器
-集成场景 + PluginLoader）、`tests-policy` 全部通过后才能合并。`tests-policy` 要求：修改
+本仓库欢迎人或 AI 编写的 PR，以测试把关：必需检查 `ci`、`integration`（qvictl/koreader
+分支构建上的 KOReader 模拟器集成场景 + PluginLoader）、`integration-official`（官方 KOReader
+v2026.07.1 上的同一组场景）、`tests-policy` 全部通过后才能合并。`tests-policy` 要求：修改
 `main.lua`、`weread/`、`integrations/` 的 Lua 代码必须同时修改 `spec/` 下的测试；`feat`/`fix`
 类 PR 必须新增或更新至少一个模拟器场景；改动行覆盖率单元测试 ≥ 80%、单元 + 模拟器 ≥ 90%；
 整体覆盖率不得下降（见 `.ci/coverage-policy.json`）。仅维护者可添加 `no-tests-needed`
@@ -48,7 +49,7 @@
 - [ ] 已运行 `bash scripts/run_lua_specs.sh`
 - [ ] 已运行 `bash scripts/check_lua_namespace.sh`
 - [ ] 已运行 `luacheck main.lua _meta.lua weread integrations spec`
-- [ ] 已运行 `python3 scripts/run_emulator_scenarios.py`（或依赖 CI 的 `integration` 检查）
+- [ ] 已运行 `python3 scripts/run_emulator_scenarios.py`（或依赖 CI 的 `integration` / `integration-official` 检查）
 - [ ] 已在 KOReader 中手动测试（设备/模拟器型号：）
 - [ ] 不适用，仅文档或注释变更
 
@@ -107,3 +108,4 @@ scripts/
 - [ ] 如果修改了用户可见文本，我已经更新 `weread/lib/i18n.lua`。
 - [ ] 如果修改了菜单结构，我已经同步更新 README 菜单结构。
 - [ ] 如果涉及非公开 WeRead Web API，我已经在 `scripts/` 中提交可独立运行、可复现的 Python 验证脚本，并填写了复现命令和脱敏结果。
+- [ ] AI 审查（CodeRabbit）标出的潜在问题 / bug 均已修复或回复理由后再解决对话；自动批准条件见 [REVIEW_POLICY.md](../blob/main/REVIEW_POLICY.md)。

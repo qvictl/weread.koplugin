@@ -110,6 +110,10 @@ def review(uid=1):
                 createTime=1700000000, likesCount=7, commentsCount=2, star=90)
 
 
+class DropConnection(Exception):
+    """Injected transport failure: close the socket without any HTTP response."""
+
+
 class MockServer(ThreadingHTTPServer):
     daemon_threads = True
 
@@ -123,9 +127,11 @@ class MockServer(ThreadingHTTPServer):
         self.log_path = log_path
         self.events = deque(maxlen=500)
         self.progress = {}
-        self.control = dict(delay=0, match="", status=503, times=0,
+        self.control = dict(delay=0, match="", status=503, times=0, drop=False,
                             empty_shelf=False, empty_annotations=False, shelf_idless_entry=False,
                             qr_mode="succeed", qr_delay=1)
+        # Path whose https requests answer 302 to the same URL over plain http.
+        self.control["downgrade_path"] = ""
         self.progress_history = []
         self.github_release = None  # dict(version=..., files={name: bytes}, body=...)
         self.qr_otp_seen = False
@@ -152,10 +158,14 @@ class MockServer(ThreadingHTTPServer):
                 self.control["times"] -= 1
         if matches:
             time.sleep(control["delay"])
+        if fail and control["drop"]:
+            raise DropConnection()
         if fail:
             return control["status"], dict(errcode=-1, errmsg="Injected mock failure")
 
         book_id = str(data.get("bookId") or query.get("bookId", [BOOK_ID])[0])
+        if control["downgrade_path"] and path == control["downgrade_path"] and url.scheme == "https":
+            return 302, dict(moved=True), {"Location": "http" + target[len("https"):]}
         if path.startswith(("/r/weread-skills", "/api/auth/", "/api/userInfo", "/api/skills/")):
             return self.qr_route(method, path, query, control)
         if path == "/api/agent/gateway" and method == "POST":
@@ -354,6 +364,13 @@ class Handler(BaseHTTPRequestHandler):
                     target = "https://weread.qq.com" + self.path
                 status, result, *extra = self.server.route(self.command, target, data)
                 extra_headers = extra[0] if extra else {}
+        except DropConnection:
+            # No status line at all: the client sees the connection closed.
+            self.server.record(dict(method=self.command, scheme=urlsplit(target).scheme,
+                                    host=urlsplit(target).hostname, path=urlsplit(target).path,
+                                    cookie=bool(self.headers.get("Cookie")), api=data.get("api_name"), status=0))
+            self.close_connection = True
+            return
         except (ValueError, KeyError, TypeError, StopIteration) as exc:
             status, result = 400, dict(errcode=-1, errmsg="Invalid mock request: " + str(exc))
         except LookupError as exc:
@@ -362,7 +379,8 @@ class Handler(BaseHTTPRequestHandler):
             parsed = urlsplit(target)
         except ValueError:
             parsed = urlsplit("")
-        self.server.record(dict(method=self.command, host=parsed.hostname, path=parsed.path,
+        self.server.record(dict(method=self.command, scheme=parsed.scheme, host=parsed.hostname, path=parsed.path,
+                                cookie=bool(self.headers.get("Cookie")),
                                 api=data.get("api_name"), book=data.get("bookId"), chapter=data.get("chapterUid"),
                                 encoded_chapter=data.get("c"), status=status))
         if isinstance(result, bytes):
@@ -395,13 +413,15 @@ class Handler(BaseHTTPRequestHandler):
                 raise ValueError("status must be 400..599")
             if not isinstance(candidate["match"], str):
                 raise ValueError("match must be a string")
-            for key in ("empty_shelf", "empty_annotations", "shelf_idless_entry"):
+            for key in ("empty_shelf", "empty_annotations", "drop", "shelf_idless_entry"):
                 if type(candidate[key]) is not bool:
                     raise ValueError(key + " must be boolean")
             if candidate["qr_mode"] not in ("succeed", "otp", "expire"):
                 raise ValueError("qr_mode must be succeed, otp or expire")
             if type(candidate["qr_delay"]) not in (float, int) or not 0 <= candidate["qr_delay"] <= 10:
                 raise ValueError("qr_delay must be 0..10 seconds")
+            if not isinstance(candidate["downgrade_path"], str):
+                raise ValueError("downgrade_path must be a string")
             self.server.control = candidate
 
 

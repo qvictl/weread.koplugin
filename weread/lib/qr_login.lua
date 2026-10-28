@@ -234,8 +234,9 @@ end
 
 function QRLogin:_authenticated_get(url, cookies, web_login_vid, access_token, stage)
     for attempt = 1, 3 do
+        local transport_failed = false
         local ok, data, response_headers = pcall(function()
-            return self:_request_json(url, {
+            local result, headers, request_error = self:_request_json(url, {
                 method = "GET",
                 timeout = { 10, 20 },
                 headers = {
@@ -246,15 +247,21 @@ function QRLogin:_authenticated_get(url, cookies, web_login_vid, access_token, s
                     ["X-Skey"] = access_token,
                 },
             }, stage)
+            if result == nil then
+                -- No HTTP status: the connection failed (e.g. closed).
+                transport_failed = true
+                error(stage .. " failed: " .. tostring(request_error or "request failed"), 0)
+            end
+            return result, headers
         end)
         if ok then
             return data, merge_response_cookies(cookies, response_headers)
         end
-        local retryable = tostring(data):find("HTTP 401", 1, true) ~= nil
+        local retryable = transport_failed or tostring(data):find("HTTP 401", 1, true) ~= nil
         if not retryable or attempt == 3 then
             error(data)
         end
-        logger.warn(stage, "temporarily unauthorized; retrying:", tostring(attempt))
+        logger.warn(stage, "request failed temporarily; retrying:", tostring(attempt))
         sleep_seconds(0.5)
     end
 end

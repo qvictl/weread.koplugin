@@ -398,29 +398,52 @@ function ProgressSync:_apply_remote(remote, context, options)
         end
         return true
     end
-    local ok, err = self.goto_fraction(target.fraction)
+    local ok, err, landed = self:_jump_to(target.fraction)
     if not ok then return false, err or "jump_failed" end
-    self.dirty = false
     self:_mark_verified(
         context.book_id,
         "remote_selected",
-        self.local_position,
+        landed or self.local_position,
         remote
     )
     if options.manual then
         self.notify("remote_applied", { position = remote })
     end
-    self:_schedule(0.15, function()
-        local position = self:capture_local()
-        if position then
-            self.local_position = position
-            self.dirty = false
-            self:_persist(context.book_id, {
-                last_local_position = position,
-            })
-        end
-    end)
     return true
+end
+
+-- Moves the reader for a cloud position and records where it landed.
+-- KOReader announces the move with PageUpdate (PosUpdate in scroll mode)
+-- dispatched synchronously inside goto_fraction (ReaderRolling:_gotoPage),
+-- and may announce the same page again later (a re-render repositions on
+-- the saved xpointer). Those echoes are told apart from reading by
+-- identity, never by time: events inside the call are the jump itself, and
+-- the first later event at the landed position is its echo (one-shot, see
+-- _is_jump_echo). Any other position is the reader's own move, however
+-- soon it follows, and makes the session dirty.
+function ProgressSync:_jump_to(fraction)
+    self.jump_echo = nil
+    self.jumping = true
+    local called, ok, err = pcall(self.goto_fraction, fraction)
+    self.jumping = false
+    if not called then return false, tostring(ok) end
+    if not ok then return false, err end
+    local landed = self:capture_local()
+    self.jump_echo = copy(landed)
+    if landed then self.local_position = landed end
+    self.dirty = false
+    return true, nil, landed
+end
+
+-- True for the jump's own echo: a position event at the exact spot the
+-- last cloud jump landed on. One-shot: the marker is consumed by the first
+-- event after the jump, matching or not, so a later return to that spot by
+-- the reader counts as reading again. Repeated echoes of the same spot are
+-- no change either way (same position as local_position).
+function ProgressSync:_is_jump_echo(position)
+    local echo = self.jump_echo
+    self.jump_echo = nil
+    return echo ~= nil and PositionMapper.same_position(position, echo)
 end
 
 -- Uploads (F3, F10). A snapshot is queued per book, newest wins, so a
@@ -1034,6 +1057,8 @@ function ProgressSync:_pull(options)
     if self.pulling then return false end
     -- A choice dialog is still waiting for an answer: do not stack another.
     if self.choice then return false end
+    -- A real sync compares positions afresh; an older jump has no echo left.
+    self.jump_echo = nil
     local retry_token = options.retry_token
     if retry_token == nil then
         self.pull_retry_token = self.pull_retry_token + 1
@@ -1191,29 +1216,21 @@ function ProgressSync:_apply_pending_jump(book_id)
     end
     self.pending_jump = nil
     self:_persist(book_id, { pending_jump = false })
-    local ok, err = self.goto_fraction(pending.fraction)
+    local ok, err, landed = self:_jump_to(pending.fraction)
     if not ok then
         self.state = "error"
         self.notify("jump_failed", { error = err })
         return true
     end
-    self.dirty = false
     self:_mark_verified(
         book_id,
         "remote_chapter_applied",
-        local_position,
+        landed or local_position,
         pending.remote
     )
     if pending.notify then
         self.notify("remote_applied", { position = pending.remote })
     end
-    self:_schedule(0.15, function()
-        local position = self:capture_local()
-        if position then
-            self.local_position = position
-            self:_persist(book_id, { last_local_position = position })
-        end
-    end)
     return true
 end
 
@@ -1251,6 +1268,7 @@ function ProgressSync:on_reader_ready()
     self.remote_floor = nil
     self.report_fallback = nil
     self.document_context = nil
+    self.jump_echo = nil
     self.verified = false
     self.dirty = false
     self.state = "waiting"
@@ -1291,6 +1309,10 @@ function ProgressSync:on_page_update()
     if not self.current_book_id then return end
     local position = self:capture_local()
     if not position then return end
+    if self.jumping or self:_is_jump_echo(position) then
+        self.local_position = position
+        return
+    end
     if self.local_position
         and not PositionMapper.same_position(position, self.local_position) then
         self.dirty = true
@@ -1332,6 +1354,7 @@ function ProgressSync:on_close_document()
     self.remote_floor = nil
     self.report_fallback = nil
     self.document_context = nil
+    self.jump_echo = nil
 end
 
 -- O(1) and network-free (F3, F16): the device and its Wi-Fi are going to

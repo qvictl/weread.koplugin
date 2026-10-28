@@ -1,0 +1,39 @@
+# Fork-owned workflow (qvictl/weread.koplugin): not part of upstream.
+#
+# Unit tests of the review gate (.github/review-gate/, see REVIEW_POLICY.md),
+# run on the PR's own copy when the gate changes. Mocked GitHub API only: no
+# token, no network.
+
+name: Review gate tests
+
+on:
+  pull_request:
+    paths:
+      - '.github/review-gate/**'
+      - '.github/workflows/review-gate.yml'
+      - '.github/workflows/review-gate-tests.yml'
+      - '.github/workflows/review-gate-relay.yml'
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/review-gate/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+
+  unit:
+    name: Review gate unit tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+          sparse-checkout: .github
+      - name: Unit tests
+        run: python3 -m unittest discover -s .github/review-gate -v

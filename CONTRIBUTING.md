@@ -26,7 +26,13 @@ checks pass:
   scripts, mock-service contract, package and changelog checks, secret scan;
 - `integration` - the plugin running inside a real headless KOReader
   emulator against the local mock WeRead service
-  (`spec/emulator/scenarios/`), plus the pinned KOReader PluginLoader test;
+  (`spec/emulator/scenarios/`) on the
+  [qvictl/koreader](https://github.com/qvictl/koreader) fork build (rolling
+  `nightly`, in the `koreader/kobase:5.0.0-22.04` container; fails if that
+  build cannot be fetched or started), plus the pinned KOReader PluginLoader
+  test;
+- `integration-official` - the same emulator scenarios on the official
+  KOReader v2026.07.1 release, which many devices still run;
 - `tests-policy` - the test rule and the coverage gates below.
 
 Test rule: Lua code changes under `main.lua`, `weread/` or `integrations/`
@@ -49,8 +55,8 @@ fixtures). Plugin files no test loads count as 0%.
 | Diff, unit | changed executable Lua lines covered by unit specs ≥ 80% | yes (waived by `no-tests-needed`) |
 | Diff, combined | changed lines covered by unit specs + emulator scenarios ≥ 90% | yes (waived by `no-tests-needed`) |
 | Ratchet | overall unit and overall combined coverage must not drop below `main`'s latest value (0.1 pp tolerance: emulator runs vary by a few timing-dependent lines, observed 0.03 pp) | yes |
-| Target 4 weeks | overall combined ≥ max(75%, day-one baseline 80.78%) from 2026-11-24 | report-only before the date, then yes |
-| Target 8 weeks | overall combined ≥ 85% from 2026-12-22 | report-only before the date, then yes |
+| Target 4 weeks | overall combined ≥ max(75%, day-one baseline 80.78%) and overall unit ≥ 80% from 2026-11-24 | report-only before the date, then yes |
+| Target 8 weeks | overall combined ≥ 85%, overall unit ≥ 88% and every `weread/lib/*` file unit ≥ 70% from 2026-12-22 | report-only before the date, then yes |
 
 Emulator coverage is measured with LuaCov inside the real KOReader app while
 the scenarios run (forked download/login workers included). Every PR gets
@@ -59,12 +65,16 @@ in the job summary and as a sticky comment. After each green `Integration`
 run on `main`, the *Coverage* workflow publishes `baseline.json`,
 `history.jsonl` and the README badge on the
 [`coverage` branch](https://github.com/qvictl/weread.koplugin/tree/coverage).
-Day-one baseline (2026-10-27): unit 73.80%, unit + emulator 80.78%.
+Day-one baseline (2026-10-27): unit 73.80%, unit + emulator 80.78%. The
+roadmap to the targets (priorities, batches) is
+[docs/coverage-plan.md](docs/coverage-plan.md).
 
 覆盖率策略见 `.ci/coverage-policy.json`，由 `tests-policy` 在每个合入 `main` 的 PR
 上强制执行：改动的可执行 Lua 行单元测试覆盖率 ≥ 80%，单元测试 + 模拟器场景合计 ≥ 90%；
 整体覆盖率（单元、合计）不得低于 `main` 当前值；合计整体覆盖率在 2026-11-24 起
-≥ max(75%, 首日基线 80.78%)，2026-12-22 起 ≥ 85%，到期前仅报告。每个 PR 的摘要和评论
+≥ max(75%, 首日基线 80.78%)，2026-12-22 起 ≥ 85%；单元整体覆盖率 2026-11-24 起 ≥ 80%，
+2026-12-22 起 ≥ 88%，且届时每个 `weread/lib/*` 文件单元覆盖率 ≥ 70%；到期前仅报告。
+路线图见 [docs/coverage-plan.md](docs/coverage-plan.md)。每个 PR 的摘要和评论
 都会列出各项结果，`main` 的历史趋势与徽章发布在 `coverage` 分支。
 
 See [docs/testing.md](docs/testing.md).
@@ -73,11 +83,28 @@ See [docs/testing.md](docs/testing.md).
 `upstream` 为上游 `finlater/main` 的只读镜像，每周自动同步并向 `main` 发起合并 PR。
 
 欢迎任何 PR，无论由人还是由 AI 编写；我们以测试而非作者身份把关。合并前必须通过
-`ci`、`integration`（真实 KOReader 模拟器 + 本地 mock 服务的集成场景，以及固定版本
-PluginLoader 测试）和 `tests-policy`（修改 Lua 代码必须同时修改 `spec/` 下的测试，`feat`/`fix`
+`ci`、`integration`（在 `koreader/kobase:5.0.0-22.04` 容器中用 qvictl/koreader 分支
+构建运行真实 KOReader 模拟器 + 本地 mock 服务的集成场景，以及固定版本 PluginLoader 测试）、
+`integration-official`（同一组场景在官方 KOReader v2026.07.1 上运行）和 `tests-policy`（修改 Lua 代码必须同时修改 `spec/` 下的测试，`feat`/`fix`
 类 PR 必须新增或更新至少一个模拟器场景，并满足下面的覆盖率门禁；仅维护者可用
 `no-tests-needed` 标签豁免，且仅限文档、注释或日志措辞改动）。Bug 修复需附带修复前会失败的
 回归测试。
+
+### Review policy / 审查策略
+
+Every PR to `main` is reviewed by the AI reviewer CodeRabbit and evaluated by the *Review gate*
+workflow, which keeps a checklist comment on the PR. There is no human gate: the gate approves and enables auto-merge
+(squash) when, on the head commit, all required checks passed (coverage gates included), CodeRabbit reviewed it
+and does not request changes, every review thread is resolved, and the PR is not a draft and has no `do-not-merge` label.
+Regressions are fixed forward. (Exception: an upstream sync PR opened by github-actions when `SYNC_TOKEN` is not
+configured cannot be approved or auto-merged by the gate; the owner merges it.) AI comments flagged as potential issues / bugs must be fixed or answered with a
+justification before resolving them. Details: [REVIEW_POLICY.md](REVIEW_POLICY.md).
+
+所有合入 `main` 的 PR 由 AI（CodeRabbit）审查并经 *Review gate* 评估，不设人工关卡：最新提交上
+必需检查全部通过（含覆盖率门禁）、AI 已审查且没有要求修改、所有审查对话已解决、非草稿且无 `do-not-merge` 时，网关自动批准
+并开启自动合并（squash），出了回归就向前修复（例外：未配置 `SYNC_TOKEN` 时由 github-actions 创建的上游同步 PR，网关不能批准也不会自动合并，
+由所有者合并）。AI 标出的潜在问题 / bug 必须修复或回复理由后才能解决对话。
+详见 [REVIEW_POLICY.md](REVIEW_POLICY.md)。
 
 ## Issues / 提交 Issue
 
@@ -237,9 +264,13 @@ python3 -m py_compile scripts/*.py
 python3 scripts/test_mock_weread.py
 bash scripts/package_release.sh /tmp/weread.koplugin-release-test.zip
 bash scripts/check_secrets.sh              # needs a PCRE2-enabled ripgrep
-# Linux x86_64: the emulator scenarios CI runs as the `integration` check
-bash scripts/fetch_koreader_emulator.sh /tmp/koreader
-python3 scripts/run_emulator_scenarios.py --koreader /tmp/koreader --out /tmp/weread-emulator
+# Linux x86_64 emulator scenarios. `integration`: the qvictl/koreader fork build
+# (needs SDL 3, as in CI's koreader/kobase:5.0.0-22.04 container; see docs/testing.md)
+KOREADER_EMULATOR_SOURCE=fork bash scripts/fetch_koreader_emulator.sh /tmp/koreader
+python3 scripts/run_emulator_scenarios.py --koreader /tmp/koreader/fork/extract --out /tmp/weread-emulator
+# `integration-official`: official KOReader v2026.07.1 (needs SDL 2)
+KOREADER_EMULATOR_SOURCE=official bash scripts/fetch_koreader_emulator.sh /tmp/koreader
+python3 scripts/run_emulator_scenarios.py --koreader /tmp/koreader/official/extract --out /tmp/weread-emulator-official
 # unit diff coverage (LuaCov), the first gate of `tests-policy`
 bash scripts/run_lua_coverage.sh && python3 scripts/coverage_tools.py diff coverage/unit.report.out --base origin/main
 ```
@@ -254,9 +285,13 @@ python3 -m py_compile scripts/*.py
 python3 scripts/test_mock_weread.py
 bash scripts/package_release.sh /tmp/weread.koplugin-release-test.zip
 bash scripts/check_secrets.sh              # needs a PCRE2-enabled ripgrep
-# Linux x86_64: the emulator scenarios CI runs as the `integration` check
-bash scripts/fetch_koreader_emulator.sh /tmp/koreader
-python3 scripts/run_emulator_scenarios.py --koreader /tmp/koreader --out /tmp/weread-emulator
+# Linux x86_64 emulator scenarios. `integration`: the qvictl/koreader fork build
+# (needs SDL 3, as in CI's koreader/kobase:5.0.0-22.04 container; see docs/testing.md)
+KOREADER_EMULATOR_SOURCE=fork bash scripts/fetch_koreader_emulator.sh /tmp/koreader
+python3 scripts/run_emulator_scenarios.py --koreader /tmp/koreader/fork/extract --out /tmp/weread-emulator
+# `integration-official`: official KOReader v2026.07.1 (needs SDL 2)
+KOREADER_EMULATOR_SOURCE=official bash scripts/fetch_koreader_emulator.sh /tmp/koreader
+python3 scripts/run_emulator_scenarios.py --koreader /tmp/koreader/official/extract --out /tmp/weread-emulator-official
 # unit diff coverage (LuaCov), the first gate of `tests-policy`
 bash scripts/run_lua_coverage.sh && python3 scripts/coverage_tools.py diff coverage/unit.report.out --base origin/main
 ```
