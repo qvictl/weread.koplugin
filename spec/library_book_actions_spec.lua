@@ -94,7 +94,7 @@ package.preload["weread.lib.content"] = function()
             if content.save_ok then return true end
             return false, "disk full"
         end,
-        ensure_reader_state = function() end,
+        ensure_reader_state = function() return {} end,
         fetch_catalog = function()
             content.fetches = content.fetches + 1
             if content.fetch_error then error(content.fetch_error) end

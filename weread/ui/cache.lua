@@ -728,20 +728,20 @@ function M:confirmScanLocalCache()
     end
     self:runOnlineTask(_("Scan and match local books"), function()
         self:showBusy(_("Scanning local cache..."))
-        local ok, allowed = pcall(function()
+        self:_runNetworkRequest(_("Scanning local cache..."), _("Scan and match local books"), function()
             return self:fetchShelfAllowedMap()
-        end)
-        if not ok then
+        end, function(allowed)
+            local added, updated = self:scanLocalCache(self.settings.cache_dir, allowed)
             self:closeBusy()
-            logger.err("scan shelf fetch failed:", log_error(allowed))
-            self:showInfo(T(_("%1 failed:\n%2"), _("Scan and match local books"), display_error(allowed)))
-            return
-        end
-        local added, updated = self:scanLocalCache(self.settings.cache_dir, allowed)
-        self:closeBusy()
-        self:refreshCacheManagement(T(_("Scan complete. %1 added, %2 updated."),
-            tostring(added), tostring(updated)))
-    end)
+            self:refreshCacheManagement(T(_("Scan complete. %1 added, %2 updated."),
+                tostring(added), tostring(updated)))
+        end, function(err, cancelled)
+            self:closeBusy()
+            if cancelled then return end
+            logger.err("scan shelf fetch failed:", log_error(err))
+            self:showInfo(T(_("%1 failed:\n%2"), _("Scan and match local books"), display_error(err)))
+        end)
+    end, 0.1, { link_only = true })
 end
 
 -- After the download directory changes, offer to register untracked items
@@ -757,33 +757,33 @@ function M:offerScanNewDir(new_dir, base_message)
         return
     end
     self:runOnlineTask(_("Scan and match local books"), function()
-        local ok, allowed = pcall(function()
+        self:_runNetworkRequest(_("Scanning local cache..."), _("Scan and match local books"), function()
             return self:fetchShelfAllowedMap()
-        end)
-        if not ok then
-            logger.warn("skip scan, shelf fetch failed:", log_error(allowed))
-            self:showInfo(base_message)
-            return
-        end
-        local pending_added, pending_updated = self:scanLocalCache(new_dir, allowed, true)
-        if pending_added + pending_updated == 0 then
-            self:showInfo(base_message)
-            return
-        end
-        UIManager:show(ConfirmBox:new{
-            text = T(_("Found %1 new and %2 outdated item(s) in the new directory. Import them?"),
-                tostring(pending_added), tostring(pending_updated)),
-            ok_text = _("Import"),
-            ok_callback = function()
-                local added, updated = self:scanLocalCache(new_dir, allowed)
-                self:showInfo(T(_("Imported %1 new and %2 updated item(s)."), tostring(added), tostring(updated)))
-            end,
-            cancel_text = _("Skip"),
-            cancel_callback = function()
+        end, function(allowed)
+            local pending_added, pending_updated = self:scanLocalCache(new_dir, allowed, true)
+            if pending_added + pending_updated == 0 then
                 self:showInfo(base_message)
-            end,
-        })
-    end)
+                return
+            end
+            UIManager:show(ConfirmBox:new{
+                text = T(_("Found %1 new and %2 outdated item(s) in the new directory. Import them?"),
+                    tostring(pending_added), tostring(pending_updated)),
+                ok_text = _("Import"),
+                ok_callback = function()
+                    local added, updated = self:scanLocalCache(new_dir, allowed)
+                    self:showInfo(T(_("Imported %1 new and %2 updated item(s)."), tostring(added), tostring(updated)))
+                end,
+                cancel_text = _("Skip"),
+                cancel_callback = function()
+                    self:showInfo(base_message)
+                end,
+            })
+        end, function(err, cancelled)
+            if cancelled then return end
+            logger.warn("skip scan, shelf fetch failed:", log_error(err))
+            self:showInfo(base_message)
+        end)
+    end, 0.1, { link_only = true })
 end
 
 function M:confirmClearBookCache(book_id, title, on_cleared)
