@@ -651,6 +651,7 @@ class ScheduleTest(GateCase):
         self.assertTrue(self.needs(self.sticky("ai,threads")))
         self.assertTrue(self.needs(self.sticky("ai")))
         self.assertTrue(self.needs(self.sticky("protection")))  # unreadable branch protection: retry soon
+        self.assertTrue(self.needs(self.sticky("protection,author")))
         self.assertFalse(self.needs(self.sticky("checks,ai")))
         self.assertFalse(self.needs(self.sticky("sensitive,author")))
         slot = rg.datetime(2026, 10, 28, 12, 7, tzinfo=rg.timezone.utc)

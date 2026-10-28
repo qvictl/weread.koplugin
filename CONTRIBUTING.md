@@ -96,12 +96,14 @@ Every PR to `main` is reviewed by the AI reviewer CodeRabbit and evaluated by th
 workflow, which keeps a checklist comment on the PR. There is no human gate: the gate approves and enables auto-merge
 (squash) when, on the head commit, all required checks passed (coverage gates included), CodeRabbit reviewed it
 and does not request changes, every review thread is resolved, and the PR is not a draft and has no `do-not-merge` label.
-Regressions are fixed forward. AI comments flagged as potential issues / bugs must be fixed or answered with a
+Regressions are fixed forward. (Exception: an upstream sync PR opened by github-actions when `SYNC_TOKEN` is not
+configured cannot be approved or auto-merged by the gate; the owner merges it.) AI comments flagged as potential issues / bugs must be fixed or answered with a
 justification before resolving them. Details: [REVIEW_POLICY.md](REVIEW_POLICY.md).
 
 所有合入 `main` 的 PR 由 AI（CodeRabbit）审查并经 *Review gate* 评估，不设人工关卡：最新提交上
 必需检查全部通过（含覆盖率门禁）、AI 已审查且没有要求修改、所有审查对话已解决、非草稿且无 `do-not-merge` 时，网关自动批准
-并开启自动合并（squash），出了回归就向前修复。AI 标出的潜在问题 / bug 必须修复或回复理由后才能解决对话。
+并开启自动合并（squash），出了回归就向前修复（例外：未配置 `SYNC_TOKEN` 时由 github-actions 创建的上游同步 PR，网关不能批准也不会自动合并，
+由所有者合并）。AI 标出的潜在问题 / bug 必须修复或回复理由后才能解决对话。
 详见 [REVIEW_POLICY.md](REVIEW_POLICY.md)。
 
 ## Issues / 提交 Issue
