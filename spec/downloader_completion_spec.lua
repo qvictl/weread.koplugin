@@ -335,6 +335,37 @@ do
     eq(#info_messages, before, "finished job failure was shown again")
 end
 
+-- A worker already yielded inside the Trapper coroutine. Completing its
+-- chapter must start the next step without another UI timer; synchronous
+-- callers still need that timer so they cannot monopolize the UI loop.
+do
+    scheduled = {}
+    local next_steps = 0
+    local d = Downloader:new {
+        settings = { get = function() return {} end },
+        read_meminfo = function() return "" end,
+        read_self_status = function() return "" end,
+    }
+    d._step = function(_self, job)
+        next_steps = next_steps + 1
+        eq(job.index, 2, "completed chapter advances before continuing")
+    end
+    local function job()
+        return {
+            current = { chapter = { chapterUid = 1 }, xhtml = "<p>one</p>", assets = {}, finalized = true },
+            trapper = {}, book = {}, state = {}, bodies = {}, selected = {}, assets = {}, index = 1, total = 2,
+        }
+    end
+    local worker = coroutine.create(function() d:_finishChapter(job()) end)
+    local ok = coroutine.resume(worker)
+    eq(ok, true, "worker completion runs in its coroutine")
+    eq(next_steps, 1, "worker completion immediately continues the download")
+    eq(#scheduled, 0, "worker completion adds no per-chapter idle timer")
+    d:_finishChapter(job())
+    eq(next_steps, 1, "synchronous completion does not run the next chapter inline")
+    eq(#scheduled, 1, "synchronous completion yields through one timer")
+end
+
 print(string.format(
     "downloader_completion_spec: %d checks, %d failure(s)", checks, failures))
 os.exit(failures == 0 and 0 or 1)
