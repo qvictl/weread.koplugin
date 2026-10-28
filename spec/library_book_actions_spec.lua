@@ -325,6 +325,12 @@ host:refreshBookRecord(book, nil, { automatic = true })
 drain()
 expect(#captured == 7 and captured[7][2] == book and cancel_notices == 0 and host.busy_message == nil,
     "automatic refresh cancellation did not show the cached book without an error")
+host.network_cancel_reason = "account_changed"
+host:refreshBookRecord(book, nil, { automatic = true })
+drain()
+expect(#captured == 7 and cancel_notices == 0 and host.busy_message == nil,
+    "discarded account response reopened the previous account's cached book")
+host.network_cancel_reason = nil
 host.cancel_network_request, host.showInfo = false, original_info
 restore()
 
