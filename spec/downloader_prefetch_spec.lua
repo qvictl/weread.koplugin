@@ -301,7 +301,7 @@ for _, failure in ipairs({ "auth", "save", "refresh" }) do
     local job = failing._active_job
     job.open_on_complete = true
     failing._pending_start = {
-        book = book_a, chapters = { chapter_3 }, suffix = "manual", options = {},
+        book = book_a, chapters = { chapter_3 }, suffix = "manual", options = {}, account_id = "",
     }
     local callback_ok = pcall(failure_worker.starts[1].options.on_done, {
         ok = true, value = { path = downloaded_path, auth = {} },
@@ -390,7 +390,7 @@ expect(pending_dl._active_job == nil and (pending_dl._standby_ref or 0) == 0,
     "queued account rejection stranded downloader/standby")
 
 -- The downloader's replacement queue also retains identity across restart.
-for _, change in ipairs({ "before_finish", "after_finish", "ticket", "mp_before_finish", "mp_after_finish" }) do
+for _, change in ipairs({ "before_finish", "after_finish", "ticket", "mp_before_finish", "mp_after_finish", "manual_before_finish", "manual_after_finish" }) do
     scheduled = {}
     local queued_settings, queued_worker = fake_settings(), fake_worker()
     queued_settings:set("account", { user_vid = "one" })
@@ -403,7 +403,7 @@ for _, change in ipairs({ "before_finish", "after_finish", "ticket", "mp_before_
     run_scheduled()
     local queued_done, queued_ok, queued_reason = 0
     replacement_dl:start(book_a, { chapter_3 }, "chapter", {
-        prefetch = not change:find("mp_", 1, true), mp_article = change:find("mp_", 1, true) ~= nil,
+        prefetch = not change:find("mp_", 1, true) and not change:find("manual_", 1, true), mp_article = change:find("mp_", 1, true) ~= nil,
         single_chapter = true,
         on_complete = function(ok, reason)
             queued_done, queued_ok, queued_reason = queued_done + 1, ok, reason
@@ -453,14 +453,14 @@ expect(mp._active_job and mp._active_job.progress_dialog and mp_launched == 0,
     "MP work ran before its cancellable dialog could paint")
 mp_settings:set("account", { user_vid = "second" })
 run_scheduled()
-expect(mp_launched == 1 and mp_snapshot == "first", "MP deferred launch captured new account instead of job account")
-mp:_finishJob(mp._active_job)
+expect(mp_launched == 0 and mp_snapshot == nil and mp._active_job == nil,
+    "MP deferred launch did not reject a changed account")
 scheduled = {}
 expect(mp:start(book_a, { chapter_3 }, "article", { mp_article = true, single_chapter = true }),
     "second MP job did not start")
 mp._active_job.progress_dialog.buttons[1][1].callback()
 run_scheduled()
-expect(mp._active_job == nil and mp_launched == 1, "cancel-before-launch executed MP worker or kept active slot")
+expect(mp._active_job == nil and mp_launched == 0, "cancel-before-launch executed MP worker or kept active slot")
 mp.is_connected = function() return false end
 expect(not mp:start(book_a, { chapter_3 }, "article", { mp_article = true, single_chapter = true })
     and mp._active_job == nil and mp_messages[#mp_messages]:find("No network connection", 1, true),

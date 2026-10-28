@@ -573,4 +573,72 @@ do
     expect(job.bodies["7"] == "<p>final 7</p>", "text-only chapter was not staged")
 end
 
+-- Ordinary workers also retain the accepting account across every yield.
+do
+    local values = { account = { user_vid = "one" } }
+    local d = Downloader:new{
+        settings = { get = function(_, key, default) return values[key] or default end },
+        client = {}, memory_gate = function() return true end,
+        show_transient = function() end,
+    }
+    local forks = 0
+    local function job(task)
+        return { account_id = "one", trapper = { dismissableRunInSubprocess = function()
+            forks = forks + 1
+            if task then task() end
+            return true, { ok = true, value = "child-result" }
+        end } }
+    end
+    local pending = job()
+    values.account.user_vid = "two"
+    expect(d:_runInterruptible(pending, function() end) == nil and forks == 0
+        and pending.cancel_reason == "account_changed", "changed account launched a manual worker")
+    values.account.user_vid = "one"
+    pending = job(function() values.account.user_vid = "two" end)
+    expect(d:_runInterruptible(pending, function() end) == nil and pending.cancelled
+        and pending.cancel_reason == "account_changed", "old-account manual result was delivered")
+    values.account.user_vid = "one"
+    pending = job(function() values.wr_ticket = "new-ticket" end)
+    expect(d:_runInterruptible(pending, function() end) == "child-result" and not pending.cancelled,
+        "same-account ticket rotation discarded a manual result")
+    values.account.user_vid = "one"
+    pending = { account_id = "one" }
+    expect(d:_runInterruptible(pending, function() values.account.user_vid = "two"; return "old" end) == nil
+        and pending.cancelled, "synchronous fallback delivered a changed-account result")
+
+    values.account.user_vid = "one"
+    pending = job()
+    local previous_forks = forks
+    d.memory_gate = function() return false, 1000, 96000 end
+    d._sleepInJob = function() values.account.user_vid = "two"; return true end
+    expect(d:_runInterruptible(pending, function() end) == nil and forks == previous_forks
+        and pending.cancel_reason == "account_changed", "memory wait forked after account change")
+
+    values.account.user_vid = "two"
+    local direct_reason
+    local direct = { account_id = "one", on_complete = function(_, reason) direct_reason = reason end }
+    d._active_job = direct
+    d:_step(direct)
+    expect(direct_reason == "account_changed" and d._active_job == nil,
+        "direct continuation after a coroutine yield entered finalization")
+
+    -- Local finalize slices must stop too, even when no network task follows.
+    for _, resumable in ipairs({ false, true }) do
+        scheduled, values.account = {}, { user_vid = "one" }
+        local completion, side_effect
+        local waiting = { account_id = "one", resumable = resumable, workspace = {}, total = 1,
+            standby_guard = true, on_complete = function(ok, reason) completion = { ok, reason } end }
+        d._active_job = waiting
+        d:_beginStandby()
+        d:_scheduleGuarded(waiting, function() side_effect = true end)
+        values.account.user_vid = "two"
+        table.remove(scheduled, 1)()
+        expect(not side_effect and completion and completion[1] == false and completion[2] == "account_changed"
+            and d._active_job == nil and (d._standby_ref or 0) == 0,
+            "changed account entered a local finalize slice or stranded state")
+        expect((waiting.workspace ~= nil) == resumable,
+            "account rejection changed checkpoint preservation semantics")
+    end
+end
+
 print(("downloader_lifecycle_spec: %d checks"):format(checks))
