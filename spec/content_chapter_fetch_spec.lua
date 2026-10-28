@@ -655,6 +655,21 @@ do
     malformed(good:sub(1, 512 + 400), "m2", "TAR entry", "a truncated TAR entry was accepted")
     malformed(good:sub(1, 512 + 6), "m3", "TAR entry", "a TAR entry cut inside its first bytes was accepted")
     malformed(good:sub(1, 512 + #PNG + 600 + 10), "m4", "TAR padding", "truncated TAR padding was accepted")
+    expect(read_file(workspace.asset_dir .. "/p.png") == nil,
+        "a failed TAR extraction left a partial image on disk")
+    local failed_names = { ["fig.png"] = true }
+    expect_error(function()
+        fetch(tar_entry("complete.png", PNG .. "complete") .. good:sub(1, 512 + 400), "m6", failed_names)
+    end, "TAR entry", "a late TAR failure was accepted")
+    expect(read_file(workspace.asset_dir .. "/complete.png") == nil
+            and read_file(workspace.asset_dir .. "/p.png") == nil,
+        "a late TAR failure did not remove every image from that attempt")
+    expect(failed_names["complete.png"] == nil and failed_names["p.png"] == nil and failed_names["fig.png"],
+        "a failed TAR extraction retained new names or removed previous reservations")
+    expect(read_file(assets[1].path) == PNG .. "123", "rollback removed a previously extracted chapter asset")
+    local retried = fetch(tar_entry("complete.png", PNG .. "complete") .. good .. TAR_END, "m6", failed_names)
+    expect(#retried == 2 and retried[1].href == "images/complete.png" and retried[2].href == "images/p.png",
+        "retry after a failed TAR did not reuse its original asset names")
     local bad_size = tar_entry("p.png", "data")
     bad_size = bad_size:sub(1, 124) .. "zzzzzzzzzzz\0" .. bad_size:sub(137)
     malformed(bad_size, "m5", "TAR entry size", "a non-octal TAR size was accepted")
@@ -700,6 +715,16 @@ do
     malformed("PK\3\4", "z4", "too large", "an oversized ZIP entry was accepted")
     zip_script = { entries = { { path = "x.png", mode = "file", size = 3 } }, data = {}, extract_err = "crc error" }
     malformed("PK\3\4", "z5", "crc error", "a ZIP entry that failed to extract was accepted")
+    zip_script = {
+        entries = { { path = "zip-good.png", mode = "file", size = #PNG + 1 },
+            { path = "bad.png", mode = "file", size = 3 } },
+        data = { ["zip-good.png"] = PNG .. "z" }, extract_err = "crc error",
+    }
+    local zip_names = { ["fig.png"] = true }
+    expect_error(function() fetch("PK\3\4", "z6", zip_names) end, "crc error", "late ZIP failure was accepted")
+    expect(zip_script.closed and read_file(workspace.asset_dir .. "/zip-good.png") == nil
+            and zip_names["zip-good.png"] == nil and zip_names["fig.png"],
+        "a failed ZIP did not close its reader and roll back its images and names")
 end
 
 -- -------------------------------------- download_remote_images_to_files --

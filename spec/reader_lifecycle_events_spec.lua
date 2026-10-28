@@ -444,11 +444,13 @@ do
     host:onPageUpdate()
     expect(count(calls, "progress.page") == 2, "page update tolerates missing optional services")
     host:onPosUpdate()
-    expect(count(calls, "overlay.refresh") == 1, "position update without overlay is a no-op")
+    expect(count(calls, "progress.page") == 3 and count(calls, "overlay.refresh") == 1,
+        "position updates reach progress sync without optional services")
 
     host, calls = make_host()
     host:onPosUpdate()
-    expect(index_of(calls, "overlay.refresh") ~= nil, "position update refreshes the overlay")
+    expect(index_of(calls, "progress.page") and index_of(calls, "report.page")
+        and index_of(calls, "overlay.refresh"), "position updates fan out to all reading services")
     host:onShowWeRead()
     expect(index_of(calls, "account") ~= nil, "ShowWeRead opens the account status")
     expect(host:maybeStartReadReport() == "started" and index_of(calls, "report.start:menu"),

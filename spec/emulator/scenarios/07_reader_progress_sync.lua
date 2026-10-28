@@ -330,16 +330,50 @@ return function(H)
         H.shot("07-07-reopened-uploaded")
     end)
 
+    H.step("scroll mode marks the new position dirty and uploads it", function()
+        local mapper = require("weread.lib.position_mapper")
+        H.call(function() H.reader().view:onSetViewMode("scroll") end)
+        H.sleep(0.2)
+        local scrolled_percent = H.call(function()
+            local sync = H.plugin().progress_sync
+            local before = sync:capture_local()
+            H.reader().rolling:onGotoViewRel(1)
+            local after = sync:capture_local()
+            H.check(not mapper.same_position(before, after), "scroll moves the reading position")
+            H.check(mapper.same_position(sync.local_position, after), "PosUpdate captures the scroll position")
+            H.equal(sync.dirty, true, "scrolling is unsynced reading")
+            return after.fraction * 100
+        end)
+        local uploads_before = #uploads()
+        H.broadcast("Suspend")
+        H.broadcast("Resume")
+        local entry = H.wait_until("upload of the scroll position", function()
+            local list = uploads()
+            return #list > uploads_before and list[#list]
+        end, 30)
+        H.check(math.abs(cloud_percent(entry) - scrolled_percent) < 0.5,
+            "uploaded the scroll position", describe(entry))
+        H.wait_until("scroll position accepted", function()
+            local sync = H.plugin().progress_sync
+            return not sync.dirty and sync.uploading == nil
+        end, 15)
+        H.call(function() H.reader().view:onSetViewMode("page") end)
+        H.close_dialogs()
+    end)
+
     H.step("(c) cloud moved ahead elsewhere: stale pending position is never sent", function()
         local uploads_before = #uploads()
         turn_page_forward()
+        local expected_local = H.call(function() return H.plugin().progress_sync:capture_local() end)
+        H.check(expected_local.fraction * 100 < 91.7, "local reading remains behind the new cloud position")
         set_cloud(6, 900) -- 91.7 %: someone read further on another device
         control_entries = control_entries + 1
         close_to_file_manager()
         local stale = H.call(function()
             return H.runtime().settings:get_book(BOOK_ID).pending_upload_position
         end)
-        H.check(type(stale) == "table" and stale.chapter_uid == 5,
+        H.check(type(stale) == "table" and stale.chapter_uid == expected_local.chapter_uid
+                and stale.chapter_offset == expected_local.chapter_offset,
             "close queued the (now stale) local position", tostring(stale and stale.chapter_uid))
         H.call(function() H.plugin():openFile(book_path) end)
         wait_reader_ready()
@@ -381,8 +415,8 @@ return function(H)
         -- to /web/book/read with the same position: count positions.
         local distinct = 0
         for _key in pairs(uploaded) do distinct = distinct + 1 end
-        -- The page turned right after the jump, then the position read to.
-        H.equal(distinct, 2, "distinct positions uploaded in the whole scenario")
+        -- The immediate page turn, the later reading position, then scrolling.
+        H.equal(distinct, 3, "distinct positions uploaded in the whole scenario")
         H.metric("history_entries", #list)
         local final = H.mock_state().progress[BOOK_ID]
         H.equal(tonumber(final.chapterUid), 6, "cloud keeps the newest (other-device) chapter")

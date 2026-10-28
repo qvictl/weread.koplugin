@@ -175,7 +175,7 @@ function M:onPageUpdate()
 end
 
 function M:onPosUpdate()
-    if self._refreshAnnotationOverlay then self:_refreshAnnotationOverlay() end
+    return self:onPageUpdate()
 end
 
 function M:onCloseDocument()
