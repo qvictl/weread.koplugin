@@ -1639,7 +1639,7 @@ function Content.ensure_reader_state(client, book)
     ReaderState.apply_to_book(book, state)
 
     if not book.psvts then
-        error("reader.psvts not found")
+        error("reader.psvts not found", 0)
     end
     return state
 end
@@ -1673,7 +1673,7 @@ function Content.fetch_chapter_shard(client, _settings, book, chapter, endpoint)
     end
     local book_id = book.book_id or book.bookId
     if not chapter then
-        error("chapter is required")
+        error("chapter is required", 0)
     end
 
     local chapter_url = WeRead.reader_url(book_id, chapter.chapterUid)
@@ -1693,14 +1693,16 @@ function Content.fetch_chapter_shard(client, _settings, book, chapter, endpoint)
         },
         body = client:json_encode(params),
     })
+    -- Level 0: these messages reach the download dialogs, which must not
+    -- show a Lua source position.
     if not code or code < 200 or code >= 300 then
         -- Keep the transport status ("timeout", "wantread", ...) so the
         -- downloader can tell a network outage from a server answer.
         error(endpoint .. " failed: HTTP " .. tostring(code or "unknown")
-            .. ((not code and status) and (" (" .. tostring(status) .. ")") or ""))
+            .. ((not code and status) and (" (" .. tostring(status) .. ")") or ""), 0)
     end
     if text == "{}" then
-        error(endpoint .. " returned empty object")
+        error(endpoint .. " returned empty object", 0)
     end
     return text
 end
@@ -1743,7 +1745,8 @@ function Content.fetch_chapter_xhtml(client, settings, book, chapter)
     end
 
     if not ok then
-        error(e0)
+        -- Re-raise as is: level 1 would prepend this file's position.
+        error(e0, 0)
     end
 
     book._content_format = "epub"
