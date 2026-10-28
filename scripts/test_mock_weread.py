@@ -63,6 +63,9 @@ class MockTests(unittest.TestCase):
                          1790524800)  # Monday 2026-09-28, Beijing midnight
         self.assertEqual(self.gateway("/readdata/detail", mode="annually", baseTime=1790784000)[1]["baseTime"],
                          1767196800)  # 2026-01-01, Beijing midnight
+        _, overall = self.gateway("/readdata/detail", mode="overall")
+        self.assertEqual(overall["baseTime"], 0)
+        self.assertEqual(overall["readTimes"], {"1704038400": 7200})  # Injected current year: 2024
         self.assertEqual(self.gateway("/readdata/detail", mode="invalid")[0], 400)
 
     def test_synthetic_mp_article_list(self):

@@ -206,11 +206,11 @@ class MockServer(ThreadingHTTPServer):
                     start -= timedelta(days=start.weekday())
                 elif data["mode"] == "monthly":
                     start = start.replace(day=1)
-                elif data["mode"] == "annually":
+                elif data["mode"] in {"annually", "overall"}:
                     start = start.replace(month=1, day=1)
                 base = 0 if data["mode"] == "overall" else int(start.timestamp())
                 return 200, dict(baseTime=base, totalReadTime=7200, readDays=3,
-                                 dayAverageReadTime=2400, readTimes={str(base): 7200})
+                                 dayAverageReadTime=2400, readTimes={str(int(start.timestamp())): 7200})
             if api == "/review/list":
                 return 200, dict(reviewsCnt=1, reviewsHasMore=0, reviews=[dict(review=review())])
             if api in {"/book/underlines", "/book/readreviews"}:
