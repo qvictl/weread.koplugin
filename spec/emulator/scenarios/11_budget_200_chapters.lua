@@ -10,14 +10,19 @@
 local BOOK_ID = "900100"
 local CHAPTERS = 200
 local WINDOW = 20
--- Budgets. Local reference run (x86-64, SDL dummy): total 146 s (~0.5 s per
--- chapter fork, ~26 s packaging), parent RSS peak +16 MB, Lua heap after
--- +0.7 MB, last/first 20 chapters 1.0x.
+-- Budgets. Local reference run (x86-64, SDL dummy, official v2026.07.1):
+-- total 114 s (~0.45 s per chapter fork), packaging 0.89 s (footnote
+-- rescan + transform in one 160 ms finalize batch, EPUB save 0.49 s; it was
+-- 26.4 s with a fixed 0.1 s wait per chapter), parent RSS peak +12 MB, Lua
+-- heap after +0.9 MB, last/first 20 chapters 1.0x.
 local MAX_RSS_GROWTH_KB = 40 * 1024 -- parent RSS, sampled peak over baseline
 local MAX_LUA_GROWTH_KB = 8 * 1024 -- Lua heap after the job (collected) over baseline
 local MAX_LATE_TO_EARLY_RATIO = 3.0 -- last 20 vs first 20 chapters
-local MAX_PACKAGING_S = 60 -- last chapter checkpointed -> EPUB saved
+local MAX_PACKAGING_S = 2 -- last chapter checkpointed -> EPUB saved
 local MAX_TOTAL_S = 360
+-- One finalize UI step (budget 200 ms, Downloader.FINALIZE_BATCH_BUDGET_MS)
+-- plus one chapter and CI noise.
+local MAX_FINALIZE_BATCH_MS = 1000
 
 return function(H)
     local Content = require("weread.lib.content")
@@ -67,6 +72,35 @@ return function(H)
     end)
 
     local baseline_rss, baseline_lua
+    -- Finalize pipeline (footnote rescan/transform before packaging) runs in
+    -- time-budgeted batches. Every continuation must come after the UI loop
+    -- polled input (so Cancel gets through between batches): count real
+    -- Input:waitEvent calls and check one happened before each continuation.
+    local input_polls = 0
+    local finalize = { yields = 0, polled = 0, step_ms = {} }
+    H.step("instrument finalize batches", function()
+        H.call(function()
+            local Input = require("device").input
+            local wait_event = Input.waitEvent
+            Input.waitEvent = function(...)
+                input_polls = input_polls + 1
+                return wait_event(...)
+            end
+            local d = downloader()
+            local yield = d._yieldFinalize
+            d._yieldFinalize = function(self, dl, step_fn)
+                local polls_at_yield = input_polls
+                return yield(self, dl, function()
+                    finalize.yields = finalize.yields + 1
+                    if input_polls > polls_at_yield then finalize.polled = finalize.polled + 1 end
+                    local started = time.now()
+                    step_fn()
+                    finalize.step_ms[#finalize.step_ms + 1] = tonumber(time.now() - started) / 1000
+                end)
+            end
+        end)
+    end)
+
     H.step("baseline", function()
         H.call(function()
             collectgarbage("collect")
@@ -162,6 +196,17 @@ return function(H)
         H.check(wall_last <= wall_first * MAX_LATE_TO_EARLY_RATIO, "late wall time per chapter within 3x",
             string.format("%.0f ms vs %.0f ms", wall_last, wall_first))
         H.check(packaging_ms < MAX_PACKAGING_S * 1000, "packaging time within budget", tostring(packaging_ms) .. " ms")
+        -- The last continuation is the EPUB build (one step, may wait for the
+        -- cover worker); the batches before it are budgeted.
+        local max_batch_ms = 0
+        for i = 1, #finalize.step_ms - 1 do max_batch_ms = math.max(max_batch_ms, finalize.step_ms[i]) end
+        H.metric("finalize_ui_yields", finalize.yields)
+        H.metric("finalize_input_polled", finalize.polled)
+        H.metric("finalize_max_batch_ms", round(max_batch_ms))
+        H.check(finalize.yields >= 2, "finalize yielded to the UI loop", tostring(finalize.yields))
+        H.equal(finalize.polled, finalize.yields, "input polled before every finalize continuation")
+        H.check(max_batch_ms < MAX_FINALIZE_BATCH_MS, "finalize batch within its time budget",
+            string.format("%.0f ms", max_batch_ms))
         H.check(total_ms < MAX_TOTAL_S * 1000, "total time within budget", tostring(total_ms) .. " ms")
     end)
 
