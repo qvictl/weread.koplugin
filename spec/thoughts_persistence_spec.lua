@@ -13,6 +13,7 @@ end
 local SQ = require("spec.helpers.ljsqlite3_ffi")
 package.preload["lua-ljsqlite3/init"] = function() return { open = SQ.open } end
 package.preload["libs/libkoreader-lfs"] = function() return SQ.lfs() end
+package.preload["util"] = function() return { makePath = SQ.makePath } end
 package.preload["weread.lib.logger"] = function()
     local noop = function() end
     return { dbg = noop, info = noop, warn = noop, err = noop }

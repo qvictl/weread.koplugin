@@ -157,6 +157,14 @@ function M.exists(path)
     return false
 end
 
+-- util.makePath creates parents and succeeds for an existing directory.
+function M.makePath(path)
+    local quoted = "'" .. path:gsub("'", "'\\''") .. "'"
+    local status = os.execute("mkdir -p " .. quoted .. " 2>/dev/null")
+    if status == 0 or status == true then return true end
+    return nil, "Could not create directory"
+end
+
 -- KOReader lfs stub that creates real directories. Like libkoreader-lfs,
 -- mkdir creates a single level and returns nil, err when the directory
 -- already exists or its parent is missing; callers create parents themselves.
