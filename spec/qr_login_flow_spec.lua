@@ -107,7 +107,11 @@ local function make_host()
     function host:showTransientInfo(text) self.transients[#self.transients + 1] = text end
     function host:showBusy(text) self.busy[#self.busy + 1] = text end
     function host:closeBusy() self.closed_busy = self.closed_busy + 1 end
-    function host:runOnlineTask(name, fn) self.tasks[#self.tasks + 1] = name; fn() end
+    function host:runOnlineTask(name, fn, delay, options)
+        self.tasks[#self.tasks + 1] = name
+        self.task_delay, self.task_options = delay, options
+        fn()
+    end
     function host:_runNetworkRequest(text, _label, task, success, failure)
         self:showBusy(text)
         local ok, value = pcall(task)
@@ -902,6 +906,8 @@ do
     local l = deferred()
     l:start()
     expect(#l.client.requests == 0, "start defers HTTP to the network worker")
+    expect(l.host.task_delay == 0.1 and l.host.task_options.link_only == true,
+        "QR worker startup checks link state without synchronous DNS")
     local result = l.host.worker_task()
     expect(l.login_cookies == nil, "worker begin cannot mutate parent cookies")
     l:cancel()
@@ -959,6 +965,47 @@ do
     l.host.failure(nil, true)
     expect(l.generation == generation + 1 and #l.host.infos == 0,
         "worker cancellation invalidates QR session silently")
+end
+
+-- Exercise the real common network boundary, with the production mock-endpoint
+-- shortcut absent: link checks must never enter the synchronous DNS probe.
+do
+    for _, name in ipairs({ "ui/bidi", "ui/widget/confirmbox", "ui/widget/infomessage", "ui/widget/menu" }) do
+        package.loaded[name] = {}
+    end
+    package.loaded["weread.lib.plugin_util"] = {
+        tr = function(text) return text end, T = function(text) return text end,
+        log_error = tostring, display_error = tostring, unpack_args = unpack,
+    }
+    local dns, links = 0, 0
+    package.loaded["ui/network/manager"] = {
+        isConnected = function() links = links + 1; return true end,
+        isOnline = function() dns = dns + 1; error("UI DNS must not run") end,
+    }
+    local Common = require("weread.ui.common")
+    for _, stage in ipairs({ "start", "otp", "complete", "poll" }) do
+        reset_ui()
+        local l = new_login()
+        l.host.runOnlineTask = Common.runOnlineTask
+        l.host.isNetworkOnline = Common.isNetworkOnline
+        l.host.isNetworkConnected = Common.isNetworkConnected
+        if stage == "start" then l:start()
+        elseif stage == "complete" then
+            l:_complete({ succeed = true, webLoginVid = "new", accessToken = "token" }, l.generation)
+        elseif stage == "poll" then
+            l.started_at = os.time()
+            l:_poll("U", l.generation)
+        else
+            l:_show_otp("U", l.generation)
+            local dialog = l.host.inputs[1]
+            dialog.typed = "0000"
+            dialog.buttons[1][2].callback()
+        end
+        expect(#l.client.requests == 0, stage .. " waits for scheduled worker startup")
+        expect(run_scheduled(0.1) == 1, stage .. " starts after the UI paints")
+        expect(dns == 0, stage .. " never invokes synchronous isOnline DNS")
+    end
+    expect(links >= 4, "all four QR request entries use the real link-state check")
 end
 
 print("qr_login_flow_spec: " .. checks .. " checks passed")

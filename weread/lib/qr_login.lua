@@ -385,7 +385,7 @@ function QRLogin:_run_protocol_request(busy_text, generation, task, on_success, 
             if cancelled then self:cancel(); return end
             on_failure(err)
         end)
-    end)
+    end, 0.1, { link_only = true })
 end
 
 function QRLogin:_close_qr_dialog(programmatic)
