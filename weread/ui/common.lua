@@ -183,7 +183,7 @@ function M:_runNetworkRequest(busy_text, error_label, task, on_success, on_failu
     local WorkerSettings = require("weread.lib.worker_settings")
     Trapper:wrap(function()
         local fingerprint = WorkerSettings.fingerprint(self.settings)
-        local completed, encoded = Trapper:dismissableRunInSubprocess(function()
+        local completed, encoded, failure_reason = Trapper:dismissableRunInSubprocess(function()
             local auth_result = WorkerSettings.capture(self.settings)
             local ok, value = xpcall(task, debug.traceback)
             return Json.encode({ ok = ok, value = value, auth = auth_result() })
@@ -197,6 +197,9 @@ function M:_runNetworkRequest(busy_text, error_label, task, on_success, on_failu
         if not completed then
             -- Dismissed by the user (the child was killed), or fork failed.
             if encoded ~= nil then report(encoded)
+            elseif failure_reason == "start_failed" then report(_("Could not start network subprocess."))
+            elseif failure_reason == "read_failed" then report(_("Could not read network subprocess result."))
+            elseif failure_reason then report(tostring(failure_reason))
             elseif on_failure then on_failure(nil, true) end
             return
         end
