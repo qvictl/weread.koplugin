@@ -1391,7 +1391,8 @@ function Downloader:_finishChapter(dl)
     -- chapter's worker (at least its 125 ms poll interval). Starting the next
     -- worker in the same coroutine avoids another idle 100 ms per chapter.
     -- Tail calls here and in _step keep the coroutine stack bounded.
-    if dl.trapper and coroutine.running() then return self:_step(dl) end
+    local co, is_main = coroutine.running()
+    if dl.trapper and co and not is_main then return self:_step(dl) end
     self:_scheduleGuarded(dl, function() self:_step(dl) end)
 end
 

@@ -364,6 +364,17 @@ do
     d:_finishChapter(job())
     eq(next_steps, 1, "synchronous completion does not run the next chapter inline")
     eq(#scheduled, 1, "synchronous completion yields through one timer")
+    local finish = d._finishChapter
+    local environment = getfenv(finish)
+    -- Emulate Lua 5.2's main thread without changing the global coroutine API.
+    setfenv(finish, setmetatable({
+        coroutine = { running = function() return {}, true end },
+    }, { __index = environment }))
+    local compatible_ok = pcall(finish, d, job())
+    setfenv(finish, environment)
+    eq(compatible_ok, true, "Lua 5.2-compatible main-thread completion succeeds")
+    eq(next_steps, 1, "the Lua 5.2-compatible main thread is not an interruptible worker coroutine")
+    eq(#scheduled, 2, "the Lua 5.2-compatible main thread still yields through a timer")
 end
 
 print(string.format(
