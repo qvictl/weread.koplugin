@@ -6,6 +6,7 @@ Targets: from 2026-11-24: unit + emulator ≥ 80.78%, unit ≥ 80.00%; from 2026
 
 | Date (UTC) | Commit | Unit | Unit + emulator | Run |
 | --- | --- | --- | --- | --- |
+| 2026-10-28T15:57:18+00:00 | `c0e87304` | 79.65% | 84.53% | [run](https://github.com/qvictl/weread.koplugin/actions/runs/40719705372) |
 | 2026-10-28T15:45:34+00:00 | `b75fbbf5` | 79.54% | 84.44% | [run](https://github.com/qvictl/weread.koplugin/actions/runs/40717969635) |
 | 2026-10-28T11:33:40+00:00 | `331c4ee7` | 79.54% | 84.42% | [run](https://github.com/qvictl/weread.koplugin/actions/runs/40680044145) |
 | 2026-10-28T11:28:10+00:00 | `992287c3` | 79.54% | 84.42% | [run](https://github.com/qvictl/weread.koplugin/actions/runs/40679189967) |
