@@ -277,6 +277,12 @@ class HappyPathTest(GateCase):
         merge = [w for w in self.gh.writes if w[0] == "PUT" and w[1].endswith("/merge")]
         self.assertEqual(merge, [("PUT", "repos/%s/pulls/7/merge" % REPO, {"sha": HEAD, "merge_method": "squash"})])
 
+    def test_unstable_pr_is_merged_directly(self):
+        # Mergeable with a failing non-required check (seen on qvictl/koreader#12).
+        self.state["enable_error"] = '[{"message": "Pull request Pull request is in unstable status"}]'
+        self.run_gate()
+        self.assertTrue(any(w[0] == "PUT" and w[1].endswith("/merge") and w[2]["sha"] == HEAD for w in self.gh.writes))
+
     def test_other_automerge_errors_are_reported(self):
         self.state["enable_error"] = "boom"
         self.run_gate()

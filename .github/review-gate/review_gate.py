@@ -805,7 +805,10 @@ def apply(gh: GitHub, merge_gh: Optional[GitHub], facts: Facts, verdict: Verdict
             actions.append("开启自动合并（%s）" % verdict.merge_method.lower())
             automerge_on = True
         except ApiError as err:
-            if "clean status" not in str(err).lower():
+            # GitHub refuses auto-merge on a PR that is mergeable right now:
+            # "clean" (all checks green) or "unstable" (only non-required
+            # checks failing).
+            if not re.search(r"is in (clean|unstable) status", str(err), re.IGNORECASE):
                 actions.append("开启自动合并失败：%s" % err)
                 verdict.notes.append("⚠️ 开启自动合并失败（HTTP %s），下次运行会重试" % err.status)
                 log("::warning::enable auto-merge failed: %s" % err)
