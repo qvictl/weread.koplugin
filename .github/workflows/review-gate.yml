@@ -53,9 +53,10 @@ permissions:
   contents: read
 
 # One run per PR at a time (a newer event supersedes an older run); scheduled
-# and manual all-PR runs share one group.
+# and manual all-PR runs share one group. The run for a `human-approved`
+# label records which commit the label covers, so it is never superseded.
 concurrency:
-  group: review-gate-${{ github.event.pull_request.number || github.event.workflow_run.pull_requests[0].number || inputs.pr || ((github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && 'all') || github.run_id }}
+  group: review-gate-${{ github.event.pull_request.number || github.event.workflow_run.pull_requests[0].number || inputs.pr || ((github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && 'all') || github.run_id }}${{ github.event.label.name == 'human-approved' && '-override' || '' }}
   cancel-in-progress: ${{ github.event_name != 'schedule' }}
 
 jobs:

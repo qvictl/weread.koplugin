@@ -56,6 +56,9 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 MARKER = "<!-- review-gate -->"
 APPROVAL_MARKER = "<!-- review-gate:approve -->"
 AUTOMERGE_STATE = "<!-- review-gate:automerge=on -->"
+# The commit a maintainer's `human-approved` was applied to (head SHA in the
+# `labeled` event's payload), carried in the gate's own sticky comment.
+OVERRIDE_RE = re.compile(r"<!-- review-gate:override head=([0-9a-f]{40}) -->")
 STATE_RE = re.compile(r"<!-- review-gate:state head=([0-9a-f]+) blockers=([a-z,]*) -->")
 # Scheduled runs re-evaluate a PR only when it may have changed without an
 # event (see schedule_needs_eval); every PR is still refreshed this often.
@@ -236,6 +239,7 @@ class Facts:
     override_actor: Optional[str] = None
     override_role: Optional[str] = None
     override_error: Optional[str] = None
+    override_head: Optional[str] = None
     author_merged_prs: Optional[int] = None
     auto_merge: Optional[Dict[str, Any]] = None
     pr_node_id: Optional[str] = None
@@ -255,7 +259,9 @@ class Facts:
 
 
 def collect(gh: GitHub, repo: str, number: int, repo_info: Optional[Dict[str, Any]] = None,
-            branch_cache: Optional[Dict[str, Any]] = None) -> Facts:
+            branch_cache: Optional[Dict[str, Any]] = None, label_head: Optional[str] = None) -> Facts:
+    """`label_head`: head SHA from the payload of the `labeled` event that added
+    `human-approved` (only set for that event's own run)."""
     owner, name = repo.split("/", 1)
     repo_info = repo_info or gh.get("repos/%s" % repo)
     pr = gh.get("repos/%s/pulls/%d" % (repo, number))
@@ -314,7 +320,14 @@ def collect(gh: GitHub, repo: str, number: int, repo_info: Optional[Dict[str, An
 
     if OVERRIDE_LABEL in facts.labels:
         facts.override_actor, facts.override_role, facts.override_error = labeler_role(
-            gh, repo, number, facts.owner_login, head)
+            gh, repo, number, facts.owner_login)
+        bound = OVERRIDE_RE.search((sticky or {}).get("body", ""))
+        facts.override_head = label_head or (bound.group(1) if bound else None)
+        if not facts.override_error and facts.override_head != head:
+            facts.override_error = (
+                "它是在提交 `%s` 上添加的，当前 head 是 `%s`：管理员看过新改动后需移除并重新添加"
+                % (facts.override_head[:10], head[:10]) if facts.override_head else
+                "网关没有记录到它添加时的提交（例如那次运行被取消）：请移除并重新添加")
 
     if pr.get("author_association") not in COLLABORATOR_ASSOCIATIONS and facts.author:
         query = urllib.parse.quote("repo:%s is:pr is:merged author:%s" % (repo, facts.author))
@@ -325,40 +338,18 @@ def collect(gh: GitHub, repo: str, number: int, repo_info: Optional[Dict[str, An
     return facts
 
 
-def head_pushed_at(gh: GitHub, repo: str, sha: str) -> Optional[str]:
-    """When the head commit reached GitHub: the earliest check suite created
-    for it (server time; commit dates are chosen by the author)."""
-    suites = gh.get("repos/%s/commits/%s/check-suites?per_page=100" % (repo, sha)).get("check_suites") or []
-    times = [s["created_at"] for s in suites if s.get("created_at")]
-    return min(times) if times else None
-
-
-def labeler_role(gh: GitHub, repo: str, number: int, owner_login: str,
-                 head_sha: Optional[str] = None) -> Tuple[Optional[str], Optional[str], Optional[str]]:
-    """Who applied the override label last, and their permission (fail closed).
-    The label only covers commits pushed before it was applied: a later push
-    needs a maintainer to apply it again."""
+def labeler_role(gh: GitHub, repo: str, number: int, owner_login: str) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+    """Who applied the override label last, and their permission (fail closed)."""
     try:
         events = gh.get_all("repos/%s/issues/%d/events" % (repo, number))
     except ApiError as err:
         return None, None, "无法读取标签事件：%s" % err
-    actor, labeled_at = None, None
+    actor = None
     for event in events:
         if event.get("event") == "labeled" and (event.get("label") or {}).get("name") == OVERRIDE_LABEL:
             actor = (event.get("actor") or {}).get("login")
-            labeled_at = event.get("created_at")
     if not actor:
         return None, None, "找不到 `%s` 的打标签事件" % OVERRIDE_LABEL
-    if head_sha:
-        try:
-            pushed = head_pushed_at(gh, repo, head_sha)
-        except ApiError as err:
-            return actor, None, "无法确认最新提交的推送时间：%s" % err
-        if not pushed or not labeled_at:
-            return actor, None, "无法确认标签是否晚于最新提交 `%s`" % head_sha[:10]
-        if labeled_at < pushed:
-            return actor, None, ("标签添加于最新提交 `%s` 推送之前（%s < %s）：新提交需要管理员审核后重新添加"
-                                 % (head_sha[:10], labeled_at, pushed))
     if actor == owner_login:
         return actor, "admin", None
     try:
@@ -679,6 +670,8 @@ def render(facts: Facts, verdict: Verdict, automerge_on: bool) -> str:
     head = facts.head_sha
     keys = [c.key for c in verdict.blockers] + ([] if verdict.approvable else ["author"])
     lines = [MARKER, "<!-- review-gate:state head=%s blockers=%s -->" % (head, ",".join(keys))]
+    if facts.override_head and OVERRIDE_LABEL in facts.labels:
+        lines.append("<!-- review-gate:override head=%s -->" % facts.override_head)
     if automerge_on:
         lines.append(AUTOMERGE_STATE)
     if verdict.ok:
@@ -711,8 +704,10 @@ def render(facts: Facts, verdict: Verdict, automerge_on: bool) -> str:
 # Actions.
 
 ENABLE_AUTOMERGE = """
-mutation($id: ID!, $method: PullRequestMergeMethod!) {
-  enablePullRequestAutoMerge(input: {pullRequestId: $id, mergeMethod: $method}) { clientMutationId }
+mutation($id: ID!, $method: PullRequestMergeMethod!, $head: GitObjectID!) {
+  enablePullRequestAutoMerge(input: {pullRequestId: $id, mergeMethod: $method, expectedHeadOid: $head}) {
+    clientMutationId
+  }
 }
 """
 DISABLE_AUTOMERGE = """
@@ -796,7 +791,7 @@ def apply(gh: GitHub, merge_gh: Optional[GitHub], facts: Facts, verdict: Verdict
         actions.append("（演练）开启自动合并（%s）" % verdict.merge_method.lower())
     elif facts.pr_node_id:
         try:
-            merge_gh.graphql(ENABLE_AUTOMERGE, {"id": facts.pr_node_id, "method": verdict.merge_method})
+            merge_gh.graphql(ENABLE_AUTOMERGE, {"id": facts.pr_node_id, "method": verdict.merge_method, "head": head})
             actions.append("开启自动合并（%s）" % verdict.merge_method.lower())
             automerge_on = True
         except ApiError as err:
@@ -890,6 +885,10 @@ def schedule_needs_eval(pr: Dict[str, Any], sticky: Optional[Dict[str, Any]], no
     return False, "unchanged (blocked by %s)" % ",".join(sorted(blockers))
 
 
+def utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
 def find_sticky(comments: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     return next((c for c in comments
                  if (c.get("user") or {}).get("login") == GATE_LOGIN and c.get("body", "").startswith(MARKER)), None)
@@ -897,9 +896,9 @@ def find_sticky(comments: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
 
 def process(gh: GitHub, merge_gh: Optional[GitHub], repo: str, number: int, config: Dict[str, Any], dry_run: bool,
             repo_info: Dict[str, Any], branch_cache: Dict[str, Any],
-            defer_automerge: bool = False) -> Optional[Tuple[str, bool]]:
+            defer_automerge: bool = False, label_head: Optional[str] = None) -> Optional[Tuple[str, bool]]:
     try:
-        facts = collect(gh, repo, number, repo_info, branch_cache)
+        facts = collect(gh, repo, number, repo_info, branch_cache, label_head)
     except OutOfScope:
         print("#%d: not an open PR to %s, skipped" % (number, repo_info["default_branch"]))
         return None
@@ -943,6 +942,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     repo_info = gh.get("repos/%s" % args.repo)
 
     event_name = os.environ.get("GITHUB_EVENT_NAME", "")
+    label_heads: Dict[int, str] = {}
     numbers: Optional[List[int]]
     if args.pr:
         numbers = [args.pr]
@@ -954,11 +954,14 @@ def main(argv: Optional[List[str]] = None) -> int:
         with open(os.environ["GITHUB_EVENT_PATH"], encoding="utf-8") as fh:
             event = json.load(fh)
         numbers = prs_from_event(gh, args.repo, event_name, event)
+        if (event_name == "pull_request_target" and event.get("action") == "labeled"
+                and (event.get("label") or {}).get("name") == OVERRIDE_LABEL):
+            label_heads[int(event["pull_request"]["number"])] = event["pull_request"]["head"]["sha"]
     if numbers is None:
         open_prs = gh.get_all("repos/%s/pulls?state=open&base=%s" % (
             args.repo, urllib.parse.quote(repo_info["default_branch"], safe="")))
         numbers = []
-        now = datetime.now(timezone.utc)
+        now = utcnow()
         for pr in open_prs:
             if args.event and event_name == "schedule":
                 try:
@@ -977,7 +980,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     for number in sorted(set(numbers)):
         try:
             result = process(gh, merge_gh, args.repo, number, config, dry_run, repo_info, branch_cache,
-                             defer_automerge)
+                             defer_automerge, label_heads.get(number))
             if result:
                 summaries.append(result[0])
                 if result[1]:

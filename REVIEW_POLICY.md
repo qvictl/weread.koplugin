@@ -7,7 +7,9 @@
 
 > **两种模式。** 咨询模式（advisory）：分支保护所需批准数为 0，网关照常评估每个 PR、更新置顶评论，满足条件时批准，
 > 但不批准也能合并；没有 AI 审查时第 2 项不满足，网关只报告。强制模式：按 [启用步骤](#启用步骤) 把 `main` 改为需要
-> 1 个批准后，以所有者账号提交的 PR 只能由网关批准，网关不批准就不能合并。
+> 1 个批准后，以所有者账号提交的 PR 不能由所有者自己批准，只能由网关批准。注意：分支保护不限定**谁**来批准，
+> 任何其他有写权限的人的批准同样满足要求并绕过网关的条件；目前仓库只有所有者一个账号，增加协作者前请先评估这一点
+> （或把 *Review gate* 作业也设为必需检查）。
 
 ## 审查者
 
@@ -39,7 +41,8 @@
 1. **必需检查全部成功**：`main` 分支保护要求的检查（网关运行时从分支保护读取；撰写本文时为 `ci`、`integration`、`tests-policy`）在 head SHA 上都已成功（`success` / `neutral` / `skipped`）。
 2. **AI 审查已完成且没有 Request changes**：至少一个 AI 审查者（`coderabbitai[bot]` 或 `gemini-code-assist[bot]`）
    提交了 `commit_id` 等于 head SHA 的审查（CodeRabbit 没有可操作意见时不发 PR review，只在该提交上留下
-   `CodeRabbit` 检查 “Review completed”，这同样算审查完成）；并且每个 AI 审查者最新的结论性审查（Approve / Request changes）都不是
+   `CodeRabbit` 检查 “Review completed”，这同样算审查完成——只认 `coderabbitai` 应用最新一次、已完成且结论为
+   success 的 `CodeRabbit` 检查，排队中、进行中、skipped、失败或其他应用的同名检查都不算）；并且每个 AI 审查者最新的结论性审查（Approve / Request changes）都不是
    **Request changes**（之后的普通评论不会抵消 Request changes）。尚无任何 AI 审查时，网关显示“等待 AI 审查（咨询模式）”。
 3. **没有未解决的审查对话**（GraphQL `reviewThreads.isResolved`，过时的对话也算）。
 4. **非测试、非文档的改动 ≤ 500 行**（新增 + 删除）。测试：`spec/**`、`scripts/test_*.py`；文档：`**/*.md`、`docs/**`、`screenshots/**`。
@@ -74,8 +77,8 @@
    - 以及按行判断的敏感改动（读不到 diff 时一律视为敏感）：
      - `_meta.lua` 中匹配 `^\s*version\s*=` 的改动行（版本号）
      - `main.lua` 中匹配 `^\s*version\s*=` 的改动行（版本号）
-     - `weread/lib/client.lua` 中匹配 `(?i)(auth\|cookie\|token\|skey\|wr_vid\|login\|credential\|bearer\|x-wrpa\|api_?key\|signature\|\bsign)` 的改动行（认证/Cookie 相关代码）
-     - `weread/lib/protocol.lua` 中匹配 `(?i)(sign\|hmac\|secret\|salt\|nonce\|sha\|md5)` 的改动行（签名/加密相关代码）
+     - `weread/lib/client.lua` 中匹配 `(?i)(auth|cookie|token|skey|wr_vid|login|credential|bearer|x-wrpa|api_?key|signature|\bsign)` 的改动行（认证/Cookie 相关代码）
+     - `weread/lib/protocol.lua` 中匹配 `(?i)(sign|hmac|secret|salt|nonce|sha|md5)` 的改动行（签名/加密相关代码）
 6. **非草稿、没有 `do-not-merge` 标签，作者可信**：作者是仓库协作者（`OWNER` / `MEMBER` / `COLLABORATOR`），
    或是已经有至少一个 PR 被合并的外部贡献者。
 
@@ -87,8 +90,9 @@
 - **`human-approved`**：只有当**最后一次**添加该标签的人拥有 admin 或 maintain 权限时才有效（网关通过 issue 事件 API
   查出打标签的人，再查询其权限；查不到时按无效处理）。它豁免第 4、5 项和第 6 项中的“首次贡献者”限制，
   **永远不豁免第 1–3 项**，也不豁免草稿和 `do-not-merge`。非管理员添加的 `human-approved` 会被忽略，置顶评论会写明原因。
-  标签只对添加它时已经推送的提交有效：之后再有推送（以该提交最早的 check suite 时间为准），覆盖自动失效，
-  需要管理员看过新改动后移除并重新添加标签。
+  标签只对添加它时 PR 的 head 提交有效：网关在处理这次 `labeled` 事件时，把事件里的 head SHA 记在自己的置顶评论里；
+  之后 head 一变（新推送、强推回旧提交），覆盖立即失效，需要管理员看过新改动后移除并重新添加标签。
+  网关没记录到绑定（例如那次运行失败）时同样按无效处理。
 - **`do-not-merge`**：任何有打标签权限的人都可以加，网关见到即不批准，覆盖标签也无法豁免。
 - **`no-tests-needed`**（CONTRIBUTING.md）只影响测试策略检查，与本网关无关。
 
@@ -154,7 +158,11 @@ gh api -X PATCH repos/$R -F allow_auto_merge=true
 echo '{"deployment_branch_policy":{"protected_branches":false,"custom_branch_policies":true}}' | gh api -X PUT repos/$R/environments/review-gate --input -
 gh api -X POST repos/$R/environments/review-gate/deployment-branch-policies -f name=main -f type=branch
 gh secret set REVIEW_GATE_MERGE_TOKEN -R $R --env review-gate
-gh secret delete REVIEW_GATE_MERGE_TOKEN -R $R 2>/dev/null || true   # 不留仓库级副本（分支上的工作流能读到）
+# 不能留仓库级副本（分支上的工作流能读到）：存在就删除，删除失败或删除后仍存在就停止
+if gh api repos/$R/actions/secrets --jq '.secrets[].name' | grep -qx REVIEW_GATE_MERGE_TOKEN; then
+  gh secret delete REVIEW_GATE_MERGE_TOKEN -R $R || exit 1
+fi
+gh api repos/$R/actions/secrets --jq '.secrets[].name' | grep -qx REVIEW_GATE_MERGE_TOKEN && exit 1
 gh api -X PATCH repos/$R/actions/variables/REVIEW_GATE_AUTOMERGE -f value=on \
   || gh api -X POST repos/$R/actions/variables -f name=REVIEW_GATE_AUTOMERGE -f value=on
 
@@ -178,9 +186,15 @@ gh api repos/$R --jq '{allow_auto_merge}'
 启用后：所有者自己（以及以所有者账号提交的 agent）的 PR 只能由网关批准；`github-actions[bot]` 创建的同步 PR 由所有者批准。
 所有 PR 仍需必需检查全部通过（`enforce_admins` 使管理员也不能绕过）。
 
-回退到咨询模式（批准数改回 0，网关继续报告）：
+回退到咨询模式（批准数改回 0，网关继续报告）。先关掉所有打开 PR 上已开启的自动合并（批准数变为 0 后，
+它们会立刻按旧的批准合并），再改保护规则：
 
 ```sh
+for n in $(gh api "repos/$R/pulls?state=open&per_page=100" --jq '.[].number'); do
+  id=$(gh api repos/$R/pulls/$n --jq .node_id)
+  gh api graphql -f query='mutation($id:ID!){disablePullRequestAutoMerge(input:{pullRequestId:$id}){clientMutationId}}' -f id=$id >/dev/null 2>&1 || true   # 没开自动合并的 PR 会报错，忽略
+done
+gh api graphql -f query='{repository(owner:"qvictl",name:"weread.koplugin"){pullRequests(states:OPEN,first:100){nodes{number autoMergeRequest{enabledAt}}}}}' --jq '[.data.repository.pullRequests.nodes[] | select(.autoMergeRequest)] | length'   # 必须是 0
 gh api -X PATCH repos/$R/branches/main/protection/required_pull_request_reviews \
   -F required_approving_review_count=0 -F dismiss_stale_reviews=false \
   -F require_code_owner_reviews=false -F require_last_push_approval=false

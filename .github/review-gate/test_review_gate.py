@@ -155,11 +155,12 @@ def base_state() -> Dict[str, Any]:
 class GateCase(unittest.TestCase):
     def setUp(self) -> None:
         self.state = base_state()
+        self.label_head: Optional[str] = None
 
     def run_gate(self, dry_run: bool = False, merge_token: bool = True):
         gh = FakeGitHub(self.state)
         merge_gh = gh if merge_token else None
-        facts = rg.collect(gh, REPO, 7)
+        facts = rg.collect(gh, REPO, 7, label_head=self.label_head)
         verdict = rg.evaluate(facts, CONFIG)
         actions, automerge_on = rg.apply(gh, merge_gh, facts, verdict, dry_run, log=lambda _m: None)
         body = rg.render(facts, verdict, automerge_on)
@@ -211,6 +212,7 @@ class HappyPathTest(GateCase):
         self.assertEqual(self.automerge(), "enable")
         enable = next(w for w in self.gh.writes if w[0] == "GRAPHQL")
         self.assertEqual(enable[2]["method"], "SQUASH")
+        self.assertEqual(enable[2]["head"], HEAD)
         self.assertEqual(self.result, "created")
         self.assertTrue(self.body.startswith(rg.MARKER))
         self.assertIn(rg.AUTOMERGE_STATE, self.body)
@@ -572,6 +574,7 @@ class EligibilityTest(GateCase):
         self.state["pr"]["labels"] = [{"name": "do-not-merge"}, {"name": "human-approved"}]
         self.state["events"] = [{"event": "labeled", "label": {"name": "human-approved"}, "actor": {"login": "qvictl"},
                                  "created_at": "2026-10-27T12:00:00Z"}]
+        self.label_head = HEAD
         v = self.run_gate()
         self.assertTrue(v.override)
         self.assertFalse(v.ok)
@@ -621,6 +624,7 @@ class OverrideTest(GateCase):
         self.state["pr"]["labels"] = [{"name": "human-approved"}]
         self.state["events"] = [{"event": "labeled", "label": {"name": "human-approved"}, "actor": {"login": a},
                                  "created_at": "2026-10-27T12:00:00Z"} for a in actors]
+        self.label_head = HEAD
         self.state["files"].append({"filename": ".github/workflows/x.yml", "additions": 600, "deletions": 0,
                                     "patch": "+x"})
 
@@ -662,20 +666,34 @@ class OverrideTest(GateCase):
         self.assertFalse(v.override)
         self.assertIn("无法确认", v.override_note)
 
-    def test_label_applied_before_the_latest_push_is_ignored(self):
+    def test_label_is_bound_to_the_commit_it_was_applied_to(self):
         self.label("qvictl")
-        self.state["events"][0]["created_at"] = "2026-10-27T09:00:00Z"
-        self.state["suites"] = [{"created_at": "2026-10-27T10:00:00Z"}, {"created_at": "2026-10-27T10:05:00Z"}]
+        v = self.run_gate()
+        self.assertTrue(v.override)
+        self.assertIn("<!-- review-gate:override head=%s -->" % HEAD, self.body)
+        # A later run (no labeled event) reads the binding from the sticky comment.
+        self.state["comments"] = [{"id": 5, "user": {"login": "github-actions[bot]"}, "body": self.body}]
+        self.label_head = None
+        self.assertTrue(self.run_gate().override)
+        # New head (push after the label, or back to an old SHA): no longer covered.
+        self.state["pr"]["head"]["sha"] = OLD
         v = self.run_gate()
         self.assertFalse(v.override)
         self.assertIn("重新添加", v.override_note)
         self.assertFalse(self.approved())
-        self.state["events"][0]["created_at"] = "2026-10-27T10:01:00Z"
-        self.assertTrue(self.run_gate().override)
 
-    def test_unknown_push_time_fails_closed(self):
+    def test_label_without_recorded_commit_fails_closed(self):
         self.label("qvictl")
-        self.state["suites"] = []
+        self.label_head = None
+        v = self.run_gate()
+        self.assertFalse(v.override)
+        self.assertIn("没有记录", v.override_note)
+
+    def test_binding_from_a_foreign_comment_is_ignored(self):
+        self.label("qvictl")
+        self.label_head = None
+        self.state["comments"] = [{"id": 4, "user": {"login": "mallory"},
+                                   "body": rg.MARKER + "\n<!-- review-gate:override head=%s -->" % HEAD}]
         self.assertFalse(self.run_gate().override)
 
     def test_label_without_event_is_ignored(self):
@@ -833,6 +851,8 @@ class ScheduleTest(GateCase):
             old_env, old_cls = dict(os.environ), rg.GitHub
             os.environ.update({"GITHUB_TOKEN": "t", "GITHUB_EVENT_PATH": str(event), "GITHUB_EVENT_NAME": "schedule"})
             rg.GitHub = lambda *_a, **_k: fake  # type: ignore
+            old_now = rg.utcnow
+            rg.utcnow = lambda: self.NOW  # type: ignore  # outside the refresh slots
             try:
                 rg.main(["--repo", REPO, "--event", "--summary", str(Path(tmp) / "s.md")])
                 self.assertEqual(fake.writes, [])  # skipped: no evaluation, no write
@@ -840,12 +860,35 @@ class ScheduleTest(GateCase):
                 rg.main(["--repo", REPO, "--event", "--summary", str(Path(tmp) / "s.md")])
                 self.assertTrue(any(w[0] == "PATCH" for w in fake.writes))  # head moved: evaluated
             finally:
+                rg.utcnow = old_now  # type: ignore
                 rg.GitHub = old_cls  # type: ignore
                 os.environ.clear()
                 os.environ.update(old_env)
 
 
 class MainTest(unittest.TestCase):
+    def test_labeled_event_binds_the_override_to_its_head(self):
+        state = base_state()
+        state["pr"]["labels"] = [{"name": "human-approved"}]
+        state["events"] = [{"event": "labeled", "label": {"name": "human-approved"}, "actor": {"login": "qvictl"}}]
+        fake = FakeGitHub(state)
+        with tempfile.TemporaryDirectory() as tmp:
+            event = Path(tmp) / "event.json"
+            event.write_text(json.dumps({"action": "labeled", "label": {"name": "human-approved"},
+                                         "pull_request": {"number": 7, "head": {"sha": HEAD}}}))
+            old_env, old_cls = dict(os.environ), rg.GitHub
+            os.environ.update({"GITHUB_TOKEN": "t", "GITHUB_EVENT_PATH": str(event),
+                               "GITHUB_EVENT_NAME": "pull_request_target"})
+            rg.GitHub = lambda *_a, **_k: fake  # type: ignore
+            try:
+                rg.main(["--repo", REPO, "--event", "--summary", str(Path(tmp) / "s.md")])
+            finally:
+                rg.GitHub = old_cls  # type: ignore
+                os.environ.clear()
+                os.environ.update(old_env)
+        comment = next(w for w in fake.writes if w[0] == "POST" and w[1].endswith("/comments"))
+        self.assertIn("<!-- review-gate:override head=%s -->" % HEAD, comment[2]["body"])
+
     def test_main_event_mode_end_to_end(self):
         state = base_state()
         fake = FakeGitHub(state)
