@@ -19,7 +19,7 @@ return function(H)
         end
         H.call(function() beat(); plugin:fetchMPArticles(book) end)
         H.wait_until("article list shown", function() return H.has_text("合成公众号文章") end, 15)
-        H.sleep(0.1)
+        H.call(beat)
         running = false
         H.metric("mp_list_heartbeat_gap_ms", max_gap)
         H.mock_control({ match = "", delay = 0, times = 0 })
@@ -32,12 +32,13 @@ return function(H)
         local previous = H.input_window()
         local saved = H.call(function() return plugin.settings:get_book(book.book_id).mp_articles_time end)
         local prior = #H.mock_requests(function(event) return event.path == "/web/mp/articles" end)
+        local started_prior = H.mock_state().started_counts["/web/mp/articles"] or 0
         H.mock_control({ match = "/web/mp/articles", delay = 1.5, times = 0 })
         H.call(function() plugin:fetchMPArticles(book) end)
         H.wait_until("dismissable article request", function()
             return getmetatable(H.input_window()) == TrapWidget
+                and (H.mock_state().started_counts["/web/mp/articles"] or 0) > started_prior
         end, 5)
-        H.sleep(0.2)
         local started = H.now_ms()
         H.tap_at(580, 20)
         H.wait_until("article request dismissed", function() return H.input_window() == previous end, 5)
@@ -45,9 +46,9 @@ return function(H)
         H.metric("mp_list_cancel_ms", elapsed)
         H.check(elapsed < 800, "cancel does not wait for HTTP", tostring(elapsed))
         H.equal(plugin.busy_message, nil, "cancel clears busy state")
-        H.sleep(1.7)
-        H.check(#H.mock_requests(function(event) return event.path == "/web/mp/articles" end) > prior,
-            "cancelled request reached delayed service")
+        H.wait_until("delayed service finished the cancelled request", function()
+            return #H.mock_requests(function(event) return event.path == "/web/mp/articles" end) > prior
+        end, 5)
         H.equal(H.input_window(), previous, "late response does not reopen article list")
         local current = H.call(function() return plugin.settings:get_book(book.book_id).mp_articles_time end)
         H.equal(current, saved, "cancelled response does not update parent article cache")
