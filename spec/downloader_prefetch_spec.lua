@@ -230,6 +230,7 @@ expect(#deferred_worker.starts == 1,
 -- by a later prefetch (e.g. the next page turn) before the worker stops.
 scheduled = {}
 local queue_worker = fake_worker()
+local queued_transients = {}
 local queued = Downloader:new{
     client = {},
     settings = fake_settings(),
@@ -237,7 +238,7 @@ local queued = Downloader:new{
     is_connected = function() return true end,
     require_login = function() return true end,
     run_online_task = function() return true end,
-    show_transient = function() end,
+    show_transient = function(text) queued_transients[#queued_transients + 1] = text end,
     refresh_ui = function() end,
     refresh_shelf = function() end,
 }
@@ -250,6 +251,11 @@ expect(queued:start(book_a, { chapter_2, chapter_3 }, "full", {
 expect(not queued:start(book_a, { chapter_3 }, "chapter", {
     prefetch = true, single_chapter = true,
 }), "prefetch must not replace a queued manual download")
+expect(#queued_transients == 0, "a refused prefetch stays silent")
+expect(not queued:start(book_a, { chapter_3 }, "chapter", { single_chapter = true }),
+    "a second manual download must not replace the queued one")
+expect(queued_transients[#queued_transients] == "Another download is already in progress.",
+    "the refused manual download tells the reader why")
 expect(queued._pending_start and queued._pending_start.suffix == "full",
     "queued manual download survives a later prefetch")
 run_worker_event(queue_worker)

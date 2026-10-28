@@ -30,6 +30,15 @@ expect(db:cacheShelf({
 local shelf = db:getShelf()
 expect(#shelf == 2 and shelf[1].bookId == "b1" and shelf[2].book_id == "b2",
     "id-less entry was not skipped or the snapshot was rolled back")
+
+-- An entry the JSON encoder rejects aborts the write (and keeps the previous
+-- snapshot): encode() reports its error instead of a payload.
+local unencodable = newproxy(true)
+getmetatable(unencodable).__tostring = function() error("cannot encode this value") end
+expect(not db:cacheShelf({ { bookId = "b3", title = "Three" }, { bookId = "bad", broken = unencodable } }, {}),
+    "an unencodable entry did not fail the shelf write")
+shelf = db:getShelf()
+expect(#shelf == 2 and shelf[1].bookId == "b1", "a failed write replaced the previous snapshot")
 db:close()
 
 os.remove(path); os.remove(path .. "-wal"); os.remove(path .. "-shm")
