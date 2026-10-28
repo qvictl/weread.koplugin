@@ -36,7 +36,7 @@
 
 网关（github-actions[bot]）只在 **全部** 条件对 PR 的最新提交（head SHA）成立时批准，并开启自动合并（squash，功能 PR 压缩为一个提交；上游同步分支 `sync/upstream-*` 仍用 merge commit，保留与上游共享的历史）：
 
-1. **必需检查全部成功**：`main` 分支保护要求的检查（当前为 `ci`、`integration`、`tests-policy`）在 head SHA 上都已成功（`success` / `neutral` / `skipped`）。
+1. **必需检查全部成功**：`main` 分支保护要求的检查（网关运行时从分支保护读取；撰写本文时为 `ci`、`integration`、`tests-policy`）在 head SHA 上都已成功（`success` / `neutral` / `skipped`）。
 2. **AI 审查已完成且没有 Request changes**：至少一个 AI 审查者（`coderabbitai[bot]` 或 `gemini-code-assist[bot]`）
    提交了 `commit_id` 等于 head SHA 的审查（CodeRabbit 没有可操作意见时不发 PR review，只在该提交上留下
    `CodeRabbit` 检查 “Review completed”，这同样算审查完成）；并且每个 AI 审查者最新的结论性审查（Approve / Request changes）都不是
@@ -87,7 +87,8 @@
 - **`human-approved`**：只有当**最后一次**添加该标签的人拥有 admin 或 maintain 权限时才有效（网关通过 issue 事件 API
   查出打标签的人，再查询其权限；查不到时按无效处理）。它豁免第 4、5 项和第 6 项中的“首次贡献者”限制，
   **永远不豁免第 1–3 项**，也不豁免草稿和 `do-not-merge`。非管理员添加的 `human-approved` 会被忽略，置顶评论会写明原因。
-  标签在后续提交上继续有效；不再认可时请移除标签。
+  标签只对添加它时已经推送的提交有效：之后再有推送（以该提交最早的 check suite 时间为准），覆盖自动失效，
+  需要管理员看过新改动后移除并重新添加标签。
 - **`do-not-merge`**：任何有打标签权限的人都可以加，网关见到即不批准，覆盖标签也无法豁免。
 - **`no-tests-needed`**（CONTRIBUTING.md）只影响测试策略检查，与本网关无关。
 
@@ -108,6 +109,7 @@
   手动运行会使用所选分支上的工作流文件，所以网关作业拒绝在默认分支以外手动运行，`automerge` 作业的 environment 也只允许 `main`）；
   审查和审查评论事件由没有任何权限、不检出代码的 `review-gate-relay.yml` 转发（它结束后触发 `workflow_run`）。网关从不检出或执行
   PR 的代码，所以 PR 改不了**本次**评估它的网关逻辑；修改网关、工作流和 AI 审查配置本身属于敏感路径。
+- 网关在 PR 已经可以立即合并时（GitHub 拒绝为 clean 状态的 PR 开启自动合并）直接合并，并把合并固定到它评估过的 head SHA。
 - 用 `GITHUB_TOKEN` 合并不会触发 `main` 上的 push 工作流（覆盖率基线、nightly），所以自动合并使用单独的
   `REVIEW_GATE_MERGE_TOKEN`。它只存放在 environment `review-gate` 中，该 environment 只允许 `main` 部署：
   只有默认分支上运行的 `automerge` 作业读得到，PR 分支上（被修改过的）工作流读不到。未配置时网关只批准，合并由人完成。
@@ -152,6 +154,7 @@ gh api -X PATCH repos/$R -F allow_auto_merge=true
 echo '{"deployment_branch_policy":{"protected_branches":false,"custom_branch_policies":true}}' | gh api -X PUT repos/$R/environments/review-gate --input -
 gh api -X POST repos/$R/environments/review-gate/deployment-branch-policies -f name=main -f type=branch
 gh secret set REVIEW_GATE_MERGE_TOKEN -R $R --env review-gate
+gh secret delete REVIEW_GATE_MERGE_TOKEN -R $R 2>/dev/null || true   # 不留仓库级副本（分支上的工作流能读到）
 gh api -X PATCH repos/$R/actions/variables/REVIEW_GATE_AUTOMERGE -f value=on \
   || gh api -X POST repos/$R/actions/variables -f name=REVIEW_GATE_AUTOMERGE -f value=on
 

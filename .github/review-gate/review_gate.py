@@ -49,7 +49,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
@@ -59,7 +59,7 @@ AUTOMERGE_STATE = "<!-- review-gate:automerge=on -->"
 STATE_RE = re.compile(r"<!-- review-gate:state head=([0-9a-f]+) blockers=([a-z,]*) -->")
 # Scheduled runs re-evaluate a PR only when it may have changed without an
 # event (see schedule_needs_eval); every PR is still refreshed this often.
-SCHEDULE_REFRESH_HOURS = 6
+SCHEDULE_REFRESH_HOURS = 6  # full refresh in the first quarter hour of 00, 06, 12, 18 UTC
 GATE_LOGIN = "github-actions[bot]"
 AI_REVIEWERS = {
     "coderabbitai[bot]": "CodeRabbit",
@@ -160,7 +160,12 @@ class GitHub:
                 headers = {k.lower(): v for k, v in resp.headers.items()}
         except urllib.error.HTTPError as err:
             raise ApiError(err.code, err.read().decode(errors="replace")[:500]) from None
-        return (json.loads(raw) if raw else None), headers
+        except (urllib.error.URLError, OSError) as err:  # timeouts, resets, DNS
+            raise ApiError(0, "network error: %s" % err) from None
+        try:
+            return (json.loads(raw) if raw else None), headers
+        except ValueError as err:
+            raise ApiError(0, "invalid JSON: %s" % err) from None
 
     def request(self, method: str, path: str, body: Any = None) -> Any:
         url = path if path.startswith("http") else self.api_url + "/" + path.lstrip("/")
@@ -308,8 +313,8 @@ def collect(gh: GitHub, repo: str, number: int, repo_info: Optional[Dict[str, An
         auto_merge=auto_merge, pr_node_id=node_id, sticky=sticky)
 
     if OVERRIDE_LABEL in facts.labels:
-        facts.override_actor, facts.override_role, facts.override_error = labeler_role(gh, repo, number,
-                                                                                       facts.owner_login)
+        facts.override_actor, facts.override_role, facts.override_error = labeler_role(
+            gh, repo, number, facts.owner_login, head)
 
     if pr.get("author_association") not in COLLABORATOR_ASSOCIATIONS and facts.author:
         query = urllib.parse.quote("repo:%s is:pr is:merged author:%s" % (repo, facts.author))
@@ -320,18 +325,40 @@ def collect(gh: GitHub, repo: str, number: int, repo_info: Optional[Dict[str, An
     return facts
 
 
-def labeler_role(gh: GitHub, repo: str, number: int, owner_login: str) -> Tuple[Optional[str], Optional[str], Optional[str]]:
-    """Who applied the override label last, and their permission (fail closed)."""
+def head_pushed_at(gh: GitHub, repo: str, sha: str) -> Optional[str]:
+    """When the head commit reached GitHub: the earliest check suite created
+    for it (server time; commit dates are chosen by the author)."""
+    suites = gh.get("repos/%s/commits/%s/check-suites?per_page=100" % (repo, sha)).get("check_suites") or []
+    times = [s["created_at"] for s in suites if s.get("created_at")]
+    return min(times) if times else None
+
+
+def labeler_role(gh: GitHub, repo: str, number: int, owner_login: str,
+                 head_sha: Optional[str] = None) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+    """Who applied the override label last, and their permission (fail closed).
+    The label only covers commits pushed before it was applied: a later push
+    needs a maintainer to apply it again."""
     try:
         events = gh.get_all("repos/%s/issues/%d/events" % (repo, number))
     except ApiError as err:
         return None, None, "无法读取标签事件：%s" % err
-    actor = None
+    actor, labeled_at = None, None
     for event in events:
         if event.get("event") == "labeled" and (event.get("label") or {}).get("name") == OVERRIDE_LABEL:
             actor = (event.get("actor") or {}).get("login")
+            labeled_at = event.get("created_at")
     if not actor:
         return None, None, "找不到 `%s` 的打标签事件" % OVERRIDE_LABEL
+    if head_sha:
+        try:
+            pushed = head_pushed_at(gh, repo, head_sha)
+        except ApiError as err:
+            return actor, None, "无法确认最新提交的推送时间：%s" % err
+        if not pushed or not labeled_at:
+            return actor, None, "无法确认标签是否晚于最新提交 `%s`" % head_sha[:10]
+        if labeled_at < pushed:
+            return actor, None, ("标签添加于最新提交 `%s` 推送之前（%s < %s）：新提交需要管理员审核后重新添加"
+                                 % (head_sha[:10], labeled_at, pushed))
     if actor == owner_login:
         return actor, "admin", None
     try:
@@ -765,10 +792,24 @@ def apply(gh: GitHub, merge_gh: Optional[GitHub], facts: Facts, verdict: Verdict
             verdict.defer_automerge = True
         else:
             verdict.notes.append("自动合并未启用（需要 `REVIEW_GATE_MERGE_TOKEN`，见 REVIEW_POLICY.md 启用步骤）：已批准，需手动合并")
+    elif facts.pr_node_id and dry_run:
+        actions.append("（演练）开启自动合并（%s）" % verdict.merge_method.lower())
     elif facts.pr_node_id:
-        if run("开启自动合并（%s）" % verdict.merge_method.lower(), lambda: merge_gh.graphql(
-                ENABLE_AUTOMERGE, {"id": facts.pr_node_id, "method": verdict.merge_method})):
+        try:
+            merge_gh.graphql(ENABLE_AUTOMERGE, {"id": facts.pr_node_id, "method": verdict.merge_method})
+            actions.append("开启自动合并（%s）" % verdict.merge_method.lower())
             automerge_on = True
+        except ApiError as err:
+            if "clean status" not in str(err).lower():
+                actions.append("开启自动合并失败：%s" % err)
+                verdict.notes.append("⚠️ 开启自动合并失败（HTTP %s），下次运行会重试" % err.status)
+                log("::warning::enable auto-merge failed: %s" % err)
+            else:
+                # Already mergeable: GitHub refuses auto-merge, merge now,
+                # pinned to the evaluated head.
+                run("直接合并 `%s`（%s）" % (head[:10], verdict.merge_method.lower()), lambda: merge_gh.request(
+                    "PUT", "repos/%s/pulls/%d/merge" % (repo, number),
+                    {"sha": head, "merge_method": verdict.merge_method.lower()}))
     return actions, automerge_on
 
 
@@ -831,7 +872,7 @@ def schedule_needs_eval(pr: Dict[str, Any], sticky: Optional[Dict[str, Any]], no
     (a review thread resolved or unresolved) and for missed events. So a PR is
     re-evaluated only when it has no sticky comment yet, its head moved, it is
     blocked by unresolved threads only, it was approved (conditions may stop
-    holding), or its comment is older than SCHEDULE_REFRESH_HOURS."""
+    holding), or it is a refresh slot (every SCHEDULE_REFRESH_HOURS hours)."""
     if not sticky:
         return True, "no sticky comment"
     m = STATE_RE.search(sticky.get("body", ""))
@@ -842,11 +883,9 @@ def schedule_needs_eval(pr: Dict[str, Any], sticky: Optional[Dict[str, Any]], no
         return True, "head moved"
     if blockers <= {"threads"}:
         return True, "approved or only blocked by threads"
-    try:
-        age = now - datetime.strptime(sticky.get("updated_at", ""), "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
-    except ValueError:
-        return True, "unknown comment age"
-    if age > timedelta(hours=SCHEDULE_REFRESH_HOURS):
+    # The comment is not edited when unchanged, so its age cannot drive the
+    # refresh: use fixed slots instead (one scheduled run per slot).
+    if now.hour % SCHEDULE_REFRESH_HOURS == 0 and now.minute < 15:
         return True, "periodic refresh"
     return False, "unchanged (blocked by %s)" % ",".join(sorted(blockers))
 

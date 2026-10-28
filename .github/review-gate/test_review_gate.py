@@ -89,6 +89,8 @@ class FakeGitHub(rg.GitHub):
             return {"role_name": s["roles"].get(user, "none"), "permission": s["roles"].get(user, "none")}
         if path == "search/issues":
             return {"total_count": s["merged_prs"]}
+        if path.endswith("/check-suites"):
+            return {"check_suites": s.get("suites", [{"created_at": "2026-10-27T08:00:00Z"}])}
         if path.startswith("repos/%s/commits/" % REPO) and path.endswith("/pulls"):
             return s.get("commit_pulls", [])
         if path == "repos/%s/pulls" % REPO:
@@ -112,6 +114,8 @@ class FakeGitHub(rg.GitHub):
         return {}
 
     def graphql(self, query: str, variables: Dict[str, Any]) -> Any:
+        if "mutation" in query and self.s.get("enable_error") and "enablePullRequestAutoMerge" in query:
+            raise rg.ApiError(200, self.s["enable_error"])
         if "mutation" in query:
             kind = "enable" if "enablePullRequestAutoMerge" in query else "disable"
             self.writes.append(("GRAPHQL", kind, variables))
@@ -222,7 +226,8 @@ class HappyPathTest(GateCase):
     def test_sync_branch_uses_merge_commit(self):
         self.state["pr"]["head"]["ref"] = "sync/upstream-20261027"
         self.state["pr"]["labels"] = [{"name": "human-approved"}]
-        self.state["events"] = [{"event": "labeled", "label": {"name": "human-approved"}, "actor": {"login": "qvictl"}}]
+        self.state["events"] = [{"event": "labeled", "label": {"name": "human-approved"}, "actor": {"login": "qvictl"},
+                                 "created_at": "2026-10-27T12:00:00Z"}]
         v = self.run_gate()
         self.assertEqual(v.merge_method, "MERGE")
         self.assertTrue(v.is_sync)
@@ -263,6 +268,23 @@ class HappyPathTest(GateCase):
                 rg.GitHub = old_cls  # type: ignore
                 os.environ.clear()
                 os.environ.update(old_env)
+
+    def test_clean_pr_is_merged_directly_at_the_evaluated_head(self):
+        self.state["enable_error"] = '[{"message": "Pull request Pull request is in clean status"}]'
+        self.run_gate()
+        merge = [w for w in self.gh.writes if w[0] == "PUT" and w[1].endswith("/merge")]
+        self.assertEqual(merge, [("PUT", "repos/%s/pulls/7/merge" % REPO, {"sha": HEAD, "merge_method": "squash"})])
+
+    def test_other_automerge_errors_are_reported(self):
+        self.state["enable_error"] = "boom"
+        self.run_gate()
+        self.assertFalse(any(w[1].endswith("/merge") for w in self.gh.writes))
+        self.assertIn("开启自动合并失败", self.body)
+
+    def test_network_errors_become_api_errors(self):
+        gh = rg.GitHub("t", "http://127.0.0.1:9")  # nothing listens on the discard port
+        with self.assertRaises(rg.ApiError):
+            gh.get("repos/x/y")
 
     def test_repo_without_auto_merge_setting(self):
         self.state["repo"]["allow_auto_merge"] = False
@@ -548,7 +570,8 @@ class EligibilityTest(GateCase):
 
     def test_do_not_merge_blocks_and_is_not_waived(self):
         self.state["pr"]["labels"] = [{"name": "do-not-merge"}, {"name": "human-approved"}]
-        self.state["events"] = [{"event": "labeled", "label": {"name": "human-approved"}, "actor": {"login": "qvictl"}}]
+        self.state["events"] = [{"event": "labeled", "label": {"name": "human-approved"}, "actor": {"login": "qvictl"},
+                                 "created_at": "2026-10-27T12:00:00Z"}]
         v = self.run_gate()
         self.assertTrue(v.override)
         self.assertFalse(v.ok)
@@ -587,7 +610,8 @@ class EligibilityTest(GateCase):
         self.assertIn("自动化 PR", self.cond("eligible").detail)
         # Not even an admin override makes it approvable.
         self.state["pr"]["labels"] = [{"name": "human-approved"}]
-        self.state["events"] = [{"event": "labeled", "label": {"name": "human-approved"}, "actor": {"login": "qvictl"}}]
+        self.state["events"] = [{"event": "labeled", "label": {"name": "human-approved"}, "actor": {"login": "qvictl"},
+                                 "created_at": "2026-10-27T12:00:00Z"}]
         self.assertFalse(self.run_gate().ok)
         self.assertFalse(self.approved())
 
@@ -595,8 +619,8 @@ class EligibilityTest(GateCase):
 class OverrideTest(GateCase):
     def label(self, *actors: str):
         self.state["pr"]["labels"] = [{"name": "human-approved"}]
-        self.state["events"] = [{"event": "labeled", "label": {"name": "human-approved"}, "actor": {"login": a}}
-                                for a in actors]
+        self.state["events"] = [{"event": "labeled", "label": {"name": "human-approved"}, "actor": {"login": a},
+                                 "created_at": "2026-10-27T12:00:00Z"} for a in actors]
         self.state["files"].append({"filename": ".github/workflows/x.yml", "additions": 600, "deletions": 0,
                                     "patch": "+x"})
 
@@ -637,6 +661,22 @@ class OverrideTest(GateCase):
         v = rg.evaluate(facts, CONFIG)
         self.assertFalse(v.override)
         self.assertIn("无法确认", v.override_note)
+
+    def test_label_applied_before_the_latest_push_is_ignored(self):
+        self.label("qvictl")
+        self.state["events"][0]["created_at"] = "2026-10-27T09:00:00Z"
+        self.state["suites"] = [{"created_at": "2026-10-27T10:00:00Z"}, {"created_at": "2026-10-27T10:05:00Z"}]
+        v = self.run_gate()
+        self.assertFalse(v.override)
+        self.assertIn("重新添加", v.override_note)
+        self.assertFalse(self.approved())
+        self.state["events"][0]["created_at"] = "2026-10-27T10:01:00Z"
+        self.assertTrue(self.run_gate().override)
+
+    def test_unknown_push_time_fails_closed(self):
+        self.label("qvictl")
+        self.state["suites"] = []
+        self.assertFalse(self.run_gate().override)
 
     def test_label_without_event_is_ignored(self):
         self.label()
@@ -752,7 +792,7 @@ class EventTest(unittest.TestCase):
 
 
 class ScheduleTest(GateCase):
-    NOW = rg.datetime(2026, 10, 28, 12, 0, tzinfo=rg.timezone.utc)
+    NOW = rg.datetime(2026, 10, 28, 11, 37, tzinfo=rg.timezone.utc)  # not a refresh slot
 
     def sticky(self, blockers: str, head: str = HEAD, updated: str = "2026-10-28T11:00:00Z") -> Dict[str, Any]:
         return {"id": 5, "user": {"login": "github-actions[bot]"}, "updated_at": updated,
@@ -777,7 +817,10 @@ class ScheduleTest(GateCase):
         self.assertFalse(self.needs(self.sticky("ai,threads")))
         self.assertFalse(self.needs(self.sticky("checks,ai")))
         self.assertFalse(self.needs(self.sticky("sensitive,author")))
-        self.assertTrue(self.needs(self.sticky("ai", updated="2026-10-28T05:00:00Z")))
+        slot = rg.datetime(2026, 10, 28, 12, 7, tzinfo=rg.timezone.utc)
+        self.assertTrue(rg.schedule_needs_eval(self.state["pr"], self.sticky("ai"), slot)[0])
+        late = rg.datetime(2026, 10, 28, 12, 22, tzinfo=rg.timezone.utc)
+        self.assertFalse(rg.schedule_needs_eval(self.state["pr"], self.sticky("ai"), late)[0])
 
     def test_schedule_run_only_evaluates_changed_prs(self):
         self.run_gate()  # produce a real body: OK state
