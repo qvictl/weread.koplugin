@@ -2,14 +2,12 @@
 #
 # Review gate (see REVIEW_POLICY.md): evaluates open PRs to the default branch
 # with .github/review-gate/review_gate.py and keeps one sticky comment per PR.
-# It approves as github-actions[bot] and enables auto-merge (squash) only
-# when every condition holds: required checks green, an AI reviewer
-# (CodeRabbit / Gemini Code Assist) reviewed the head commit without
-# requesting changes, no unresolved thread, <= 500 changed non-test/doc
-# lines, no sensitive path, not draft / do-not-merge, trusted author. The
-# `human-approved` label (admins / maintainers only) waives size, sensitive
-# paths and the first-time-contributor rule, never checks, AI review or
-# threads. It dismisses its own approval when a condition stops holding.
+# It approves as github-actions[bot] and enables auto-merge (squash) when
+# the hard conditions hold: required checks green (coverage gates included),
+# the AI reviewer (CodeRabbit) reviewed the head commit and does not
+# request changes, no unresolved review thread, not draft / no
+# do-not-merge. No human gate: regressions are fixed forward. It dismisses
+# its own approval (and bot approvals) when a condition stops holding.
 #
 # Every trigger here runs the default branch's copy of this workflow
 # (pull_request_target, workflow_run, check_suite, schedule; manual runs are
@@ -53,10 +51,9 @@ permissions:
   contents: read
 
 # One run per PR at a time (a newer event supersedes an older run); scheduled
-# and manual all-PR runs share one group. The run for a `human-approved`
-# label records which commit the label covers, so it is never superseded.
+# and manual all-PR runs share one group.
 concurrency:
-  group: review-gate-${{ github.event.pull_request.number || github.event.workflow_run.pull_requests[0].number || inputs.pr || ((github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && 'all') || github.run_id }}${{ github.event.label.name == 'human-approved' && '-override' || '' }}
+  group: review-gate-${{ github.event.pull_request.number || github.event.workflow_run.pull_requests[0].number || inputs.pr || ((github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && 'all') || github.run_id }}
   cancel-in-progress: ${{ github.event_name != 'schedule' }}
 
 jobs:
