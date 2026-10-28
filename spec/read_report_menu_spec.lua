@@ -53,10 +53,6 @@ package.preload["weread.lib.plugin_util"] = function()
     }
 end
 
-package.preload["ui/bidi"] = function() return {} end
-package.preload["ui/widget/confirmbox"] = function() return {} end
-package.preload["ui/widget/infomessage"] = function() return {} end
-package.preload["ui/widget/menu"] = function() return {} end
 local ReadReportUI = require("weread.ui.read_report")
 
 local checks = 0
@@ -89,7 +85,7 @@ local function make_host(config)
     host.showInfo = function(_self, text) host.info = text end
     host.showBusy = function(_self, text) event("busy", text) end
     host.closeBusy = function() event("close_busy") end
-    host._runNetworkRequest = require("weread.ui.common")._runNetworkRequest
+    host._runNetworkRequest = require("spec.helpers.immediate_network_request")
     host.runOnlineTask = function(_self, label, task)
         event("online", label)
         task()

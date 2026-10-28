@@ -68,10 +68,8 @@ local shown_book
 local opened_path
 local single_download_options
 local single_download_refreshed = false
-package.preload["ui/bidi"] = function() return {} end
-package.preload["ui/widget/menu"] = function() return {} end
 local host = {
-    _runNetworkRequest = require("weread.ui.common")._runNetworkRequest,
+    _runNetworkRequest = require("spec.helpers.immediate_network_request"),
     settings = require("spec.helpers.book_settings").install({
         get = function(_self, _key, default) return default end,
         flush = function() end,
