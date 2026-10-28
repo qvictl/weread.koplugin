@@ -22,6 +22,7 @@ Runtime.__index = Runtime
 -- Loading them up front keeps a running process on one code version after an
 -- in-place plugin update (which only takes effect after a restart).
 Runtime.PRELOAD_MODULES = {
+    "weread.lib.mp_article_download",
     "weread.lib.chapter_prefetch_worker",
     "weread.lib.annotation_prefetch_worker",
     "weread.lib.annotation_store",
