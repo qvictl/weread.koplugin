@@ -65,6 +65,9 @@ jobs:
       - name: Offline mock service contract
         run: python3 scripts/test_mock_weread.py
 
+      - name: Coverage tooling tests
+        run: python3 scripts/test_coverage_tools.py
+
       - name: Emulator scenario inventory
         run: python3 scripts/run_emulator_scenarios.py --list
 

@@ -55,8 +55,8 @@ fixtures). Plugin files no test loads count as 0%.
 | Diff, unit | changed executable Lua lines covered by unit specs ≥ 80% | yes (waived by `no-tests-needed`) |
 | Diff, combined | changed lines covered by unit specs + emulator scenarios ≥ 90% | yes (waived by `no-tests-needed`) |
 | Ratchet | overall unit and overall combined coverage must not drop below `main`'s latest value (0.1 pp tolerance: emulator runs vary by a few timing-dependent lines, observed 0.03 pp) | yes |
-| Target 4 weeks | overall combined ≥ max(75%, day-one baseline 80.78%) from 2026-11-24 | report-only before the date, then yes |
-| Target 8 weeks | overall combined ≥ 85% from 2026-12-22 | report-only before the date, then yes |
+| Target 4 weeks | overall combined ≥ max(75%, day-one baseline 80.78%) and overall unit ≥ 80% from 2026-11-24 | report-only before the date, then yes |
+| Target 8 weeks | overall combined ≥ 85%, overall unit ≥ 88% and every `weread/lib/*` file unit ≥ 70% from 2026-12-22 | report-only before the date, then yes |
 
 Emulator coverage is measured with LuaCov inside the real KOReader app while
 the scenarios run (forked download/login workers included). Every PR gets
@@ -65,12 +65,16 @@ in the job summary and as a sticky comment. After each green `Integration`
 run on `main`, the *Coverage* workflow publishes `baseline.json`,
 `history.jsonl` and the README badge on the
 [`coverage` branch](https://github.com/qvictl/weread.koplugin/tree/coverage).
-Day-one baseline (2026-10-27): unit 73.80%, unit + emulator 80.78%.
+Day-one baseline (2026-10-27): unit 73.80%, unit + emulator 80.78%. The
+roadmap to the targets (priorities, batches) is
+[docs/coverage-plan.md](docs/coverage-plan.md).
 
 覆盖率策略见 `.ci/coverage-policy.json`，由 `tests-policy` 在每个合入 `main` 的 PR
 上强制执行：改动的可执行 Lua 行单元测试覆盖率 ≥ 80%，单元测试 + 模拟器场景合计 ≥ 90%；
 整体覆盖率（单元、合计）不得低于 `main` 当前值；合计整体覆盖率在 2026-11-24 起
-≥ max(75%, 首日基线 80.78%)，2026-12-22 起 ≥ 85%，到期前仅报告。每个 PR 的摘要和评论
+≥ max(75%, 首日基线 80.78%)，2026-12-22 起 ≥ 85%；单元整体覆盖率 2026-11-24 起 ≥ 80%，
+2026-12-22 起 ≥ 88%，且届时每个 `weread/lib/*` 文件单元覆盖率 ≥ 70%；到期前仅报告。
+路线图见 [docs/coverage-plan.md](docs/coverage-plan.md)。每个 PR 的摘要和评论
 都会列出各项结果，`main` 的历史趋势与徽章发布在 `coverage` 分支。
 
 See [docs/testing.md](docs/testing.md).
