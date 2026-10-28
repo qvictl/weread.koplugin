@@ -1,5 +1,5 @@
 {
-  "_doc": "Coverage policy enforced by the PR policy workflow (tests-policy check) via scripts/coverage_tools.py gate. Scope: main.lua, weread/**/*.lua, integrations/**/*.lua; spec/, scripts/ and fixtures never count. 'combined' = unit specs + emulator scenarios (LuaCov in the real KOReader app). Targets turn blocking on their date; before it they are report-only. Effective target = max(configured, day-one combined baseline). The ratchet compares a PR with main's latest baseline on the 'coverage' branch (falls back to day_one_baseline).",
+  "_doc": "Coverage policy enforced by the PR policy workflow (tests-policy check) via scripts/coverage_tools.py gate. Scope: main.lua, weread/**/*.lua, integrations/**/*.lua; spec/, scripts/ and fixtures never count. 'combined' = unit specs + emulator scenarios (LuaCov in the real KOReader app). Targets turn blocking on their date; before it they are report-only. Each target may set combined_min, unit_min (overall) and module_unit_min ({pattern, min}: unit floor for every plugin file whose path matches the regex). Effective overall target = max(configured, day-one baseline of the same kind). The ratchet compares a PR with main's latest baseline on the 'coverage' branch (falls back to day_one_baseline). Roadmap: docs/coverage-plan.md.",
   "diff_unit_min": 80,
   "diff_combined_min": 90,
   "ratchet_tolerance_pp": 0.1,
@@ -9,7 +9,8 @@
     "combined": 80.78
   },
   "targets": [
-    { "label": "4 weeks", "date": "2026-11-24", "combined_min": 75 },
-    { "label": "8 weeks", "date": "2026-12-22", "combined_min": 85 }
+    { "label": "4 weeks", "date": "2026-11-24", "combined_min": 75, "unit_min": 80 },
+    { "label": "8 weeks", "date": "2026-12-22", "combined_min": 85, "unit_min": 88,
+      "module_unit_min": { "pattern": "^weread/lib/", "min": 70 } }
   ]
 }
