@@ -45,9 +45,10 @@ end
 function Cookie.parse_http_date(text)
     text = tostring(text or "")
     local d, mon, y, hh, mm, ss = text:match(
-        "(%d%d?)[ %-](%a%a%a)%a*[ %-](%d%d%d?%d?)%s+(%d%d?):(%d%d):(%d%d)")
+        "%f[%d](%d%d?)[ %-](%a%a%a)%a*[ %-](%d%d%d?%d?)%s+(%d%d?):(%d%d):(%d%d)%f[%D]")
     if not d then
-        mon, d, hh, mm, ss, y = text:match("(%a%a%a)%s+(%d%d?)%s+(%d%d?):(%d%d):(%d%d)%s+(%d%d%d%d)")
+        mon, d, hh, mm, ss, y = text:match(
+            "(%a%a%a)%s+(%d%d?)%s+(%d%d?):(%d%d):(%d%d)%s+(%d%d%d%d)%f[%D]")
     end
     local month = mon and MONTHS[mon:lower()]
     if not month then return nil end
