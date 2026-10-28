@@ -15,30 +15,9 @@ return function(H)
     local NOTES = "合成更新，用于模拟器测试。"
     local plugin, ui, lib, plugin_dir, old_version, old_meta
 
-    local function painted(dimen)
-        return type(dimen) == "table" and type(dimen.x) == "number" and (dimen.w or 0) > 0 and (dimen.h or 0) > 0
-    end
-
     -- Exact-text tap ("稍后" is also a prefix of "稍后提醒").
     local function tap_exact(text, timeout)
-        local target = H.wait_until("exact text '" .. text .. "' painted", function()
-            local found
-            H.walk(function(widget, chain, depth)
-                if rawget(widget, "text") == text then
-                    for i = depth, 1, -1 do
-                        local d = rawget(chain[i], "dimen")
-                        if painted(d) then
-                            found = d
-                            return true
-                        end
-                    end
-                end
-            end, H.top_window())
-            return found
-        end, timeout or 15)
-        local x, y = math.floor(target.x + target.w / 2), math.floor(target.y + target.h / 2)
-        H.log("tap exact", text, "@", x, y)
-        H.tap_at(x, y)
+        return H.tap_exact(text, timeout)
     end
 
     local function read_file(path)

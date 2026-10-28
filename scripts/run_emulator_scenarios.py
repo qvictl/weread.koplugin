@@ -238,8 +238,14 @@ def run_scenario(path: Path, runtime: Path, candidate: Path, out: Path, args) ->
     print(f"<== {path.stem}: {status} in {elapsed:.1f}s", flush=True)
     if not result["ok"]:
         print(f"    error: {result.get('error')}")
-        print("    ---- last 60 lines of crash.log ----")
-        for line in log_text.splitlines()[-60:]:
+        # Window stack, scheduled tasks and downloader state at the timeout
+        # (spec/emulator/harness.lua H.diagnostics).
+        for diagnostics in result.get("diagnostics") or []:
+            print(f"    ---- UI state: {diagnostics.get('reason', '')} ----")
+            for line in diagnostics.get("lines") or []:
+                print("    " + line)
+        print("    ---- last 80 lines of crash.log ----")
+        for line in log_text.splitlines()[-80:]:
             print("    " + line)
     return result
 
