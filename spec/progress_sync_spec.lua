@@ -1508,6 +1508,14 @@ test("a failed upload records the real error text", function()
     f.choices[#f.choices].keep_local()
     eq(f.values.books.book.last_sync_error, "upload_failed",
         "missing error text falls back to upload_failed")
+
+    -- A scalar outcome (no table) is the error text itself.
+    f.sync.upload_position = function() return false, "gateway said no" end
+    f.sync:sync_now()
+    f.choices[#f.choices].keep_local()
+    eq(f.values.books.book.last_sync_error, "gateway said no", "scalar outcome is recorded as the error")
+    shown = f.notifications[#f.notifications]
+    eq(shown and shown.data.error, "gateway said no", "scalar outcome is shown")
 end)
 
 print(string.format(
