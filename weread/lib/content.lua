@@ -1401,6 +1401,11 @@ end
 local MAX_TAR_ENTRY_BYTES = 512 * 1024 * 1024
 local FILE_COPY_CHUNK_BYTES = 64 * 1024
 
+local function discard_extracted_images(paths, names, used_names)
+    for _, path in ipairs(paths) do os.remove(path) end
+    for _, name in ipairs(names) do used_names[name:lower()] = nil end
+end
+
 -- WeRead's catalog field is named `tar`, but cloud-converted documents may
 -- point it at a ZIP archive instead. KOReader already ships libarchive, so use
 -- its format auto-detection for those resources while keeping the small TAR
@@ -1410,6 +1415,8 @@ local function extract_zip_images(archive_path, asset_dir, used_names)
     local archive = Archiver.Reader:new()
     local assets = {}
     local src_map = {}
+    local paths, names = {}, {}
+    local output
     local ok, err = xpcall(function()
         if not archive:open(archive_path) then
             error(archive.err or "could not open chapter resource archive")
@@ -1427,12 +1434,15 @@ local function extract_zip_images(archive_path, asset_dir, used_names)
                 if media_type:match("^image/") then
                     local stem = basename(entry.path)
                     local filename = unique_asset_name(used_names, stem, ext)
+                    names[#names + 1] = filename
                     local href = "images/" .. filename
                     local asset = { href = href, media_type = media_type }
                     if asset_dir then
-                        local output = assert(io.open(asset_dir .. "/" .. filename, "wb"))
+                        output = assert(io.open(asset_dir .. "/" .. filename, "wb"))
+                        paths[#paths + 1] = asset_dir .. "/" .. filename
                         assert(output:write(data))
-                        output:close()
+                        assert(output:close())
+                        output = nil
                         asset.path = asset_dir .. "/" .. filename
                         asset.size = #data
                         asset.store = true
@@ -1447,8 +1457,12 @@ local function extract_zip_images(archive_path, asset_dir, used_names)
             end
         end
     end, debug.traceback)
+    if output then pcall(output.close, output) end
     archive:close()
-    if not ok then error(err, 0) end
+    if not ok then
+        discard_extracted_images(paths, names, used_names)
+        error(err, 0)
+    end
     return assets, src_map
 end
 
@@ -1457,6 +1471,7 @@ local function extract_tar_images(tar_path, asset_dir, used_names)
     if not input then error(open_err or "could not open chapter resource archive") end
     local assets = {}
     local src_map = {}
+    local paths, names = {}, {}
     local output
     local ok, err = xpcall(function()
         while true do
@@ -1483,8 +1498,10 @@ local function extract_tar_images(tar_path, asset_dir, used_names)
             if is_file and media_type:match("^image/") then
                 local stem = basename(name)
                 filename = unique_asset_name(used_names, stem, ext)
+                names[#names + 1] = filename
                 output_path = asset_dir .. "/" .. filename
                 output = assert(io.open(output_path, "wb"))
+                paths[#paths + 1] = output_path
                 assert(output:write(first))
             end
             while remaining > 0 do
@@ -1494,7 +1511,7 @@ local function extract_tar_images(tar_path, asset_dir, used_names)
                 if output then assert(output:write(chunk)) end
             end
             if output then
-                output:close()
+                assert(output:close())
                 output = nil
                 local href = "images/" .. filename
                 table.insert(assets, {
@@ -1516,9 +1533,12 @@ local function extract_tar_images(tar_path, asset_dir, used_names)
             end
         end
     end, debug.traceback)
-    if output then output:close() end
+    if output then pcall(output.close, output) end
     input:close()
-    if not ok then error(err, 0) end
+    if not ok then
+        discard_extracted_images(paths, names, used_names)
+        error(err, 0)
+    end
     return assets, src_map
 end
 
