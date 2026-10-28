@@ -108,3 +108,4 @@ scripts/
 - [ ] 如果修改了用户可见文本，我已经更新 `weread/lib/i18n.lua`。
 - [ ] 如果修改了菜单结构，我已经同步更新 README 菜单结构。
 - [ ] 如果涉及非公开 WeRead Web API，我已经在 `scripts/` 中提交可独立运行、可复现的 Python 验证脚本，并填写了复现命令和脱敏结果。
+- [ ] AI 审查（CodeRabbit / Gemini）标出的潜在问题 / bug 均已修复或回复理由后再解决对话；自动批准条件与 `human-approved` 规则见 [REVIEW_POLICY.md](../blob/main/REVIEW_POLICY.md)。
