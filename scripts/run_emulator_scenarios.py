@@ -214,7 +214,8 @@ def run_scenario(path: Path, runtime: Path, candidate: Path, out: Path, args) ->
     result = dict(scenario=path.stem, title=meta["title"], ok=False, steps=[], metrics={})
     if result_path.is_file():
         try:
-            result.update(json.loads(result_path.read_text(encoding="utf-8")))
+            # errors="replace": a stray invalid byte must not lose the whole result.
+            result.update(json.loads(result_path.read_text(encoding="utf-8", errors="replace")))
         except json.JSONDecodeError as exc:
             result["error"] = f"unreadable result.json: {exc}"
     else:

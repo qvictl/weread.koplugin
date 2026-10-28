@@ -587,7 +587,14 @@ end
 local function short(value, limit)
     local text = tostring(value):gsub("%s+", " ")
     limit = limit or 60
-    return #text > limit and (text:sub(1, limit - 3) .. "...") or text
+    if #text <= limit then return text end
+    -- Cut on a UTF-8 character boundary: a split multi-byte character makes
+    -- result.json invalid UTF-8 (the runner then cannot read the result).
+    local cut = limit - 3
+    while cut > 0 and text:byte(cut + 1) and text:byte(cut + 1) >= 0x80 and text:byte(cut + 1) < 0xC0 do
+        cut = cut - 1
+    end
+    return text:sub(1, cut) .. "..."
 end
 
 local function describe_function(fn)
