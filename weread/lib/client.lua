@@ -492,7 +492,7 @@ function Client:download_to_file(url, path, opts)
     end
     if not code or code < 200 or code >= 300 then
         pcall(os.remove, part_path)
-        error(http_error(self, code, text, resp_headers, status))
+        error(http_error(self, code, text, resp_headers, status), 0)
     end
     if bytes == 0 then
         pcall(os.remove, part_path)
@@ -529,7 +529,7 @@ function Client:post_json(url, data, opts)
             headers = resp_headers,
         }), code, resp_headers
     end
-    error(http_error(self, code, text, resp_headers, status))
+    error(http_error(self, code, text, resp_headers, status), 0)
 end
 
 function Client:get_text(url, opts)
@@ -547,7 +547,7 @@ function Client:get_text(url, opts)
     if code and code >= 200 and code < 300 then
         return text, code, resp_headers
     end
-    error(http_error(self, code, text, resp_headers, status))
+    error(http_error(self, code, text, resp_headers, status), 0)
 end
 
 function Client:get_public_text(url, opts)
@@ -563,7 +563,7 @@ function Client:get_public_text(url, opts)
         merge_req_opts(req_opts, { url = url, method = "GET" })
     )
     if not code or code < 200 or code >= 300 then
-        error(http_error(self, code, text, resp_headers, status))
+        error(http_error(self, code, text, resp_headers, status), 0)
     end
     return text, {
         code = code,
@@ -588,7 +588,7 @@ function Client:get_binary(url, opts)
     if code and code >= 200 and code < 300 then
         return text, code, resp_headers
     end
-    error(http_error(self, code, text, resp_headers, status))
+    error(http_error(self, code, text, resp_headers, status), 0)
 end
 
 function Client:renew_cookie()
@@ -764,7 +764,7 @@ function Client:get_mp_articles(book_id, max_idx, count, wr_ticket)
         end
         return data, nil
     end
-    error(http_error(self, code, text, resp_headers, status))
+    error(http_error(self, code, text, resp_headers, status), 0)
 end
 
 function Client:get_mp_content(review_id, opts)
@@ -798,7 +798,7 @@ function Client:get_mp_content(review_id, opts)
             url = url,
         }
     end
-    error(http_error(self, code, text, resp_headers, status))
+    error(http_error(self, code, text, resp_headers, status), 0)
 end
 
 function Client:report_read(payload, referer)
