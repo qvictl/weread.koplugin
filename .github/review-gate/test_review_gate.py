@@ -27,14 +27,6 @@ CONFIG: Dict[str, Any] = dict(rg.DEFAULT_CONFIG)
 CONFIG.update({
     "merge_method": "SQUASH",
     "merge_method_overrides": [{"head_ref": "sync/upstream-*", "method": "MERGE"}],
-    "max_changed_lines": 500,
-    "test_paths": ["spec/**", "**/*_spec.lua", "scripts/test_*.py"],
-    "doc_paths": ["**/*.md", "docs/**"],
-    "sensitive_paths": [".github/**", ".ci/**", "REVIEW_POLICY.md", ".gemini/**", "weread/lib/updater.lua"],
-    "sensitive_line_patterns": [
-        {"path": "main.lua", "regex": "^\\s*version\\s*=", "description": "版本号"},
-        {"path": "weread/lib/client.lua", "regex": "(?i)(cookie|token|auth)", "description": "认证"},
-    ],
 })
 
 
@@ -78,17 +70,8 @@ class FakeGitHub(rg.GitHub):
             return s["statuses"]
         if path == "repos/%s/pulls/%d/reviews" % (REPO, n):
             return s["reviews"]
-        if path == "repos/%s/pulls/%d/files" % (REPO, n):
-            return s["files"]
         if path == "repos/%s/issues/%d/comments" % (REPO, n):
             return s["comments"]
-        if path == "repos/%s/issues/%d/events" % (REPO, n):
-            return s["events"]
-        if path.startswith("repos/%s/collaborators/" % REPO):
-            user = path.split("/")[4]
-            return {"role_name": s["roles"].get(user, "none"), "permission": s["roles"].get(user, "none")}
-        if path == "search/issues":
-            return {"total_count": s["merged_prs"]}
         if path.endswith("/check-suites"):
             return {"check_suites": s.get("suites", [{"created_at": "2026-10-27T08:00:00Z"}])}
         if path.startswith("repos/%s/commits/" % REPO) and path.endswith("/pulls"):
@@ -126,11 +109,6 @@ class FakeGitHub(rg.GitHub):
                               "nodes": self.s["threads"]}}}}
 
 
-def record(head: str) -> str:
-    return ("审查网关：`human-approved` 由 @qvictl 添加于提交 `%s`，只对这个提交有效；之后有新提交需重新添加。\n"
-            "<!-- review-gate:override head=%s -->" % (head[:10], head))
-
-
 def base_state() -> Dict[str, Any]:
     """A PR that satisfies every condition."""
     return {
@@ -147,12 +125,7 @@ def base_state() -> Dict[str, Any]:
         "reviews": [review("coderabbitai[bot]", "APPROVED")],
         "threads": [{"isResolved": True, "isOutdated": False, "path": "a.lua",
                      "comments": {"nodes": [{"author": {"login": "coderabbitai"}, "url": "u"}]}}],
-        "files": [{"filename": "weread/lib/thing.lua", "additions": 10, "deletions": 2, "patch": "+x\n-y"},
-                  {"filename": "spec/thing_spec.lua", "additions": 900, "deletions": 0, "patch": "+t"}],
         "comments": [],
-        "events": [],
-        "roles": {},
-        "merged_prs": 0,
         "auto_merge": None,
     }
 
@@ -160,12 +133,11 @@ def base_state() -> Dict[str, Any]:
 class GateCase(unittest.TestCase):
     def setUp(self) -> None:
         self.state = base_state()
-        self.label_head: Optional[str] = None
 
     def run_gate(self, dry_run: bool = False, merge_token: bool = True):
         gh = FakeGitHub(self.state)
         merge_gh = gh if merge_token else None
-        facts = rg.collect(gh, REPO, 7, label_head=self.label_head)
+        facts = rg.collect(gh, REPO, 7)
         verdict = rg.evaluate(facts, CONFIG)
         actions, automerge_on = rg.apply(gh, merge_gh, facts, verdict, dry_run, log=lambda _m: None)
         body = rg.render(facts, verdict, automerge_on)
@@ -230,15 +202,6 @@ class HappyPathTest(GateCase):
         self.assertFalse(self.approved())
         self.assertEqual(self.dismissed(), [])
 
-    def test_sync_branch_uses_merge_commit(self):
-        self.state["pr"]["head"]["ref"] = "sync/upstream-20261027"
-        self.state["pr"]["labels"] = [{"name": "human-approved"}]
-        self.state["events"] = [{"event": "labeled", "label": {"name": "human-approved"}, "actor": {"login": "qvictl"},
-                                 "created_at": "2026-10-27T12:00:00Z"}]
-        v = self.run_gate()
-        self.assertEqual(v.merge_method, "MERGE")
-        self.assertTrue(v.is_sync)
-
     def test_no_merge_token_approves_without_automerge(self):
         self.run_gate(merge_token=False)
         self.assertTrue(self.approved())
@@ -298,6 +261,11 @@ class HappyPathTest(GateCase):
         gh = rg.GitHub("t", "http://127.0.0.1:9")  # nothing listens on the discard port
         with self.assertRaises(rg.ApiError):
             gh.get("repos/x/y")
+
+    def test_auto_merge_setting_not_visible_to_the_token(self):
+        del self.state["repo"]["allow_auto_merge"]  # GITHUB_TOKEN does not see repository settings
+        self.run_gate()
+        self.assertEqual(self.automerge(), "enable")
 
     def test_repo_without_auto_merge_setting(self):
         self.state["repo"]["allow_auto_merge"] = False
@@ -376,6 +344,17 @@ class RequiredChecksTest(GateCase):
         self.state["statuses"].append({"id": 2, "context": "legacy", "state": "failure", "updated_at": "2"})
         self.assertFalse(self.run_gate().ok)
 
+    def test_unreadable_protection_is_pending_and_keeps_bot_approvals(self):
+        self.state["reviews"].append(review("coderabbitai[bot]", "APPROVED", rid=20))
+        gh = FakeGitHub(self.state)
+        gh.fail["repos/%s/branches/" % REPO] = 502
+        facts = rg.collect(gh, REPO, 7)
+        verdict = rg.evaluate(facts, CONFIG)
+        self.assertFalse(verdict.ok)
+        self.assertTrue(next(c for c in verdict.conditions if c.key == "protection").pending)
+        rg.apply(gh, gh, facts, verdict, False, log=lambda _m: None)
+        self.assertFalse(any(w[1].endswith("/dismissals") for w in gh.writes))
+
     def test_unreadable_or_missing_protection_fails_closed(self):
         self.state["branch"] = {"protection": {}}
         self.assertFalse(self.run_gate().ok)
@@ -393,7 +372,7 @@ class AiReviewTest(GateCase):
         c = self.cond("ai")
         self.assertFalse(v.ok)
         self.assertTrue(c.pending)
-        self.assertIn("咨询模式", c.detail)
+        self.assertIn("@coderabbitai review", c.detail)
         self.assertFalse(self.approved())
         self.assertIsNone(self.automerge())
 
@@ -403,9 +382,14 @@ class AiReviewTest(GateCase):
         self.assertFalse(self.cond("ai").ok)
         self.assertIn("等待 AI 审查最新提交", self.cond("ai").detail)
 
-    def test_gemini_comment_review_on_head_is_enough(self):
-        self.state["reviews"] = [review("gemini-code-assist[bot]", "COMMENTED")]
+    def test_commented_review_on_head_is_enough(self):
+        self.state["reviews"] = [review("coderabbitai[bot]", "COMMENTED")]
         self.assertTrue(self.run_gate().ok)
+
+    def test_gemini_no_longer_counts(self):
+        # Gemini Code Assist was dropped (owner decision 2026-10-28).
+        self.state["reviews"] = [review("gemini-code-assist[bot]", "APPROVED")]
+        self.assertFalse(self.run_gate().ok)
 
     def cr_run(self, status="completed", conclusion="success",
                summary="Result: Success - Review completed\nRun ID: `x`", title="Finished", slug="coderabbitai"):
@@ -461,9 +445,9 @@ class AiReviewTest(GateCase):
         self.state["reviews"] = [review("someone", "APPROVED")]
         self.assertFalse(self.run_gate().ok)
 
-    def test_changes_requested_blocks_even_if_other_ai_approves(self):
+    def test_changes_requested_blocks_even_with_a_later_comment_on_head(self):
         self.state["reviews"] = [review("coderabbitai[bot]", "CHANGES_REQUESTED", rid=1),
-                                 review("gemini-code-assist[bot]", "COMMENTED", rid=2)]
+                                 review("coderabbitai[bot]", "COMMENTED", rid=2, at="2026-10-27T09:00:00Z")]
         self.run_gate()
         self.assertFalse(self.cond("ai").ok)
         self.assertIn("Request changes", self.cond("ai").detail)
@@ -476,6 +460,11 @@ class AiReviewTest(GateCase):
     def test_approval_after_changes_requested_unblocks(self):
         self.state["reviews"] = [review("coderabbitai[bot]", "CHANGES_REQUESTED", commit=OLD, rid=1, at="1"),
                                  review("coderabbitai[bot]", "APPROVED", rid=2, at="2")]
+        self.assertTrue(self.run_gate().ok)
+
+    def test_dismissed_approval_still_proves_the_review(self):
+        # The gate dismissed CodeRabbit's approval while blocked; once unblocked it still counts.
+        self.state["reviews"] = [review("coderabbitai[bot]", "DISMISSED")]
         self.assertTrue(self.run_gate().ok)
 
     def test_dismissed_changes_request_is_ignored(self):
@@ -494,86 +483,6 @@ class ThreadsTest(GateCase):
         self.assertFalse(self.approved())
 
 
-class SizeTest(GateCase):
-    def test_tests_and_docs_do_not_count(self):
-        self.state["files"].append({"filename": "docs/guide.md", "additions": 2000, "deletions": 0, "patch": "+d"})
-        self.run_gate()
-        self.assertTrue(self.cond("size").ok)
-        self.assertIn("12 行", self.cond("size").detail)
-
-    def test_over_limit_blocks(self):
-        self.state["files"][0]["additions"] = 499
-        self.run_gate()
-        self.assertFalse(self.cond("size").ok)
-        self.assertIn("501 行", self.cond("size").detail)
-
-    def test_too_many_files_fails_closed(self):
-        self.state["pr"]["changed_files"] = 5000
-        self.run_gate()
-        self.assertFalse(self.cond("size").ok)
-        self.assertFalse(self.cond("sensitive").ok)
-
-
-class SensitivePathsTest(GateCase):
-    def add(self, name: str, patch: Optional[str] = "+x", previous: Optional[str] = None):
-        f = {"filename": name, "additions": 1, "deletions": 0}
-        if patch is not None:
-            f["patch"] = patch
-        if previous:
-            f["previous_filename"] = previous
-        self.state["files"].append(f)
-
-    def test_workflow_change_blocks(self):
-        self.add(".github/workflows/ci.yml")
-        self.run_gate()
-        self.assertFalse(self.cond("sensitive").ok)
-        self.assertIn(".github/workflows/ci.yml", self.cond("sensitive").detail)
-
-    def test_policy_and_ai_config_and_updater(self):
-        for name in ("REVIEW_POLICY.md", ".gemini/styleguide.md", "weread/lib/updater.lua", ".ci/coverage.json"):
-            self.state = base_state()
-            self.add(name)
-            self.run_gate()
-            self.assertFalse(self.cond("sensitive").ok, name)
-
-    def test_directory_rule_covers_files_without_keywords(self):
-        config = dict(CONFIG, sensitive_paths=CONFIG["sensitive_paths"] + ["plugins/kosync.koplugin/**"])
-        self.add("plugins/kosync.koplugin/KOSyncClient.lua", patch="+    local base_url = server .. path")
-        facts = rg.collect(FakeGitHub(self.state), REPO, 7)
-        c = rg.check_sensitive(facts, config)
-        self.assertFalse(c.ok)
-        self.assertIn("KOSyncClient.lua", c.detail)
-
-    def test_rename_out_of_sensitive_path_blocks(self):
-        self.add("tools/moved.yml", previous=".github/workflows/release.yml")
-        self.run_gate()
-        self.assertFalse(self.cond("sensitive").ok)
-
-    def test_version_line_is_sensitive_but_other_main_lua_lines_are_not(self):
-        self.add("main.lua", patch="@@ -1 +1 @@\n-    version = \"1.6.90\",\n+    version = \"1.6.91\",")
-        self.run_gate()
-        self.assertFalse(self.cond("sensitive").ok)
-        self.state = base_state()
-        self.add("main.lua", patch="@@ -1 +1 @@\n-local a = 1\n+local a = 2\n version = context")
-        self.run_gate()
-        self.assertTrue(self.cond("sensitive").ok)
-
-    def test_client_auth_lines(self):
-        self.add("weread/lib/client.lua", patch="+    headers[\"Cookie\"] = cookie_header")
-        self.run_gate()
-        self.assertFalse(self.cond("sensitive").ok)
-        self.state = base_state()
-        self.add("weread/lib/client.lua", patch="+    local timeout = 30")
-        self.run_gate()
-        self.assertTrue(self.cond("sensitive").ok)
-
-    def test_missing_patch_fails_closed(self):
-        self.add("weread/lib/client.lua", patch=None)
-        self.run_gate()
-        self.assertFalse(self.cond("sensitive").ok)
-        self.assertIn("无法读取 diff", self.cond("sensitive").detail)
-
-
 class EligibilityTest(GateCase):
     def test_draft_blocks(self):
         self.state["pr"]["draft"] = True
@@ -581,34 +490,18 @@ class EligibilityTest(GateCase):
         self.assertFalse(self.cond("eligible").ok)
         self.assertIn("草稿", self.cond("eligible").detail)
 
-    def test_do_not_merge_blocks_and_is_not_waived(self):
-        self.state["pr"]["labels"] = [{"name": "do-not-merge"}, {"name": "human-approved"}]
-        self.state["events"] = [{"event": "labeled", "label": {"name": "human-approved"}, "actor": {"login": "qvictl"},
-                                 "created_at": "2026-10-27T12:00:00Z"}]
-        self.label_head = HEAD
+    def test_do_not_merge_blocks(self):
+        self.state["pr"]["labels"] = [{"name": "do-not-merge"}]
         v = self.run_gate()
-        self.assertTrue(v.override)
         self.assertFalse(v.ok)
-        self.assertFalse(self.cond("eligible").waived)
+        self.assertFalse(self.approved())
 
-    def test_first_time_external_contributor_blocks(self):
-        self.state["pr"]["user"] = {"login": "newbie"}
-        self.state["pr"]["author_association"] = "FIRST_TIME_CONTRIBUTOR"
-        self.state["merged_prs"] = 0
-        self.run_gate()
-        self.assertFalse(self.cond("eligible").ok)
-        self.assertIn("首次贡献", self.cond("eligible").detail)
-
-    def test_external_with_merged_pr_is_eligible(self):
-        self.state["pr"]["user"] = {"login": "regular"}
-        self.state["pr"]["author_association"] = "CONTRIBUTOR"
-        self.state["merged_prs"] = 2
-        self.assertTrue(self.run_gate().ok)
-
-    def test_collaborator_is_eligible(self):
-        self.state["pr"]["user"] = {"login": "friend"}
-        self.state["pr"]["author_association"] = "COLLABORATOR"
-        self.assertTrue(self.run_gate().ok)
+    def test_sync_branch_uses_merge_commit(self):
+        self.state["pr"]["head"]["ref"] = "sync/upstream-20261027"
+        v = self.run_gate()
+        self.assertTrue(v.ok)
+        self.assertEqual(v.merge_method, "MERGE")
+        self.assertTrue(v.is_sync)
 
     def test_github_actions_sync_pr_cannot_be_self_approved(self):
         self.state["pr"]["user"] = {"login": "github-actions[bot]", "type": "Bot"}
@@ -620,134 +513,6 @@ class EligibilityTest(GateCase):
         self.assertFalse(self.approved())
         self.assertIn("GitHub 不允许 github-actions 批准自己创建的 PR", self.body)
         self.assertIn("SYNC_TOKEN", self.body)
-        self.assertFalse(self.cond("eligible").ok)
-        self.assertIn("自动化 PR", self.cond("eligible").detail)
-        # Not even an admin override makes it approvable.
-        self.state["pr"]["labels"] = [{"name": "human-approved"}]
-        self.state["events"] = [{"event": "labeled", "label": {"name": "human-approved"}, "actor": {"login": "qvictl"},
-                                 "created_at": "2026-10-27T12:00:00Z"}]
-        self.assertFalse(self.run_gate().ok)
-        self.assertFalse(self.approved())
-
-
-class OverrideTest(GateCase):
-    def label(self, *actors: str):
-        self.state["pr"]["labels"] = [{"name": "human-approved"}]
-        self.state["events"] = [{"event": "labeled", "label": {"name": "human-approved"}, "actor": {"login": a},
-                                 "created_at": "2026-10-27T12:00:00Z"} for a in actors]
-        self.label_head = HEAD
-        self.state["files"].append({"filename": ".github/workflows/x.yml", "additions": 600, "deletions": 0,
-                                    "patch": "+x"})
-
-    def test_admin_override_waives_size_and_sensitive(self):
-        self.label("qvictl")
-        v = self.run_gate()
-        self.assertTrue(v.ok, [c.key for c in v.blockers])
-        self.assertTrue(self.cond("size").waived)
-        self.assertTrue(self.cond("sensitive").waived)
-        self.assertTrue(self.approved())
-        self.assertIn("已被 `human-approved` 豁免", self.body)
-
-    def test_maintainer_override_works(self):
-        self.label("maint")
-        self.state["roles"] = {"maint": "maintain"}
-        self.assertTrue(self.run_gate().ok)
-
-    def test_non_admin_override_is_ignored(self):
-        self.label("writer")
-        self.state["roles"] = {"writer": "write"}
-        v = self.run_gate()
-        self.assertFalse(v.override)
-        self.assertFalse(v.ok)
-        self.assertIn("被忽略", self.body)
-        self.assertIn("@writer", self.body)
-        self.assertFalse(self.approved())
-
-    def test_last_labeler_decides(self):
-        self.label("qvictl", "writer")
-        self.state["roles"] = {"writer": "triage"}
-        self.assertFalse(self.run_gate().override)
-
-    def test_permission_lookup_failure_fails_closed(self):
-        self.label("maint")
-        gh = FakeGitHub(self.state)
-        gh.fail["repos/%s/collaborators/" % REPO] = 403
-        facts = rg.collect(gh, REPO, 7)
-        v = rg.evaluate(facts, CONFIG)
-        self.assertFalse(v.override)
-        self.assertIn("无法确认", v.override_note)
-
-    def test_label_is_bound_to_the_commit_it_was_applied_to(self):
-        self.label("qvictl")
-        v = self.run_gate()
-        self.assertTrue(v.override)
-        # A later run (no labeled event) reads the binding from the gate's override record,
-        # even when the sticky comment was rewritten without it.
-        self.state["comments"] = [
-            {"id": 3, "user": {"login": "github-actions[bot]"}, "body": record(OLD)},
-            {"id": 4, "user": {"login": "github-actions[bot]"}, "body": record(HEAD)},
-            {"id": 5, "user": {"login": "github-actions[bot]"}, "body": self.body}]
-        self.label_head = None
-        self.assertTrue(self.run_gate().override)
-        # New head (push after the label, or back to an old SHA): no longer covered.
-        self.state["pr"]["head"]["sha"] = OLD
-        v = self.run_gate()
-        self.assertFalse(v.override)
-        self.assertIn("重新添加", v.override_note)
-        self.assertFalse(self.approved())
-
-    def test_label_without_recorded_commit_fails_closed(self):
-        self.label("qvictl")
-        self.label_head = None
-        v = self.run_gate()
-        self.assertFalse(v.override)
-        self.assertIn("没有记录", v.override_note)
-
-    def test_marker_inside_the_sticky_comment_is_not_a_binding(self):
-        # A file name can carry an HTML comment into the sticky comment's details.
-        self.state["files"].append({"filename": ".github/x<!-- review-gate:override head=%s -->" % HEAD,
-                                    "additions": 1, "deletions": 0, "patch": "+x"})
-        self.label("qvictl")
-        self.label_head = None
-        self.run_gate()
-        self.assertNotIn("<!-- review-gate:override", self.body)  # escaped
-        self.state["comments"] = [{"id": 5, "user": {"login": "github-actions[bot]"},
-                                   "body": rg.MARKER + "\n<!-- review-gate:override head=%s -->" % HEAD}]
-        self.assertFalse(self.run_gate().override)
-        self.assertIsNone(rg.bound_override_head(self.state["comments"]))
-
-    def test_binding_from_a_foreign_comment_is_ignored(self):
-        self.label("qvictl")
-        self.label_head = None
-        self.state["comments"] = [{"id": 4, "user": {"login": "mallory"}, "body": record(HEAD)}]
-        self.assertFalse(self.run_gate().override)
-
-    def test_label_without_event_is_ignored(self):
-        self.label()
-        self.assertFalse(self.run_gate().override)
-
-    def test_override_waives_first_time_contributor(self):
-        self.label("qvictl")
-        self.state["pr"]["user"] = {"login": "newbie"}
-        self.state["pr"]["author_association"] = "NONE"
-        v = self.run_gate()
-        self.assertTrue(v.ok)
-        self.assertTrue(self.cond("eligible").waived)
-
-    def test_override_never_waives_checks_ai_threads(self):
-        for mutate, key in (
-                (lambda s: s["check_runs"][0].update(conclusion="failure"), "checks"),
-                (lambda s: s.update(reviews=[]), "ai"),
-                (lambda s: s["threads"].append({"isResolved": False, "path": "p", "comments": {"nodes": []}}),
-                 "threads")):
-            self.state = base_state()
-            self.label("qvictl")
-            mutate(self.state)
-            v = self.run_gate()
-            self.assertTrue(v.override)
-            self.assertFalse(v.ok, key)
-            self.assertFalse(self.cond(key).waived)
-            self.assertFalse(self.approved())
 
 
 class DismissTest(GateCase):
@@ -765,7 +530,7 @@ class DismissTest(GateCase):
         self.state["comments"] = [{"id": 5, "user": {"login": "github-actions[bot]"},
                                    "body": rg.MARKER + "\n" + rg.AUTOMERGE_STATE}]
         self.run_gate()
-        self.assertEqual(len(self.dismissed()), 1)
+        self.assertEqual(len(self.dismissed()), 2)  # the gate's and CodeRabbit's
         dismissal = next(w for w in self.gh.writes if w[1].endswith("/dismissals"))
         self.assertIn("没有未解决的审查对话", dismissal[2]["message"])
         self.assertEqual(self.automerge(), "disable")
@@ -776,6 +541,31 @@ class DismissTest(GateCase):
         self.state["auto_merge"] = {"mergeMethod": "MERGE", "enabledBy": {"login": "qvictl"}}
         self.run_gate()
         self.assertIsNone(self.automerge())
+
+    def test_coderabbit_approval_is_dismissed_while_conditions_fail(self):
+        # App approvals count toward the required approval (seen on qvictl/koreader#14).
+        self.state["reviews"] = [review("coderabbitai[bot]", "APPROVED", rid=20),
+                                 review("qvictl", "APPROVED", rid=21)]
+        self.state["threads"].append({"isResolved": False, "path": "p", "comments": {"nodes": []}})
+        self.run_gate()
+        self.assertEqual(self.dismissed(), ["repos/%s/pulls/7/reviews/20/dismissals" % REPO])  # not the human's
+
+    def test_coderabbit_approval_is_kept_while_checks_are_pending(self):
+        self.state["reviews"] = [review("coderabbitai[bot]", "APPROVED", rid=20)]
+        self.state["check_runs"][0].update(status="in_progress", conclusion=None)
+        self.run_gate()
+        self.assertEqual(self.dismissed(), [])
+
+    def test_coderabbit_approval_is_dismissed_when_a_check_fails(self):
+        self.state["reviews"] = [review("coderabbitai[bot]", "APPROVED", rid=20)]
+        self.state["check_runs"][0]["conclusion"] = "failure"
+        self.run_gate()
+        self.assertEqual(self.dismissed(), ["repos/%s/pulls/7/reviews/20/dismissals" % REPO])
+
+    def test_coderabbit_approval_is_kept_when_conditions_hold(self):
+        self.state["reviews"] = [review("coderabbitai[bot]", "APPROVED", rid=20)]
+        self.run_gate()
+        self.assertEqual(self.dismissed(), [])
 
     def test_foreign_bot_approval_without_marker_is_dismissed(self):
         self.state["reviews"].append(review("github-actions[bot]", "APPROVED", rid=9, body="LGTM"))
@@ -860,6 +650,7 @@ class ScheduleTest(GateCase):
         self.assertTrue(self.needs(self.sticky("")))
         self.assertTrue(self.needs(self.sticky("ai,threads")))
         self.assertTrue(self.needs(self.sticky("ai")))
+        self.assertTrue(self.needs(self.sticky("protection")))  # unreadable branch protection: retry soon
         self.assertFalse(self.needs(self.sticky("checks,ai")))
         self.assertFalse(self.needs(self.sticky("sensitive,author")))
         slot = rg.datetime(2026, 10, 28, 12, 7, tzinfo=rg.timezone.utc)
@@ -894,31 +685,6 @@ class ScheduleTest(GateCase):
 
 
 class MainTest(unittest.TestCase):
-    def test_labeled_event_binds_the_override_to_its_head(self):
-        state = base_state()
-        state["pr"]["labels"] = [{"name": "human-approved"}]
-        state["events"] = [{"event": "labeled", "label": {"name": "human-approved"}, "actor": {"login": "qvictl"}}]
-        fake = FakeGitHub(state)
-        with tempfile.TemporaryDirectory() as tmp:
-            event = Path(tmp) / "event.json"
-            event.write_text(json.dumps({"action": "labeled", "label": {"name": "human-approved"},
-                                         "pull_request": {"number": 7, "head": {"sha": HEAD}}}))
-            old_env, old_cls = dict(os.environ), rg.GitHub
-            os.environ.update({"GITHUB_TOKEN": "t", "GITHUB_EVENT_PATH": str(event),
-                               "GITHUB_EVENT_NAME": "pull_request_target"})
-            rg.GitHub = lambda *_a, **_k: fake  # type: ignore
-            try:
-                rg.main(["--repo", REPO, "--event", "--summary", str(Path(tmp) / "s.md")])
-            finally:
-                rg.GitHub = old_cls  # type: ignore
-                os.environ.clear()
-                os.environ.update(old_env)
-        posts = [w[2]["body"] for w in fake.writes if w[0] == "POST" and w[1].endswith("/comments")]
-        self.assertEqual(len(posts), 2)  # sticky comment + separate override record
-        self.assertNotIn("override head", posts[0])
-        self.assertEqual(posts[1], record(HEAD))
-        self.assertEqual(rg.bound_override_head([{"user": {"login": "github-actions[bot]"}, "body": posts[1]}]), HEAD)
-
     def test_main_event_mode_end_to_end(self):
         state = base_state()
         fake = FakeGitHub(state)
@@ -944,14 +710,10 @@ class MainTest(unittest.TestCase):
     def test_repo_config_files_are_valid(self):
         here = Path(__file__).resolve().parent
         config = rg.load_config(str(here / "config.json"))
-        for key in ("merge_method", "max_changed_lines", "test_paths", "doc_paths", "sensitive_paths"):
-            self.assertIn(key, config)
+        self.assertIn("merge_method", config)
         self.assertIn(config["merge_method"], ("MERGE", "SQUASH", "REBASE"))
-        for rule in config["sensitive_line_patterns"]:
-            rg.re.compile(rule["regex"])
-        for path in (".github/workflows/review_gate.yml", "REVIEW_POLICY.md", ".coderabbit.yaml",
-                     ".gemini/config.yaml", "CONTRIBUTING.md"):
-            self.assertIsNotNone(rg.match_any(path, config["sensitive_paths"]), path)
+        for key in ("max_changed_lines", "sensitive_paths", "test_paths"):
+            self.assertNotIn(key, config)
 
 
 if __name__ == "__main__":
