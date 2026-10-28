@@ -322,6 +322,111 @@ for _, failure in ipairs({ "auth", "save", "refresh" }) do
     expect(failing._active_job and failing._active_job.suffix == "manual",
         failure .. " failure prevented the queued manual download from starting")
 end
+-- Stable identity protects deferred launch and parent delivery; rotating a
+-- ticket for the same account still permits downloaded chapter metadata.
+for _, change in ipairs({ "before_launch", "after_worker", "ticket" }) do
+    scheduled = {}
+    local settings = fake_settings()
+    settings:set("account", { user_vid = "one" })
+    settings:set("wr_ticket", "original-ticket")
+    settings.update_auth = function(self, auth) self:set("wr_ticket", auth.wr_ticket) end
+    local account_worker = fake_worker()
+    local result_ok, result_reason, opened, refreshed
+    local candidate = { book_id = "isolated", title = "Account fixture" }
+    local account_downloader = Downloader:new{
+        client = {}, settings = settings, background_worker = account_worker,
+        require_login = function() return true end,
+        refresh_ui = function() end,
+        refresh_shelf = function() refreshed = true end,
+        open_file = function() opened = true end,
+    }
+    account_downloader:start(candidate, { chapter_2 }, "chapter", {
+        prefetch = true, single_chapter = true, open_on_complete = true,
+        on_complete = function(ok, value) result_ok, result_reason = ok, value end,
+    })
+    if change == "before_launch" then settings:set("account", { user_vid = "two" }) end
+    run_scheduled()
+    if change == "before_launch" then
+        expect(#account_worker.starts == 0, "old-account deferred prefetch started under new credentials")
+    else
+        if change == "after_worker" then settings:set("account", { user_vid = "two" })
+        else settings:set("wr_ticket", "rotated-parent-ticket") end
+        account_worker.starts[1].options.on_done({ ok = true,
+            value = { path = downloaded_path, chapter_uid = "2", auth = { wr_ticket = "old-account_worker-ticket" } } })
+    end
+    if change == "ticket" then
+        expect(result_ok and settings:get("books").isolated.cached_chapters["2"] == downloaded_path
+            and opened and refreshed, "same-account ticket rotation discarded chapter result")
+        expect(settings:get("wr_ticket") == "rotated-parent-ticket", "old account_worker auth replaced rotated ticket")
+    else
+        expect(result_ok == false and result_reason == "account_changed" and not settings:get("books").isolated
+            and not candidate.cached_chapters and not opened and not refreshed,
+            change .. " wrote old-account metadata or refreshed/opened UI")
+    end
+    expect(account_downloader._active_job == nil and (account_downloader._standby_ref or 0) == 0,
+        change .. " stranded prefetch active slot/standby")
+end
+-- A task queued behind another worker rechecks identity in the child too.
+scheduled = {}
+local pending_settings = fake_settings()
+pending_settings:set("account", { user_vid = "one" })
+local pending_worker = fake_worker()
+local pending_dl = Downloader:new{
+    settings = pending_settings, client = {}, background_worker = pending_worker,
+    require_login = function() return true end,
+}
+local ChapterWorker = require("weread.lib.chapter_prefetch_worker")
+local original_run, child_requests = ChapterWorker.run, 0
+ChapterWorker.run = function() child_requests = child_requests + 1; return {} end
+pending_dl:start({ book_id = "queued" }, { chapter_2 }, "chapter", { prefetch = true, single_chapter = true })
+run_scheduled()
+pending_settings:set("account", { user_vid = "two" })
+local task_ok, task_err = pcall(pending_worker.starts[1].options.task, {})
+ChapterWorker.run = original_run
+expect(not task_ok and tostring(task_err):find("account_changed", 1, true) and child_requests == 0,
+    "queued old-account task issued requests with new credentials")
+pending_worker.starts[1].options.on_done({ ok = false, error = task_err })
+expect(pending_dl._active_job == nil and (pending_dl._standby_ref or 0) == 0,
+    "queued account rejection stranded downloader/standby")
+
+-- The downloader's replacement queue also retains identity across restart.
+for _, change in ipairs({ "before_finish", "after_finish", "ticket", "mp_before_finish", "mp_after_finish" }) do
+    scheduled = {}
+    local queued_settings, queued_worker = fake_settings(), fake_worker()
+    queued_settings:set("account", { user_vid = "one" })
+    local replacement_dl = Downloader:new{
+        settings = queued_settings, client = {}, background_worker = queued_worker,
+        require_login = function() return true end,
+        is_connected = function() return true end,
+    }
+    replacement_dl:start(book_a, { chapter_2 }, "chapter", { prefetch = true, single_chapter = true })
+    run_scheduled()
+    local queued_done, queued_ok, queued_reason = 0
+    replacement_dl:start(book_a, { chapter_3 }, "chapter", {
+        prefetch = not change:find("mp_", 1, true), mp_article = change:find("mp_", 1, true) ~= nil,
+        single_chapter = true,
+        on_complete = function(ok, reason)
+            queued_done, queued_ok, queued_reason = queued_done + 1, ok, reason
+        end,
+    })
+    expect(replacement_dl._pending_start ~= nil, change .. " replacement did not enter downloader queue")
+    if change:find("before_finish", 1, true) then queued_settings:set("account", { user_vid = "two" }) end
+    run_worker_event(queued_worker)
+    if change:find("after_finish", 1, true) then queued_settings:set("account", { user_vid = "two" }) end
+    if change == "ticket" then queued_settings:set("wr_ticket", "rotated") end
+    run_scheduled()
+    run_scheduled()
+    if change == "ticket" then
+        expect(#queued_worker.starts == 2, "same-account ticket rotation rejected replacement")
+        queued_worker.starts[2].options.on_done({ ok = false, error = "fixture_done" })
+    else
+        expect(#queued_worker.starts == 1 and queued_done == 1 and queued_ok == false
+            and queued_reason == "account_changed", change .. " restarted a stale replacement")
+    end
+    expect(replacement_dl._active_job == nil and replacement_dl._pending_start == nil and replacement_dl._scheduled_start == nil
+        and (replacement_dl._standby_ref or 0) == 0, change .. " queue rejection stranded state")
+end
+
 os.remove(downloaded_path)
 
 -- MP jobs use the same active slot and capture identity before deferred work.

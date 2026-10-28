@@ -316,6 +316,13 @@ function Downloader:_finishJob(dl)
         UIManager:scheduleIn(0.1, function()
             if self._scheduled_start ~= scheduled then return end
             self._scheduled_start = nil
+            if pending.options and (pending.options.prefetch or pending.options.mp_article)
+                and pending.account_id ~= account_id(self.settings) then
+                if type(pending.options.on_complete) == "function" then
+                    pcall(pending.options.on_complete, false, "account_changed")
+                end
+                return
+            end
             self:start(pending.book, pending.chapters, pending.suffix, pending.options)
         end)
     end
@@ -494,6 +501,11 @@ function Downloader:_applyPrefetchResult(dl, result)
         dl.progress_dialog = nil
     end
     if self._active_job ~= dl then return end
+    if dl.account_id ~= account_id(self.settings) then
+        self:_notifyCompletion(dl, false, "account_changed")
+        self:_finishJob(dl)
+        return
+    end
     if dl.cancelled then
         self:_notifyCompletion(dl, false, dl.cancel_reason or "cancelled")
         self:_finishJob(dl)
@@ -552,6 +564,10 @@ function Downloader:_applyPrefetchResult(dl, result)
 end
 
 function Downloader:_startPrefetchWorker(dl)
+    if dl.account_id ~= account_id(self.settings) then
+        self:_applyPrefetchResult(dl, { ok = false, error = "account_changed" })
+        return false
+    end
     local worker = self.background_worker
     if not worker or not worker:available() then
         self:_applyPrefetchResult(dl, {
@@ -566,6 +582,8 @@ function Downloader:_startPrefetchWorker(dl)
         replace_active = true,
         timeout = 180,
         task = function(context)
+            -- The shared worker can launch this queued request after login.
+            if dl.account_id ~= account_id(self.settings) then error("account_changed", 0) end
             return ChapterWorker.run(self.settings, self.client, dl.book,
                 dl.chapters[1], context)
         end,
@@ -804,6 +822,7 @@ function Downloader:start(book, chapters, suffix, options)
                     chapters = chapters,
                     suffix = suffix,
                     options = options,
+                    account_id = account_id(self.settings),
                 }
                 return true
             end
@@ -816,6 +835,7 @@ function Downloader:start(book, chapters, suffix, options)
                 chapters = chapters,
                 suffix = suffix,
                 options = options,
+                account_id = account_id(self.settings),
             }
             return true
         end

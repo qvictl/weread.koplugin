@@ -129,9 +129,11 @@ class MockServer(ThreadingHTTPServer):
         self.now = now or time.time
         self.events = deque(maxlen=500)
         self.started_counts = {}
+        self.response_gate = threading.Event()
+        self.response_gate.set()
         self.progress = {}
         self.control = dict(delay=0, match="", status=503, times=0, drop=False,
-                            empty_shelf=False, empty_annotations=False, shelf_idless_entry=False,
+                            empty_shelf=False, empty_annotations=False, shelf_idless_entry=False, hold_response=False,
                             qr_mode="succeed", qr_delay=1)
         # Path whose https requests answer 302 to the same URL over plain http.
         self.control["downgrade_path"] = ""
@@ -158,11 +160,16 @@ class MockServer(ThreadingHTTPServer):
             request_key = api or path
             self.started_counts[request_key] = self.started_counts.get(request_key, 0) + 1
             control = self.control.copy()
+            response_gate = self.response_gate
             matches = not control["match"] or control["match"] in (api or path)
             fail = matches and control["times"] != 0
             if fail and control["times"] > 0:
                 self.control["times"] -= 1
         if matches:
+            # Tests release this explicitly after the parent mutation. The
+            # timeout bounds abandoned test requests, not their ordering.
+            if control["hold_response"] and not response_gate.wait(timeout=30):
+                return 504, dict(errcode=-1, errmsg="Synthetic response gate timed out")
             time.sleep(control["delay"])
         if fail and control["drop"]:
             raise DropConnection()
@@ -453,7 +460,7 @@ class Handler(BaseHTTPRequestHandler):
                 raise ValueError("status must be 400..599")
             if not isinstance(candidate["match"], str):
                 raise ValueError("match must be a string")
-            for key in ("empty_shelf", "empty_annotations", "drop", "shelf_idless_entry"):
+            for key in ("empty_shelf", "empty_annotations", "drop", "shelf_idless_entry", "hold_response"):
                 if type(candidate[key]) is not bool:
                     raise ValueError(key + " must be boolean")
             if candidate["qr_mode"] not in ("succeed", "otp", "expire"):
@@ -462,6 +469,10 @@ class Handler(BaseHTTPRequestHandler):
                 raise ValueError("qr_delay must be 0..10 seconds")
             if not isinstance(candidate["downgrade_path"], str):
                 raise ValueError("downgrade_path must be a string")
+            if candidate["hold_response"] and not self.server.control["hold_response"]:
+                self.server.response_gate = threading.Event()
+            elif not candidate["hold_response"]:
+                self.server.response_gate.set()
             self.server.control = candidate
 
 
