@@ -1,18 +1,30 @@
 name: Integration
 
-# Runs the plugin inside real KOReader:
-# - emulator: headless KOReader app (reader.lua, SDL dummy video) with the
-#   candidate package, driven through spec/emulator/scenarios against the
-#   local mock WeRead service (scripts/run_emulator_scenarios.py). Uses the
-#   qvictl/koreader fork's rolling emulator build when it is published,
-#   otherwise the official KOReader linux release (see
-#   scripts/fetch_koreader_emulator.sh). Scenarios run under LuaCov (except
-#   `@no_coverage` timing budgets); the per-shard line counts are uploaded as
-#   coverage-emulator-shard-* for the tests-policy gate and the Coverage
-#   workflow.
+# Runs the plugin inside real KOReader. Required status checks for main:
+# `integration` and `integration-official`.
+#
+# integration (required) = emulator-fork + plugin-loader:
+# - emulator-fork: the qvictl/koreader fork's emulator build (release
+#   `nightly`, asset koreader-emulator-x86_64-latest.tar.xz) - the KOReader
+#   this plugin is built for. It links the system's SDL3, so the job runs in
+#   the koreader/kobase:5.0.0-22.04 image like the fork's own integration
+#   tests. scripts/fetch_koreader_emulator.sh runs in `fork` mode: if the
+#   build cannot be downloaded, verified or started, the job fails (no
+#   fallback to the official build). The headless app (reader.lua, SDL dummy
+#   video) runs the candidate package through spec/emulator/scenarios against
+#   the local mock WeRead service (scripts/run_emulator_scenarios.py) under
+#   LuaCov (except `@no_coverage` timing budgets); the per-shard line counts
+#   are uploaded as coverage-emulator-shard-* for the tests-policy gate and
+#   the Coverage workflow. The step summary names the fork build tested.
 # - plugin-loader: KOReader's own Busted environment and PluginLoader at the
 #   pinned upstream commit (scripts/run_koreader_integration.sh).
-# Release.yml publishes after this workflow succeeds on main.
+#
+# integration-official (required) = emulator-official: the same scenarios on
+# the official KOReader v2026.07.1 linux release (plain runner + SDL 2),
+# which many devices still run and Release.yml publishes to. No coverage;
+# evidence goes to emulator-official-evidence-shard-*.
+#
+# Release.yml publishes after this whole workflow succeeds on main.
 
 on:
   pull_request:
@@ -20,16 +32,19 @@ on:
     branches:
       - main
   schedule:
-    # Weekly, so a new fork emulator build or KOReader drift shows up even
-    # without plugin changes.
+    # Weekly, so a new fork build or KOReader drift shows up even without
+    # plugin changes (the fork nightly is also picked up by every run).
     - cron: "23 18 * * 1"
+  # Also dispatched by the upstream-sync workflow for its PR branch.
   workflow_dispatch:
     inputs:
-      emulator_source:
-        description: KOReader build for the emulator scenarios
-        type: choice
-        options: [auto, fork, official]
-        default: auto
+      fork_release:
+        description: >-
+          qvictl/koreader release for the fork emulator job: `nightly` (rolling,
+          default) or a stable fork tag such as v2026.10.q1. The official
+          v2026.07.1 job always runs too.
+        type: string
+        default: nightly
 
 permissions:
   contents: read
@@ -42,14 +57,109 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  emulator:
-    name: Emulator scenarios (shard ${{ matrix.shard }}/3)
+  emulator-fork:
+    name: Emulator · qvictl/koreader fork build (shard ${{ matrix.shard }}/3)
     runs-on: ubuntu-latest
+    # The fork's emulator build links the system's SDL3: same image as the
+    # fork's own integration tests. Its default user `ko` has the runner's
+    # UID (1001), so the mounted workspace and $RUNNER_TEMP stay writable.
+    container:
+      image: koreader/kobase:5.0.0-22.04
     timeout-minutes: 40
     strategy:
       fail-fast: false
       matrix:
         shard: [1, 2, 3]
+    steps:
+      - name: Check container tools
+        id: tools
+        # kobase ships these; install whatever a future image drops.
+        run: |
+          set -euo pipefail
+          id
+          missing=()
+          for pair in bash:bash curl:curl git:git python3:python3 sha256sum:coreutils \
+                      tar:tar xz:xz-utils zip:zip unzip:unzip; do
+            command -v "${pair%%:*}" >/dev/null || missing+=("${pair#*:}")
+          done
+          if (( ${#missing[@]} )); then
+            echo "Installing ${missing[*]}"
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends "${missing[@]}"
+          fi
+          python3 --version
+          echo "out=$RUNNER_TEMP/emulator" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout plugin
+        uses: actions/checkout@v6
+
+      - name: Install LuaCov
+        run: |
+          git clone --quiet --depth 1 --branch "$LUACOV_VERSION" \
+            https://github.com/lunarmodules/luacov.git "$RUNNER_TEMP/luacov"
+
+      - name: Fetch the qvictl/koreader fork emulator build
+        id: koreader
+        env:
+          KOREADER_EMULATOR_SOURCE: fork
+          KOREADER_FORK_RELEASE: ${{ inputs.fork_release || 'nightly' }}
+        run: bash scripts/fetch_koreader_emulator.sh "$RUNNER_TEMP/koreader"
+
+      - name: Run emulator scenarios
+        env:
+          RUNTIME: ${{ steps.koreader.outputs.runtime }}
+          LABEL: ${{ steps.koreader.outputs.label }}
+          OUT: ${{ steps.tools.outputs.out }}
+        run: |
+          python3 scripts/run_emulator_scenarios.py \
+            --koreader "$RUNTIME" \
+            --label "$LABEL" \
+            --shard "${{ matrix.shard }}/3" \
+            --coverage --luacov-src "$RUNNER_TEMP/luacov/src" \
+            --out "$OUT"
+
+      - name: Scenario summary
+        if: always()
+        env:
+          OUT: ${{ steps.tools.outputs.out }}
+        run: |
+          if [[ -f "$OUT/summary.md" ]]; then
+            cat "$OUT/summary.md" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "No scenario summary was produced." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      # Artifact paths come from the step output, not ${{ runner.temp }}:
+      # inside a container job that expression is the host path.
+      - name: Upload emulator coverage
+        if: always() && steps.tools.outputs.out != ''
+        uses: actions/upload-artifact@v6
+        with:
+          name: coverage-emulator-shard-${{ matrix.shard }}
+          path: ${{ steps.tools.outputs.out }}/coverage/emulator.stats.out
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Upload scenario evidence
+        if: always() && steps.tools.outputs.out != ''
+        uses: actions/upload-artifact@v6
+        with:
+          name: emulator-evidence-shard-${{ matrix.shard }}
+          path: |
+            ${{ steps.tools.outputs.out }}/*/evidence
+            ${{ steps.tools.outputs.out }}/summary.*
+          if-no-files-found: warn
+          retention-days: 14
+
+  emulator-official:
+    name: Emulator · official KOReader v2026.07.1 (shard ${{ matrix.shard }}/2)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        # No LuaCov here (the JIT stays on), so two shards are enough.
+        shard: [1, 2]
     steps:
       - name: Checkout plugin
         uses: actions/checkout@v6
@@ -57,15 +167,12 @@ jobs:
       - name: Install runtime dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y xvfb libsdl2-2.0-0 zip unzip
-          git clone --quiet --depth 1 --branch "$LUACOV_VERSION" \
-            https://github.com/lunarmodules/luacov.git "$RUNNER_TEMP/luacov"
+          sudo apt-get install -y libsdl2-2.0-0 zip unzip
 
-      - name: Fetch KOReader emulator
+      - name: Fetch the official KOReader build
         id: koreader
         env:
-          GH_TOKEN: ${{ github.token }}
-          KOREADER_EMULATOR_SOURCE: ${{ inputs.emulator_source || 'auto' }}
+          KOREADER_EMULATOR_SOURCE: official
         run: bash scripts/fetch_koreader_emulator.sh "$RUNNER_TEMP/koreader"
 
       - name: Run emulator scenarios
@@ -76,8 +183,7 @@ jobs:
           python3 scripts/run_emulator_scenarios.py \
             --koreader "$RUNTIME" \
             --label "$LABEL" \
-            --shard "${{ matrix.shard }}/3" \
-            --coverage --luacov-src "$RUNNER_TEMP/luacov/src" \
+            --shard "${{ matrix.shard }}/2" \
             --out "$RUNNER_TEMP/emulator"
 
       - name: Scenario summary
@@ -89,20 +195,12 @@ jobs:
             echo "No scenario summary was produced." >> "$GITHUB_STEP_SUMMARY"
           fi
 
-      - name: Upload emulator coverage
-        if: always()
-        uses: actions/upload-artifact@v6
-        with:
-          name: coverage-emulator-shard-${{ matrix.shard }}
-          path: ${{ runner.temp }}/emulator/coverage/emulator.stats.out
-          if-no-files-found: warn
-          retention-days: 30
-
+      # Distinct name: coverage-emulator-shard-* is the fork job's alone.
       - name: Upload scenario evidence
         if: always()
         uses: actions/upload-artifact@v6
         with:
-          name: emulator-evidence-shard-${{ matrix.shard }}
+          name: emulator-official-evidence-shard-${{ matrix.shard }}
           path: |
             ${{ runner.temp }}/emulator/*/evidence
             ${{ runner.temp }}/emulator/summary.*
@@ -146,13 +244,27 @@ jobs:
         run: bash scripts/run_koreader_integration.sh
 
   integration:
-    # Required status check for main.
+    # Required status check for main: the qvictl/koreader fork build.
     name: integration
     if: always()
-    needs: [emulator, plugin-loader]
+    needs: [emulator-fork, plugin-loader]
     runs-on: ubuntu-latest
     steps:
-      - name: All integration jobs passed
+      - name: All fork-build integration jobs passed
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          echo "$RESULTS" | jq -r 'to_entries[] | "\(.key): \(.value.result)"'
+          echo "$RESULTS" | jq -e 'to_entries | all(.value.result == "success")' > /dev/null
+
+  integration-official:
+    # Required status check for main: official KOReader v2026.07.1.
+    name: integration-official
+    if: always()
+    needs: [emulator-official]
+    runs-on: ubuntu-latest
+    steps:
+      - name: All official-build integration jobs passed
         env:
           RESULTS: ${{ toJSON(needs) }}
         run: |
