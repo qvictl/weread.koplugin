@@ -1257,10 +1257,27 @@ function M:loadChapters(book, callback, force_refresh)
     end
     self:runOnlineTask(_("Loading chapter list..."), function()
         self:showBusy(_("Loading chapter list..."))
+        local cache_book = { book_id = book.book_id or book.bookId,
+            cache_dir = Content.book_resolved_dir(self.settings, book.book_id or book.bookId, book) }
+        local prepared, workspace = pcall(Content.create_download_workspace, self.settings, cache_book)
+        local prepare_error
+        if not prepared then prepare_error, workspace = workspace, nil end
+        local function cleanup()
+            if workspace then Content.cleanup_download_workspace(workspace); workspace = nil end
+        end
         self:_runNetworkRequest(_("Loading chapter list..."), _("Loading chapter list..."), function()
             local state = Content.ensure_reader_state(self.client, book)
-            return { state = state, reader_url = book.reader_url,
-                chapters = Content.fetch_catalog(self.client, book) }
+            local chapters = Content.fetch_catalog(self.client, book)
+            local saved, cache_error, cache_path
+            if workspace then
+                local staged = { book_id = cache_book.book_id, cache_dir = workspace.path }
+                saved, cache_error = Content.save_catalog_cache(self.client, self.settings, staged, chapters)
+                if saved then cache_path = Content.catalog_cache_path(self.settings, staged) end
+            else
+                cache_error = prepare_error
+            end
+            return { state = state, reader_url = book.reader_url, chapters = chapters,
+                cache_path = cache_path, cache_error = not saved and cache_error or nil }
         end, function(result)
             self:closeBusy()
             local state, chapters = result.state, result.chapters
@@ -1269,11 +1286,12 @@ function M:loadChapters(book, callback, force_refresh)
             book.psvts, book.pclts, book.token = state.psvts, state.pclts, state.token
             book.reader_url, book.chapters = result.reader_url, chapters
             require("weread.lib.reader_state").apply_to_book(book, state)
-            local cache_ok, cache_err = Content.save_catalog_cache(
-                self.client, self.settings, book, chapters)
-            if not cache_ok then
-                logger.warn("save chapter catalog cache failed:", log_error(cache_err))
+            local cache_ok, cache_err = false, result.cache_error
+            if result.cache_path then
+                cache_ok, cache_err = Content.commit_catalog_cache(self.settings, book, result.cache_path)
             end
+            cleanup()
+            if not cache_ok then logger.warn("save chapter catalog cache failed:", log_error(cache_err)) end
             local book_id = book.book_id or book.bookId
             if book_id then
                 if self.library_db then
@@ -1287,6 +1305,7 @@ function M:loadChapters(book, callback, force_refresh)
             end
             callback(chapters)
         end, function(err, cancelled)
+            cleanup()
             self:closeBusy()
             if cancelled then return end
             logger.err("load chapters failed:", log_error(err))

@@ -1,5 +1,6 @@
 -- Cache settings, directory selection, scanning, and cleanup UI.
 local BookRecords = require("weread.lib.book_records")
+local BookStore = require("weread.lib.book_store")
 local ButtonDialog = require("ui/widget/buttondialog")
 local ConfirmBox = require("ui/widget/confirmbox")
 local Content = require("weread.lib.content")
@@ -700,6 +701,86 @@ function M:scanLocalCache(root, allowed, dry_run)
     return added, updated
 end
 
+local function scan_account(settings)
+    local account = settings:get("account", {})
+    return type(account) == "table" and tostring(account.user_vid or "") or ""
+end
+
+-- Import one record at a time and yield by elapsed work, not per file. The
+-- lazy lookup avoids retaining a second copy of every book/chapter record.
+function M:scanLocalCacheAsync(root, allowed, dry_run, on_done, on_error)
+    if self._cache_import then return false end
+    local scan = {}
+    local cache_mark = BookStore.cache_mark(self.settings)
+    self._cache_import = scan
+    local original_account = scan_account(self.settings)
+    local function account_matches() return scan_account(self.settings) == original_account end
+    local has_time, time = pcall(require, "ui/time")
+    local clock = has_time and type(time) == "table" and time.now and time.to_s
+        and function() return time.to_s(time.now()) end or nil
+    local started, visited
+    local function checkpoint()
+        visited = visited + 1
+        local now = clock and clock()
+        if now and now - started >= CACHE_SCAN_SLICE_SECONDS or not now and visited >= 64 then
+            coroutine.yield()
+        end
+    end
+    local co = coroutine.create(function()
+        local books = setmetatable({}, { __index = function(_table, id)
+            checkpoint()
+            return BookRecords.get(self.settings, id)
+        end })
+        local added, updated = Scan.scan_root{
+            root = root, fs = require("libs/libkoreader-lfs"), books = books, allowed = allowed,
+            is_mp = WeRead.is_mp_book, dry_run = dry_run, now = os.time(), checkpoint = checkpoint,
+            on_change = function(id, record)
+                checkpoint()
+                if self.library_db and (not self.library_db.accountKey or self.library_db:accountKey()) then
+                    if self.library_db:putBook(record) == false then error("could not save imported book to SQLite", 0) end
+                end
+                BookRecords.put(self.settings, id, record)
+                rawset(books, id, nil)
+                BookStore.release_cache_since(self.settings, cache_mark)
+            end,
+        }
+        checkpoint()
+        if not dry_run and added + updated > 0 then self.settings:flush() end
+        return added, updated
+    end)
+    local function step()
+        if self._cache_import ~= scan then return end
+        if not account_matches() then
+            self._cache_import = nil
+            on_error(nil, true)
+            return
+        end
+        started, visited = clock and clock(), 0
+        local ok, added, updated = coroutine.resume(co)
+        BookStore.release_cache_since(self.settings, cache_mark)
+        if not ok then
+            self._cache_import = nil
+            on_error(added)
+        elseif coroutine.status(co) == "dead" then
+            self._cache_import = nil
+            local delivered, err = pcall(on_done, added, updated)
+            if not delivered then on_error(err) end
+        else
+            UIManager:scheduleIn(0.1, step)
+        end
+    end
+    self:showBusy(_("Scanning local cache..."))
+    step()
+    return true
+end
+
+local function scan_error(self, err, cancelled)
+    self:closeBusy()
+    if cancelled then return end
+    logger.warn("local cache scan failed:", log_error(err))
+    self:showInfo(T(_("%1 failed:\n%2"), _("Scan and match local books"), display_error(err)))
+end
+
 -- Build the set of importable directory names from the user's WeRead shelf.
 -- Must be called from an online context; raises on API failure.
 function M:fetchShelfAllowedMap()
@@ -731,10 +812,11 @@ function M:confirmScanLocalCache()
         self:_runNetworkRequest(_("Scanning local cache..."), _("Scan and match local books"), function()
             return self:fetchShelfAllowedMap()
         end, function(allowed)
-            local added, updated = self:scanLocalCache(self.settings.cache_dir, allowed)
-            self:closeBusy()
-            self:refreshCacheManagement(T(_("Scan complete. %1 added, %2 updated."),
-                tostring(added), tostring(updated)))
+            self:scanLocalCacheAsync(self.settings.cache_dir, allowed, false, function(added, updated)
+                self:closeBusy()
+                self:refreshCacheManagement(T(_("Scan complete. %1 added, %2 updated."),
+                    tostring(added), tostring(updated)))
+            end, function(err, cancelled) scan_error(self, err, cancelled) end)
         end, function(err, cancelled)
             self:closeBusy()
             if cancelled then return end
@@ -760,24 +842,25 @@ function M:offerScanNewDir(new_dir, base_message)
         self:_runNetworkRequest(_("Scanning local cache..."), _("Scan and match local books"), function()
             return self:fetchShelfAllowedMap()
         end, function(allowed)
-            local pending_added, pending_updated = self:scanLocalCache(new_dir, allowed, true)
-            if pending_added + pending_updated == 0 then
-                self:showInfo(base_message)
-                return
-            end
-            UIManager:show(ConfirmBox:new{
-                text = T(_("Found %1 new and %2 outdated item(s) in the new directory. Import them?"),
-                    tostring(pending_added), tostring(pending_updated)),
-                ok_text = _("Import"),
-                ok_callback = function()
-                    local added, updated = self:scanLocalCache(new_dir, allowed)
-                    self:showInfo(T(_("Imported %1 new and %2 updated item(s)."), tostring(added), tostring(updated)))
-                end,
-                cancel_text = _("Skip"),
-                cancel_callback = function()
-                    self:showInfo(base_message)
-                end,
-            })
+            local original_account = scan_account(self.settings)
+            self:scanLocalCacheAsync(new_dir, allowed, true, function(pending_added, pending_updated)
+                self:closeBusy()
+                if pending_added + pending_updated == 0 then self:showInfo(base_message); return end
+                UIManager:show(ConfirmBox:new{
+                    text = T(_("Found %1 new and %2 outdated item(s) in the new directory. Import them?"),
+                        tostring(pending_added), tostring(pending_updated)),
+                    ok_text = _("Import"),
+                    ok_callback = function()
+                        if scan_account(self.settings) ~= original_account then return end
+                        self:scanLocalCacheAsync(new_dir, allowed, false, function(added, updated)
+                            self:closeBusy()
+                            self:showInfo(T(_("Imported %1 new and %2 updated item(s)."),
+                                tostring(added), tostring(updated)))
+                        end, function(err, cancelled) scan_error(self, err, cancelled) end)
+                    end,
+                    cancel_text = _("Skip"), cancel_callback = function() self:showInfo(base_message) end,
+                })
+            end, function(err, cancelled) scan_error(self, err, cancelled) end)
         end, function(err, cancelled)
             if cancelled then return end
             logger.warn("skip scan, shelf fetch failed:", log_error(err))

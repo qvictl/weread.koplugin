@@ -49,6 +49,13 @@ class MockTests(unittest.TestCase):
                                         empty_shelf=False, empty_annotations=False, shelf_idless_entry=False,
                                         qr_mode="succeed", qr_delay=0))
 
+    def test_read_statistics_view_fixture(self):
+        status, data = self.gateway("/readdata/detail", mode="monthly")
+        self.assertEqual(status, 200)
+        self.assertEqual(data["totalReadTime"], 7200)
+        self.assertEqual(sum(data["readTimes"].values()), 7200)
+        self.assertEqual(self.gateway("/readdata/detail", mode="invalid")[0], 400)
+
     def test_contract_and_real_reference_decoder(self):
         status, shelf = self.gateway("/shelf/sync")
         self.assertEqual(status, 200)

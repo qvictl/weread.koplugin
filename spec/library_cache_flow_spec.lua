@@ -35,6 +35,10 @@ end
 local fetched_chapters = { { chapterUid = 7, title = "Cached chapter" } }
 package.preload["weread.lib.content"] = function()
     return {
+        book_resolved_dir = function(_settings, id, book) return book.cache_dir or "/cache/" .. tostring(id) end,
+        create_download_workspace = function(_settings, book) return { path = "/stage/" .. tostring(book.book_id) } end,
+        cleanup_download_workspace = function() return true end,
+        commit_catalog_cache = function(_settings, book) book.cache_dir = "/cache/" .. tostring(book.book_id) return true end,
         ensure_reader_state = function(_client, book)
             book.reader_url = "https://weread.qq.com/web/reader/synthetic"
             return { book_id = "42", psvts = "synthetic-session", token = "synthetic-token",

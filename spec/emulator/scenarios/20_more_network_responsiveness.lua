@@ -4,10 +4,23 @@
 return function(H)
     local UIManager = require("ui/uimanager")
     local TrapWidget = require("ui/widget/trapwidget")
+    local Content = require("weread.lib.content")
+    local lfs = require("libs/libkoreader-lfs")
+    local ffiutil = require("ffi/util")
     local plugin, book, catalog_done
+    local imported, new_dir = {}, H.env.evidence .. "/new-cache"
     H.step("setup", function()
         plugin = H.wait_until("plugin attached", function() return H.plugin() end, 20)
-        book = H.call(function() return H.runtime().client:get_book_info("900001") end)
+        book = H.call(function()
+            local target = H.runtime().client:get_book_info("900001")
+            for index, id in ipairs({ "900002", "900003" }) do
+                local fixture = { book_id = id, title = "Synthetic imported book " .. index }
+                if index == 2 then fixture.cache_dir = new_dir .. "/" .. id end
+                imported[id] = Content.save_chapter_epub(plugin.settings, fixture,
+                    { chapterUid = 1, title = "Imported chapter" }, "<p>Synthetic import fixture</p>", {}, "")
+            end
+            return target
+        end)
     end)
     local cases = {
         { name = "reviews", api = "/review/list", start = function() plugin:showBookReviews(book) end },
@@ -18,7 +31,7 @@ return function(H)
         { name = "statistics", api = "/readdata/detail", start = function() plugin:loadReadStats("monthly") end },
         { name = "scan", api = "/shelf/sync", start = function() plugin:confirmScanLocalCache() end },
         { name = "new_dir", api = "/shelf/sync", start = function()
-            plugin:offerScanNewDir(H.env.evidence .. "/empty-cache", "Synthetic scan finished")
+            plugin:offerScanNewDir(new_dir, "Synthetic scan finished")
         end },
     }
     local gaps = {}
@@ -41,7 +54,33 @@ return function(H)
                 return count > prior and not plugin.busy_message
                     and (not top or getmetatable(top) ~= TrapWidget)
             end, 20)
-            if case.name == "catalog" then H.check(catalog_done, "catalog callback delivered in parent") end
+            if case.name == "reviews" then
+                local view = H.input_window()
+                H.equal(view.book_title, book.title, "review view belongs to requested book")
+                H.equal(#view.result.items, 1, "mock review rendered in parent view")
+            elseif case.name == "statistics" then
+                H.equal(H.input_window().data.mode, "monthly", "requested statistics view rendered")
+                H.equal(H.input_window().data.total_read_time, 7200, "mock statistics actually rendered")
+            elseif case.name == "catalog" then
+                H.check(catalog_done, "catalog callback delivered in parent")
+                H.equal(#plugin.library_db:getChapters("900001"), 6, "catalog persisted in SQLite")
+                H.equal(#Content.load_catalog_cache(plugin.client, plugin.settings, book), 6,
+                    "worker catalog published to final cache")
+            elseif case.name == "new_dir" then
+                H.tap_exact(H.tr("Import"))
+                H.wait_until("new directory import persisted", function()
+                    return plugin.settings:get_book("900003")
+                end, 5)
+            end
+            local imported_id = case.name == "scan" and "900002" or case.name == "new_dir" and "900003"
+            if imported_id then
+                local record = plugin.settings:get_book(imported_id)
+                H.equal(record.cached_file, imported[imported_id], "real EPUB imported into BookRecords")
+                H.equal(plugin.library_db:getBook(imported_id).cache_dir, record.cache_dir,
+                    "same import persisted in account SQLite")
+                H.call(function() plugin:showBookMenu(record) end)
+                H.equal(plugin._book_detail_view.data.title, record.title, "imported book opens its parent view")
+            end
             H.sleep(0.1)
             running = false
             gaps[case.name] = max_gap
@@ -85,4 +124,121 @@ return function(H)
             H.mock_control({ match = "", delay = 0, times = 0 })
         end)
     end
+    H.step("cancel while the child holds a complete staged catalog", function()
+        local original_save, original_prepare = Content.save_catalog_cache, Content.create_download_workspace
+        local workspace, callback, old_bytes
+        local path = Content.catalog_cache_path(plugin.settings, book)
+        local function read_file(name)
+            local file = assert(io.open(name, "rb")); local bytes = file:read("*a"); file:close(); return bytes
+        end
+        old_bytes = read_file(path)
+        H.call(function()
+            Content.create_download_workspace = function(...)
+                workspace = original_prepare(...)
+                return workspace
+            end
+            Content.save_catalog_cache = function(...)
+                local ok, value = original_save(...)
+                ffiutil.usleep(800000)
+                return ok, value
+            end
+            plugin:loadChapters(book, function() callback = true end, true)
+        end)
+        H.wait_until("child has written complete staged catalog", function()
+            return workspace and lfs.attributes(workspace.path .. "/catalog.json", "mode") == "file"
+                and getmetatable(H.input_window()) == TrapWidget
+        end, 10)
+        H.call(function() Content.save_catalog_cache, Content.create_download_workspace = original_save, original_prepare end)
+        H.tap_at(580, 20)
+        H.wait_until("catalog staging cleaned on cancellation", function()
+            return not lfs.attributes(workspace.path) and not plugin.busy_message
+        end, 5)
+        H.equal(read_file(path), old_bytes, "cancel preserves previously published catalog bytes")
+        H.check(not callback, "cancelled staged catalog does not deliver parent callback")
+    end)
+    H.step("account switch discards a worker catalog before publication", function()
+        local original_prepare = Content.create_download_workspace
+        local workspace, callback
+        local path = Content.catalog_cache_path(plugin.settings, book)
+        local file = assert(io.open(path, "rb")); local old_bytes = file:read("*a"); file:close()
+        book.psvts = "parent-account-session"
+        H.mock_control({ match = "/web/book/chapterInfos", delay = 1.5, times = 0 })
+        H.call(function()
+            plugin.library_db:putChapters("900001", {})
+            plugin.settings:set("account", { user_vid = "900099" })
+            Content.create_download_workspace = function(...)
+                workspace = original_prepare(...)
+                return workspace
+            end
+            plugin:loadChapters(book, function() callback = true end, true)
+            UIManager:scheduleIn(0.35, function()
+                plugin.qr_login:_complete({ succeed = true, webLoginVid = "900000",
+                    accessToken = "mock-access-token", refreshToken = "mock-refresh-token" },
+                    plugin.qr_login.generation)
+            end)
+        end)
+        H.wait_until("new account signed in and old catalog discarded", function()
+            return workspace and plugin.settings:get("account", {}).user_vid == "900000"
+                and not plugin.busy_message and not lfs.attributes(workspace.path)
+        end, 10)
+        H.call(function() Content.create_download_workspace = original_prepare end)
+        H.mock_control({ match = "", delay = 0, times = 0 })
+        file = assert(io.open(path, "rb")); local current = file:read("*a"); file:close()
+        H.equal(current, old_bytes, "account discard preserves published catalog")
+        H.equal(plugin.library_db:getChapters("900001"), nil, "old catalog not written into new account SQLite")
+        H.equal(book.psvts, "parent-account-session", "old response does not overwrite parent session")
+        H.check(not callback, "discarded catalog does not invoke parent callback")
+        H.close_dialogs()
+    end)
+    H.step("QR completion after a real scan checkpoint isolates subsequent writes", function()
+        local root = H.env.evidence .. "/slow-cache"
+        local attributes = lfs.attributes
+        local schedule, refresh = UIManager.scheduleIn, plugin.refreshCacheManagement
+        local checkpoint_seen, qr_completed, refreshed, writes = false, false, false, {}
+        local put_book = plugin.settings.put_book
+        local previous_dir = plugin.settings.cache_dir
+        H.call(function()
+            require("util").makePath(root .. "/900004")
+            for index = 1, 1000 do
+                local file = assert(io.open(root .. "/900004/" .. index .. ".epub", "wb")); file:close()
+            end
+            plugin.settings:set("account", { user_vid = "900099" })
+            plugin.settings.cache_dir = root
+            lfs.attributes = function(path, ...)
+                if path:sub(1, #root + 1) == root .. "/" then ffiutil.usleep(1000) end
+                return attributes(path, ...)
+            end
+            plugin.settings.put_book = function(self, id, value)
+                writes[#writes + 1] = self:get("account", {}).user_vid
+                return put_book(self, id, value)
+            end
+            plugin.refreshCacheManagement = function() refreshed = true end
+            UIManager.scheduleIn = function(self, delay, fn, ...)
+                if plugin._cache_import and not checkpoint_seen then
+                    checkpoint_seen = true
+                    schedule(self, delay, function()
+                        plugin.qr_login:_complete({ succeed = true, webLoginVid = "900000",
+                            accessToken = "mock-access-token", refreshToken = "mock-refresh-token" },
+                            plugin.qr_login.generation)
+                    end)
+                end
+                return schedule(self, delay, fn, ...)
+            end
+            plugin:confirmScanLocalCache()
+        end)
+        H.wait_until("queued real QR completion stops old-account scan", function()
+            qr_completed = plugin.settings:get("account", {}).user_vid == "900000"
+            return checkpoint_seen and qr_completed and not plugin._cache_import and not plugin.busy_message
+        end, 15)
+        H.call(function()
+            lfs.attributes, UIManager.scheduleIn = attributes, schedule
+            plugin.refreshCacheManagement, plugin.settings.put_book = refresh, put_book
+            plugin.settings.cache_dir = previous_dir
+        end)
+        H.equal(#writes, 0, "scan stopped before committing a partially inspected old-account book")
+        H.equal(plugin.settings:get_book("900004"), nil, "new account BookRecords remains untouched")
+        H.equal(plugin.library_db:getBook("900004"), nil, "new account SQLite remains untouched")
+        H.check(not refreshed, "discarded scan does not reopen cache UI")
+    end)
+
 end

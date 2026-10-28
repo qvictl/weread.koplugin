@@ -190,6 +190,12 @@ class MockServer(ThreadingHTTPServer):
                                                       if keyword in b["title"] or keyword in b["author"]])])
             if api == "/book/getprogress":
                 return 200, self.get_progress(book_id)
+            if api == "/readdata/detail":
+                if data.get("mode") not in {"weekly", "monthly", "annually", "overall"}:
+                    raise ValueError("unknown statistics mode")
+                # Synthetic fields already consumed by ReadStats.normalize.
+                return 200, dict(baseTime=1790784000, totalReadTime=7200, readDays=3,
+                                 dayAverageReadTime=2400, readTimes={"1790784000": 7200})
             if api == "/review/list":
                 return 200, dict(reviewsCnt=1, reviewsHasMore=0, reviews=[dict(review=review())])
             if api in {"/book/underlines", "/book/readreviews"}:

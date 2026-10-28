@@ -85,6 +85,10 @@ end
 local content = { saves = 0, save_ok = true, fetches = 0, mp_cached = {} }
 package.preload["weread.lib.content"] = function()
     return {
+        book_resolved_dir = function(_settings, id, book) return book.cache_dir or "/cache/" .. tostring(id) end,
+        create_download_workspace = function(_settings, book) return { path = "/stage/" .. tostring(book.book_id) } end,
+        cleanup_download_workspace = function() return true end,
+        commit_catalog_cache = function(_settings, book) book.cache_dir = "/cache/" .. tostring(book.book_id) return true end,
         load_catalog_cache = function() return content.legacy end,
         catalog_cache_path = function(_settings, book)
             return "/catalog/" .. tostring(book.book_id or book.bookId) .. ".json"
