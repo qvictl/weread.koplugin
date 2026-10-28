@@ -61,7 +61,6 @@ end
 
 local Downloader = {}
 Downloader.__index = Downloader
-local RESUME_SKIP_BATCH_SIZE = 25
 -- Finalize pipeline (footnote rescan and transform of every chapter before
 -- the EPUB is built) runs in time-budgeted batches: one UI step processes
 -- chapters until FINALIZE_BATCH_BUDGET_MS has elapsed (at least one chapter
@@ -1053,10 +1052,11 @@ end
 function Downloader:_skipCompletedChapterBatch(dl)
     local first_index = dl.index
     local skipped = 0
-    while dl.index <= dl.total and dl.completed[dl.index]
-        and skipped < RESUME_SKIP_BATCH_SIZE do
+    local batch_started = self:_now()
+    while dl.index <= dl.total and dl.completed[dl.index] do
         dl.index = dl.index + 1
         skipped = skipped + 1
+        if self:_batchSpent(batch_started) then break end
     end
     if skipped == 0 then return false end
     self:_setStage(dl,
@@ -1387,6 +1387,12 @@ function Downloader:_finishChapter(dl)
     if dl.progress_dialog then
         dl.progress_dialog:reportProgress(dl.index - 1)
     end
+    -- Trapper already yielded to the real UI loop while waiting for this
+    -- chapter's worker (at least its 125 ms poll interval). Starting the next
+    -- worker in the same coroutine avoids another idle 100 ms per chapter.
+    -- Tail calls here and in _step keep the coroutine stack bounded.
+    local co, is_main = coroutine.running()
+    if dl.trapper and co and not is_main then return self:_step(dl) end
     self:_scheduleGuarded(dl, function() self:_step(dl) end)
 end
 
@@ -1762,7 +1768,7 @@ function Downloader:_step(dl)
         assets = result.assets,
         finalized = result.finalized == true,
     }
-    self:_finishChapter(dl)
+    return self:_finishChapter(dl)
 end
 
 return Downloader

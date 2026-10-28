@@ -337,7 +337,9 @@ resumed({ xhtml = "<p>final</p>", assets = {}, state = { css = "body{}" },
 expect(transferred.state.css == "body{}"
     and transferred.book.psvts == "fresh" and transferred.book.token == nil,
     "source result lost CSS/session changes or retained stale credentials")
-expect(child_pending == nil, "a second worker was forked for the chapter images")
+expect(child_pending ~= nil and dialog.title:find("Downloading chapter 2/2:", 1, true)
+    and transferred.current == nil,
+    "the next worker must fetch chapter 2, not re-fetch chapter 1 images")
 expect(transferred.bodies["1"] == "<p>final</p>" and transferred.index == 2
     and #transferred.selected == 1, "finalized child result was not saved in the parent")
 dialog.options.buttons[1][1].callback()

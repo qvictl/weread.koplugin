@@ -275,10 +275,18 @@ for chapter_index = 1, batch_dl.total do
 end
 expect(downloader:_skipCompletedChapterBatch(batch_dl),
     "completed chapter batch was not scheduled")
-expect(batch_dl.index == 26,
-    "resume batch should yield after 25 completed chapters")
+expect(batch_dl.index == 1001,
+    "cheap checkpoint skips should not sleep after each 25 completed chapters")
 expect(#scheduled == 1,
     "resume batch should schedule one continuation instead of one per chapter")
+scheduled = {}
+local clock = 0
+downloader.clock = function() clock = clock + 50000; return clock end
+batch_dl.index = 1
+expect(downloader:_skipCompletedChapterBatch(batch_dl), "costly checkpoint batch did not advance")
+expect(batch_dl.index == 5 and #scheduled == 1,
+    "a checkpoint skip batch must yield after its 200 ms CPU budget")
+downloader.clock = nil
 
 -- F3: a resumable job pauses when the network is gone or chapters keep
 -- failing, instead of trying every remaining chapter.
