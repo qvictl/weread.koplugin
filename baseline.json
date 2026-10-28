@@ -1,17 +1,17 @@
 {
-  "sha": "c405deaf993af89bbf792bd165da524be239f6e9",
-  "date": "2026-10-28T19:53:25+00:00",
+  "sha": "46d3da40488e8c0f5c0ad57ba21ac08888ab691e",
+  "date": "2026-10-28T20:16:17+00:00",
   "unit": {
     "percent": 91.15,
-    "covered": 18798,
-    "executable": 20624,
+    "covered": 18799,
+    "executable": 20625,
     "files": 86
   },
   "combined": {
-    "percent": 93.39,
-    "covered": 19353,
-    "executable": 20722,
+    "percent": 93.38,
+    "covered": 19352,
+    "executable": 20723,
     "files": 86
   },
-  "run": "https://github.com/qvictl/weread.koplugin/actions/runs/40757266322"
+  "run": "https://github.com/qvictl/weread.koplugin/actions/runs/40760848771"
 }
