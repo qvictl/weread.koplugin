@@ -230,6 +230,12 @@ class MockServer(ThreadingHTTPServer):
             return 200, dict(review=review(), comments=[
                 dict(commentId=f"mock-comment-{i}", content=f"合成回复 {i}", author={"nick": "测试读者"}, createTime=1700000000)
                 for i in range(1, 3)], commentsHasMore=0)
+        if path == "/web/mp/articles" and method == "GET":
+            if book_id != "MP_WXS_900000":
+                raise ValueError("unknown synthetic public account")
+            return 200, dict(reviews=[dict(subReviews=[dict(review=dict(
+                reviewId="mock-mp-article", belongBookId=book_id, createTime=1700000000,
+                mpInfo=dict(title="合成公众号文章", originalId="mock-mp-article")))])])
         if path == "/web/book/getProgress" and method == "GET":
             return 200, self.get_progress(book_id)
         if path == "/web/book/read" and method == "POST":

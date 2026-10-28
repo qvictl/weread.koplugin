@@ -49,6 +49,15 @@ class MockTests(unittest.TestCase):
                                         empty_shelf=False, empty_annotations=False, shelf_idless_entry=False,
                                         qr_mode="succeed", qr_delay=0))
 
+    def test_synthetic_mp_article_list(self):
+        status, result = self.request("/web/mp/articles?bookId=MP_WXS_900000&maxIdx=0&count=100")
+        self.assertEqual(status, 200)
+        article = result["reviews"][0]["subReviews"][0]["review"]
+        self.assertEqual(article["reviewId"], "mock-mp-article")
+        self.assertEqual(article["belongBookId"], "MP_WXS_900000")
+        self.assertEqual(article["mpInfo"]["title"], "合成公众号文章")
+        self.assertEqual(self.request("/web/mp/articles?bookId=unknown")[0], 400)
+
     def test_contract_and_real_reference_decoder(self):
         status, shelf = self.gateway("/shelf/sync")
         self.assertEqual(status, 200)
