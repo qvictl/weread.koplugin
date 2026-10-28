@@ -5,7 +5,6 @@
 # .gemini/styleguide.md with the same priorities. The review gate
 # (.github/workflows/review-gate.yml) counts a CodeRabbit review of the head commit and
 # blocks while CodeRabbit's latest decisive review is "Request changes".
-# This file is a sensitive path: changes need a human (`human-approved`).
 
 language: zh-CN
 tone_instructions: >-
@@ -15,14 +14,13 @@ early_access: false
 
 reviews:
   profile: assertive
-  # No approvals and no "Request changes" from CodeRabbit (the former
-  # `request_changes_workflow`): an app approval counts toward the required
-  # approval of `main` and would bypass the review gate, which must be the
-  # only approver (REVIEW_POLICY.md). CodeRabbit's findings block through
-  # their unresolved review threads; the gate counts its "Review completed"
-  # check as the AI review of the head commit.
+  # Request changes for blocking findings; approve once they are resolved and
+  # the latest commit is reviewed (the current name of the former
+  # `request_changes_workflow`). The approval counts as the required approval
+  # of `main`; the review gate approves too and dismisses bot approvals when a
+  # check fails or a thread is open (REVIEW_POLICY.md).
   auto_approvals:
-    enabled: false
+    enabled: true
     allow_author_approval: false
   high_level_summary: true
   high_level_summary_in_walkthrough: true
@@ -83,10 +81,10 @@ reviews:
         - Non-public WeRead APIs need a reproducible Python verification script in `scripts/` before the Lua implementation.
     - path: "{weread/lib/updater.lua,weread/ui/updater.lua}"
       instructions: |
-        In-app updater: pushes releases to devices. Sensitive path, a human must approve. Check origin / integrity verification of downloads, atomic replace with rollback, no update without user consent, and that the version comparison cannot be downgraded or spoofed.
+        In-app updater: pushes releases to devices. Review with extra care, it merges without a human. Check origin / integrity verification of downloads, atomic replace with rollback, no update without user consent, and that the version comparison cannot be downgraded or spoofed.
     - path: "{weread/lib/client.lua,weread/lib/cookie.lua,weread/lib/crypto.lua,weread/lib/qr_login.lua,weread/lib/worker_settings.lua,weread/lib/protocol.lua}"
       instructions: |
-        Credentials, cookies, signing and crypto: sensitive. Check that secrets never reach logs or errors, cookies are scoped to WeRead hosts and stripped on cross-origin redirects, crypto helpers are correct for edge cases (empty input, multi-block, UTF-8), and that QR-login polling has timeouts and cancellation.
+        Credentials, cookies, signing and crypto: review with extra care. Check that secrets never reach logs or errors, cookies are scoped to WeRead hosts and stripped on cross-origin redirects, crypto helpers are correct for edge cases (empty input, multi-block, UTF-8), and that QR-login polling has timeouts and cancellation.
     - path: "spec/**"
       instructions: |
         Tests: check they exercise the behaviour the PR changes (not only mocks), that a bug fix's regression test would fail without the fix, that they are deterministic (no sleeps / timing assumptions, no real network), clean up temp files and global state, and stay fast. Flag weakened assertions or deleted tests.
@@ -94,16 +92,16 @@ reviews:
         Emulator scenarios (`spec/emulator/scenarios/`) must cover user-visible fixes and features and run against the local mock WeRead service, never the real one.
     - path: "scripts/**"
       instructions: |
-        Scripts: Python verification scripts must not print or store real API keys, cookies, tokens, full cURL commands or account identifiers. Release / coverage / policy scripts are sensitive paths (a human must approve).
+        Scripts: Python verification scripts must not print or store real API keys, cookies, tokens, full cURL commands or account identifiers. Release / coverage / policy scripts: check that no gate is weakened.
     - path: "{.github,.ci}/**"
       instructions: |
-        CI / policy / release tooling: this is a sensitive path (a human must approve). Check for: weakened or skipped required checks, `pull_request_target` or `workflow_run` jobs that check out or execute PR code, secrets or write tokens exposed to untrusted code, script injection via `${{ github.event.* }}` in `run:`, unpinned or new third-party actions, broadened `permissions:`, and changes that would let a PR approve or merge itself.
+        CI / policy / release tooling: review with extra care (it merges without a human). Check for: weakened or skipped required checks, `pull_request_target` or `workflow_run` jobs that check out or execute PR code, secrets or write tokens exposed to untrusted code, script injection via `${{ github.event.* }}` in `run:`, unpinned or new third-party actions, broadened `permissions:`, and changes that would let a PR approve or merge itself.
     - path: "{REVIEW_POLICY.md,CONTRIBUTING.md,CLAUDE.md,.coderabbit.yaml,.gemini/**,.github/PULL_REQUEST_TEMPLATE.md}"
       instructions: |
-        Policy documents (review / coverage / contribution rules, AI reviewer configuration): sensitive path, a human must approve. Check consistency between REVIEW_POLICY.md, CONTRIBUTING.md, the PR template, .coderabbit.yaml, .gemini/ and the review gate config; flag any loosening of a rule that is not called out in the PR description.
+        Policy documents (review / coverage / contribution rules, AI reviewer configuration): review with extra care. Check consistency between REVIEW_POLICY.md, CONTRIBUTING.md, the PR template, .coderabbit.yaml, .gemini/ and the review gate config; flag any loosening of a rule that is not called out in the PR description.
     - path: "{CHANGELOG.md,_meta.lua}"
       instructions: |
-        Release version / changelog: releases are published to devices by the in-app updater, so version bumps always need a human. `_meta.lua` and `main.lua` versions must match and CHANGELOG.md needs the matching `## [X.Y.Z]` section.
+        Release version / changelog: releases are published to devices by the in-app updater, so check version bumps carefully. `_meta.lua` and `main.lua` versions must match and CHANGELOG.md needs the matching `## [X.Y.Z]` section.
   tools:
     luacheck:
       enabled: true

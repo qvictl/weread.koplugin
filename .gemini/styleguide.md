@@ -55,7 +55,7 @@ Releases reach devices through auto-update, so a merged bug ships to readers.
    the fix; a user-visible change needs an emulator integration scenario;
    changed lines must meet the diff-coverage gates (unit ≥ 80%, unit +
    integration ≥ 90%). Flag tests that assert nothing or only exercise mocks.
-8. **Sensitive paths need a human.** CI workflows, `.ci/`, policy files
+8. **No human reviews the merge: be thorough on high-impact paths.** CI workflows, `.ci/`, policy files
    (`REVIEW_POLICY.md`, `CONTRIBUTING.md`, `.coderabbit.yaml`, `.gemini/`),
    release and version tooling, updaters and credential code. In workflows
    flag `pull_request_target` / `workflow_run` jobs that run PR code, secrets
@@ -83,4 +83,4 @@ Releases reach devices through auto-update, so a merged bug ships to readers.
 - Non-public WeRead APIs need a reproducible Python script in `scripts/` first.
 - The in-app updater (`weread/lib/updater.lua`, `weread/ui/updater.lua`) and
   the version in `_meta.lua` / `main.lua` / `CHANGELOG.md` decide what reaches
-  devices: always a human decision.
+  devices: check them carefully, they ship without a human review.

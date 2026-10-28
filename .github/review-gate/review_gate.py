@@ -5,25 +5,22 @@ Fork-owned tool shared by qvictl/koreader, qvictl/koreader-base and
 qvictl/weread.koplugin (identical file in each; per-repository settings live
 in `config.json` next to it). See REVIEW_POLICY.md for the policy.
 
-The gate approves (as github-actions[bot]) and enables auto-merge only when
-ALL conditions hold on the PR's head commit:
+The gate approves (as github-actions[bot]) and enables auto-merge when ALL
+hard conditions hold on the PR's head commit:
 
-  1. every required status check of the base branch succeeded;
+  1. every required status check of the base branch succeeded (CI, tests
+     policy, coverage gates);
   2. at least one AI reviewer (CodeRabbit / Gemini Code Assist) reviewed the
      head commit and no AI reviewer's latest decisive review requests changes;
-  3. no unresolved review thread;
-  4. at most `max_changed_lines` changed lines outside tests and docs;
-  5. no sensitive path touched (CI, policy, release, updater, credentials...);
-  6. not a draft, no `do-not-merge` label, author is a collaborator or has
-     a merged PR already.
+  3. no unresolved review thread (resolve after fixing, or after replying
+     with a justification);
+  4. not a draft, no `do-not-merge` label.
 
-The `human-approved` label waives 4, 5 and the first-time-contributor part of
-6, but only when the latest `labeled` event was made by a user with admin or
-maintain permission. It never waives 1-3.
-
-It keeps one sticky PR comment (Chinese) up to date, dismisses its own
-approval when a new commit arrives or a condition stops holding, and only
-disables an auto-merge it enabled itself.
+There is no human gate: if the checks, the AI review and the threads say it
+is fine, it merges; regressions are fixed forward. It keeps one sticky PR
+comment (Chinese) up to date, dismisses its own approval (and bot approvals)
+when a new commit arrives or a condition stops holding, and only disables an
+auto-merge it enabled itself.
 
 Usage:
   review_gate.py --repo OWNER/REPO --pr N         evaluate one PR
@@ -56,12 +53,6 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 MARKER = "<!-- review-gate -->"
 APPROVAL_MARKER = "<!-- review-gate:approve -->"
 AUTOMERGE_STATE = "<!-- review-gate:automerge=on -->"
-# The commit a maintainer's `human-approved` was applied to (head SHA in the
-# `labeled` event's payload), recorded in a separate gate comment.
-OVERRIDE_RE = re.compile(r"<!-- review-gate:override head=([0-9a-f]{40}) -->")
-# The whole body of an override record (and nothing else) must match.
-OVERRIDE_RECORD_RE = re.compile(r"\A审查网关：`human-approved` 由 @[A-Za-z0-9-]+(?:\[bot\])? 添加于提交 `[0-9a-f]{10}`，"
-                                r"[^\n<]*\n<!-- review-gate:override head=([0-9a-f]{40}) -->\Z")
 STATE_RE = re.compile(r"<!-- review-gate:state head=([0-9a-f]+) blockers=([a-z,]*) -->")
 # Scheduled runs re-evaluate a PR only when it may have changed without an
 # event (see schedule_needs_eval); every PR is still refreshed this often.
@@ -78,21 +69,12 @@ AI_REVIEWERS = {
 AI_CHECK_RUNS = {"coderabbitai": ("CodeRabbit", "CodeRabbit")}  # app slug: (check name, reviewer)
 AI_CHECK_DONE = re.compile(r"Review completed", re.IGNORECASE)
 AI_CHECK_NOT_DONE = re.compile(r"skip|pause|fail|error|cancel", re.IGNORECASE)
-OVERRIDE_LABEL = "human-approved"
 BLOCK_LABEL = "do-not-merge"
-MAINTAINER_ROLES = {"admin", "maintain"}
-COLLABORATOR_ASSOCIATIONS = {"OWNER", "MEMBER", "COLLABORATOR"}
 CHECK_OK = {"success", "neutral", "skipped"}
-FILES_API_LIMIT = 3000
 
 DEFAULT_CONFIG: Dict[str, Any] = {
     "merge_method": "MERGE",
     "merge_method_overrides": [],
-    "max_changed_lines": 500,
-    "test_paths": ["spec/**", "**/spec/**", "**/*_spec.lua", "**/test_*.py"],
-    "doc_paths": ["**/*.md", "doc/**", "docs/**"],
-    "sensitive_paths": [".github/**"],
-    "sensitive_line_patterns": [],
     "sync_head_prefix": "sync/upstream-",
 }
 
@@ -237,13 +219,7 @@ class Facts:
     statuses: List[Dict[str, Any]]
     reviews: List[Dict[str, Any]]
     threads: List[Dict[str, Any]]
-    files: List[Dict[str, Any]]
     ai_activity: bool
-    override_actor: Optional[str] = None
-    override_role: Optional[str] = None
-    override_error: Optional[str] = None
-    override_head: Optional[str] = None
-    author_merged_prs: Optional[int] = None
     auto_merge: Optional[Dict[str, Any]] = None
     pr_node_id: Optional[str] = None
     sticky: Optional[Dict[str, Any]] = None
@@ -262,9 +238,7 @@ class Facts:
 
 
 def collect(gh: GitHub, repo: str, number: int, repo_info: Optional[Dict[str, Any]] = None,
-            branch_cache: Optional[Dict[str, Any]] = None, label_head: Optional[str] = None) -> Facts:
-    """`label_head`: head SHA from the payload of the `labeled` event that added
-    `human-approved` (only set for that event's own run)."""
+            branch_cache: Optional[Dict[str, Any]] = None) -> Facts:
     owner, name = repo.split("/", 1)
     repo_info = repo_info or gh.get("repos/%s" % repo)
     pr = gh.get("repos/%s/pulls/%d" % (repo, number))
@@ -291,7 +265,6 @@ def collect(gh: GitHub, repo: str, number: int, repo_info: Optional[Dict[str, An
     check_runs = gh.get_all("repos/%s/commits/%s/check-runs" % (repo, head), key="check_runs")
     statuses = gh.get_all("repos/%s/commits/%s/statuses" % (repo, head))
     reviews = gh.get_all("repos/%s/pulls/%d/reviews" % (repo, number))
-    files = gh.get_all("repos/%s/pulls/%d/files" % (repo, number), limit=FILES_API_LIMIT)
     comments = gh.get_all("repos/%s/issues/%d/comments" % (repo, number))
 
     threads: List[Dict[str, Any]] = []
@@ -318,60 +291,10 @@ def collect(gh: GitHub, repo: str, number: int, repo_info: Optional[Dict[str, An
         repo=repo, pr=pr, owner_login=repo_info["owner"]["login"],
         default_branch=repo_info["default_branch"], allow_auto_merge=repo_info.get("allow_auto_merge"),
         required_checks=required, required_checks_error=required_error, check_runs=check_runs,
-        statuses=statuses, reviews=reviews, threads=threads, files=files, ai_activity=ai_activity,
+        statuses=statuses, reviews=reviews, threads=threads, ai_activity=ai_activity,
         auto_merge=auto_merge, pr_node_id=node_id, sticky=sticky)
 
-    if OVERRIDE_LABEL in facts.labels:
-        facts.override_actor, facts.override_role, facts.override_error = labeler_role(
-            gh, repo, number, facts.owner_login)
-        facts.override_head = label_head or bound_override_head(comments)
-        if not facts.override_error and facts.override_head != head:
-            facts.override_error = (
-                "它是在提交 `%s` 上添加的，当前 head 是 `%s`：管理员看过新改动后需移除并重新添加"
-                % (facts.override_head[:10], head[:10]) if facts.override_head else
-                "网关没有记录到它添加时的提交（例如那次运行被取消）：请移除并重新添加")
-
-    if pr.get("author_association") not in COLLABORATOR_ASSOCIATIONS and facts.author:
-        query = urllib.parse.quote("repo:%s is:pr is:merged author:%s" % (repo, facts.author))
-        try:
-            facts.author_merged_prs = int(gh.get("search/issues?q=%s&per_page=1" % query)["total_count"])
-        except ApiError:
-            facts.author_merged_prs = None
     return facts
-
-
-def bound_override_head(comments: List[Dict[str, Any]]) -> Optional[str]:
-    """Head SHA from the gate's latest override record. Records are separate
-    comments that only the run of a `labeled` event creates and nothing
-    edits, so concurrent runs updating the sticky comment cannot lose them."""
-    head = None
-    for c in comments:
-        if (c.get("user") or {}).get("login") == GATE_LOGIN:
-            m = OVERRIDE_RECORD_RE.match(c.get("body", ""))
-            if m:
-                head = m.group(1)
-    return head
-
-
-def labeler_role(gh: GitHub, repo: str, number: int, owner_login: str) -> Tuple[Optional[str], Optional[str], Optional[str]]:
-    """Who applied the override label last, and their permission (fail closed)."""
-    try:
-        events = gh.get_all("repos/%s/issues/%d/events" % (repo, number))
-    except ApiError as err:
-        return None, None, "无法读取标签事件：%s" % err
-    actor = None
-    for event in events:
-        if event.get("event") == "labeled" and (event.get("label") or {}).get("name") == OVERRIDE_LABEL:
-            actor = (event.get("actor") or {}).get("login")
-    if not actor:
-        return None, None, "找不到 `%s` 的打标签事件" % OVERRIDE_LABEL
-    if actor == owner_login:
-        return actor, "admin", None
-    try:
-        perm = gh.get("repos/%s/collaborators/%s/permission" % (repo, urllib.parse.quote(actor)))
-    except ApiError as err:
-        return actor, None, "无法确认 @%s 的权限：%s" % (actor, err)
-    return actor, perm.get("role_name") or perm.get("permission"), None
 
 
 # --------------------------------------------------------------------------
@@ -383,15 +306,12 @@ class Condition:
     title: str
     ok: bool
     detail: str
-    waived: bool = False
     pending: bool = False
 
 
 @dataclass
 class Verdict:
     conditions: List[Condition]
-    override: bool
-    override_note: str
     approvable: bool
     approvable_note: str
     is_sync: bool
@@ -401,11 +321,11 @@ class Verdict:
 
     @property
     def ok(self) -> bool:
-        return all(c.ok or c.waived for c in self.conditions) and self.approvable
+        return all(c.ok for c in self.conditions) and self.approvable
 
     @property
     def blockers(self) -> List[Condition]:
-        return [c for c in self.conditions if not (c.ok or c.waived)]
+        return [c for c in self.conditions if not c.ok]
 
 
 def newest(runs: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -527,105 +447,17 @@ def check_threads(facts: Facts) -> Condition:
                      % (len(open_threads), "；".join(links), more))
 
 
-def changed_lines(facts: Facts, config: Dict[str, Any]) -> Tuple[Optional[int], List[str]]:
-    if facts.pr.get("changed_files", 0) > len(facts.files):
-        return None, []
-    total, counted = 0, []
-    excluded = list(config["test_paths"]) + list(config["doc_paths"])
-    for f in facts.files:
-        if match_any(f["filename"], excluded):
-            continue
-        n = int(f.get("additions", 0)) + int(f.get("deletions", 0))
-        total += n
-        if n:
-            counted.append(f["filename"])
-    return total, counted
-
-
-def check_size(facts: Facts, config: Dict[str, Any]) -> Condition:
-    limit = int(config["max_changed_lines"])
-    title = "非测试、非文档改动 ≤ %d 行" % limit
-    total, counted = changed_lines(facts, config)
-    if total is None:
-        return Condition("size", title, False, "改动文件数 %d 超过 API 上限，无法统计" % facts.pr.get("changed_files", 0))
-    if total <= limit:
-        return Condition("size", title, True, "%d 行（%d 个文件）" % (total, len(counted)))
-    return Condition("size", title, False, "%d 行，超过 %d 行（需拆分 PR，或由管理员加 `%s`）" % (total, limit, OVERRIDE_LABEL))
-
-
-def changed_patch_lines(patch: str) -> List[str]:
-    return [line[1:] for line in patch.splitlines()
-            if line[:1] in "+-" and not line.startswith(("+++", "---"))]
-
-
-def sensitive_hits(facts: Facts, config: Dict[str, Any]) -> List[str]:
-    hits = []
-    for f in facts.files:
-        names = [f["filename"]] + ([f["previous_filename"]] if f.get("previous_filename") else [])
-        hit = None
-        for path in names:
-            pattern = match_any(path, config["sensitive_paths"])
-            if pattern:
-                hit = "`%s`（%s）" % (path, pattern)
-                break
-            for rule in config["sensitive_line_patterns"]:
-                if not glob_to_regex(rule["path"]).match(path):
-                    continue
-                patch = f.get("patch")
-                if patch is None:
-                    hit = "`%s`（%s；无法读取 diff）" % (path, rule["description"])
-                    break
-                regex = re.compile(rule["regex"])
-                if any(regex.search(line) for line in changed_patch_lines(patch)):
-                    hit = "`%s`（%s）" % (path, rule["description"])
-                    break
-            if hit:
-                break
-        if hit:
-            hits.append(hit)
-    return hits
-
-
-def check_sensitive(facts: Facts, config: Dict[str, Any]) -> Condition:
-    title = "未触及敏感路径"
-    if facts.pr.get("changed_files", 0) > len(facts.files):
-        return Condition("sensitive", title, False, "改动文件过多，无法逐一检查")
-    hits = sensitive_hits(facts, config)
-    if not hits:
-        return Condition("sensitive", title, True, "未触及 CI、策略、发布、更新器或凭据相关文件")
-    shown = "、".join(hits[:8]) + ("等 %d 个" % len(hits) if len(hits) > 8 else "")
-    return Condition("sensitive", title, False, "触及：%s。这些改动必须由人审核（管理员确认后加 `%s`）"
-                     % (shown, OVERRIDE_LABEL))
-
-
-def check_eligibility(facts: Facts, override: bool) -> Tuple[Condition, Optional[str]]:
-    """Condition 6. Returns (condition, waivable part that failed)."""
-    title = "非草稿、无 `%s`、作者可信" % BLOCK_LABEL
-    pr = facts.pr
-    problems, first_timer = [], None
-    if pr.get("draft"):
+def check_eligibility(facts: Facts) -> Condition:
+    """Condition 4."""
+    title = "非草稿、无 `%s`" % BLOCK_LABEL
+    problems = []
+    if facts.pr.get("draft"):
         problems.append("PR 仍是草稿")
     if BLOCK_LABEL in facts.labels:
         problems.append("有 `%s` 标签" % BLOCK_LABEL)
-    assoc = pr.get("author_association", "NONE")
-    if facts.author == GATE_LOGIN:
-        return Condition("eligible", title, False, "；".join(
-            problems + ["作者是 github-actions[bot]（自动化 PR），网关不能批准，见下方说明"])), None
-    if assoc in COLLABORATOR_ASSOCIATIONS:
-        who = "作者 @%s 是仓库协作者（%s）" % (facts.author, assoc)
-    elif facts.author_merged_prs:
-        who = "外部作者 @%s 已有 %d 个合并的 PR" % (facts.author, facts.author_merged_prs)
-    else:
-        first_timer = "外部作者 @%s 尚无合并过的 PR（首次贡献）" % facts.author
-        if facts.author_merged_prs is None and assoc not in ("FIRST_TIME_CONTRIBUTOR", "FIRST_TIMER", "NONE"):
-            first_timer += "，或无法查询"
-        who = first_timer
     if problems:
-        return Condition("eligible", title, False, "；".join(problems + [who])), first_timer
-    if first_timer:
-        return Condition("eligible", title, False, who + "：需管理员加 `%s`" % OVERRIDE_LABEL,
-                         waived=override), first_timer
-    return Condition("eligible", title, True, who), None
+        return Condition("eligible", title, False, "；".join(problems))
+    return Condition("eligible", title, True, "可以合并")
 
 
 def merge_method_for(facts: Facts, config: Dict[str, Any]) -> str:
@@ -637,37 +469,16 @@ def merge_method_for(facts: Facts, config: Dict[str, Any]) -> str:
 
 
 def evaluate(facts: Facts, config: Dict[str, Any]) -> Verdict:
-    override, override_note = False, ""
-    if OVERRIDE_LABEL in facts.labels:
-        if facts.override_error:
-            override_note = "`%s` 无效：%s" % (OVERRIDE_LABEL, facts.override_error)
-        elif facts.override_role in MAINTAINER_ROLES:
-            override = True
-            override_note = "`%s` 由 @%s（%s）添加：豁免第 4、5 项和首次贡献者限制（不豁免 1–3）" % (
-                OVERRIDE_LABEL, facts.override_actor, facts.override_role)
-        else:
-            override_note = "`%s` 被忽略：最后添加它的 @%s 权限为 %s，只有 admin / maintain 才有效" % (
-                OVERRIDE_LABEL, facts.override_actor, facts.override_role or "未知")
-
-    size = check_size(facts, config)
-    sensitive = check_sensitive(facts, config)
-    if override:
-        size.waived = not size.ok
-        sensitive.waived = not sensitive.ok
-    eligible, _ = check_eligibility(facts, override)
-    conditions = [check_required(facts), check_ai(facts), check_threads(facts), size, sensitive, eligible]
-
+    conditions = [check_required(facts), check_ai(facts), check_threads(facts), check_eligibility(facts)]
     is_sync = facts.pr["head"]["ref"].startswith(config.get("sync_head_prefix", "sync/upstream-")) or \
         "upstream-sync" in facts.labels
     approvable, approvable_note = True, ""
     if facts.author == GATE_LOGIN:
         approvable = False
-        approvable_note = ("本 PR 由 github-actions[bot] 创建（上游同步 PR）。GitHub 不允许 github-actions 批准自己创建的 PR，"
-                           "所以网关永远不会批准它：需要仓库所有者审核后手动批准并合并；或配置 `SYNC_TOKEN`，"
-                           "让同步 PR 以所有者身份创建（届时仍需满足 1–3 并由管理员加 `%s`）。" % OVERRIDE_LABEL)
-    verdict = Verdict(conditions, override, override_note, approvable, approvable_note, is_sync,
-                      merge_method_for(facts, config))
-    return verdict
+        approvable_note = ("本 PR 由 github-actions[bot] 创建。GitHub 不允许 github-actions 批准自己创建的 PR，网关不能批准它："
+                           "CodeRabbit 的批准（满足条件时自动给出）或所有者的批准都可以；配置 `SYNC_TOKEN` 后同步 PR 以所有者"
+                           "身份创建，网关就能批准。")
+    return Verdict(conditions, approvable, approvable_note, is_sync, merge_method_for(facts, config))
 
 
 # --------------------------------------------------------------------------
@@ -676,8 +487,6 @@ def evaluate(facts: Facts, config: Dict[str, Any]) -> Verdict:
 def icon(c: Condition) -> str:
     if c.ok:
         return "✅"
-    if c.waived:
-        return "☑️"
     return "⏳" if c.pending else "❌"
 
 
@@ -698,17 +507,13 @@ def render(facts: Facts, verdict: Verdict, automerge_on: bool) -> str:
               "%s · 提交 `%s` · 合并方式 `%s`" % (status, head[:10], verdict.merge_method.lower()), "",
               "| # | 条件 | 状态 | 说明 |", "|---|---|---|---|"]
     for i, c in enumerate(verdict.conditions, 1):
-        detail = c.detail + ("（已被 `%s` 豁免）" % OVERRIDE_LABEL if c.waived else "")
-        detail = detail.replace("|", "\\|").replace("\n", " ").replace("<", "&lt;")  # no HTML from PR data
+        detail = c.detail.replace("|", "\\|").replace("\n", " ").replace("<", "&lt;")  # no HTML from PR data
         lines.append("| %d | %s | %s | %s |" % (i, c.title, icon(c), detail))
     lines.append("")
-    if verdict.override_note:
-        lines += ["**覆盖：** " + verdict.override_note, ""]
     if not verdict.approvable:
         lines += ["**无法自动批准：** " + verdict.approvable_note, ""]
     if verdict.is_sync and verdict.approvable:
-        lines += ["**上游同步 PR：** 改动行数和敏感路径几乎必然超限，需要仓库所有者审核后加 `%s`，并且仍需 AI 审查（可评论 "
-                  "`@coderabbitai review`）。合并时必须用 merge commit。" % OVERRIDE_LABEL, ""]
+        lines += ["**上游同步 PR：** 合并方式为 merge commit（保留上游历史）。", ""]
     for note in verdict.notes:
         lines += ["- " + note]
     lines += ["", "<sub>网关只在全部条件满足时以 github-actions 身份批准并开启自动合并；新提交或条件不再满足时撤销自己的批准。"
@@ -757,14 +562,17 @@ def apply(gh: GitHub, merge_gh: Optional[GitHub], facts: Facts, verdict: Verdict
             to_dismiss.append((review, "审查网关：这条批准不是网关做出的"))
     has_valid = any(r.get("commit_id") == head and APPROVAL_MARKER in (r.get("body") or "")
                     for r in approvals if r not in [d[0] for d in to_dismiss])
-    # Apps with write access (CodeRabbit) count toward the required approval
-    # too: while the gate's conditions do not hold, only humans may approve.
-    if not verdict.ok:
+    # Apps with write access (CodeRabbit) count toward the required approval.
+    # That is fine while the PR is good; dismiss them when something is wrong
+    # (failed check, changes requested, open thread, draft / do-not-merge),
+    # not while results are merely pending.
+    if any(not c.pending for c in verdict.blockers):
         for review in facts.reviews:
             login = (review.get("user") or {}).get("login", "")
             if (review.get("state") == "APPROVED" and login != GATE_LOGIN
                     and (login in AI_REVIEWERS or (review.get("user") or {}).get("type") == "Bot")):
-                to_dismiss.append((review, "审查网关：条件未满足时，机器人（%s）的批准不能代替网关的批准" % login))
+                to_dismiss.append((review, "审查网关：条件未满足（%s），撤销机器人 %s 的批准" % (
+                    "、".join(c.title for c in verdict.blockers if not c.pending), login)))
 
     def run(desc: str, fn: Callable[[], Any]) -> bool:
         if dry_run:
@@ -926,9 +734,9 @@ def find_sticky(comments: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
 
 def process(gh: GitHub, merge_gh: Optional[GitHub], repo: str, number: int, config: Dict[str, Any], dry_run: bool,
             repo_info: Dict[str, Any], branch_cache: Dict[str, Any],
-            defer_automerge: bool = False, label_head: Optional[str] = None) -> Optional[Tuple[str, bool]]:
+            defer_automerge: bool = False) -> Optional[Tuple[str, bool]]:
     try:
-        facts = collect(gh, repo, number, repo_info, branch_cache, label_head)
+        facts = collect(gh, repo, number, repo_info, branch_cache)
     except OutOfScope:
         print("#%d: not an open PR to %s, skipped" % (number, repo_info["default_branch"]))
         return None
@@ -936,14 +744,6 @@ def process(gh: GitHub, merge_gh: Optional[GitHub], repo: str, number: int, conf
     actions, automerge_on = apply(gh, merge_gh, facts, verdict, dry_run, defer_automerge=defer_automerge)
     body = render(facts, verdict, automerge_on)
     result = upsert_comment(gh, facts, body, dry_run)
-    if label_head and facts.override_actor and not dry_run:
-        try:
-            gh.request("POST", "repos/%s/issues/%d/comments" % (repo, number), {"body": (
-                "审查网关：`%s` 由 @%s 添加于提交 `%s`，只对这个提交有效；之后有新提交需重新添加。\n"
-                "<!-- review-gate:override head=%s -->"
-                % (OVERRIDE_LABEL, facts.override_actor, label_head[:10], label_head))})
-        except ApiError as err:
-            print("::warning::#%d: override record not written: %s" % (number, err))
     print("#%d %s: %s; comment %s; actions: %s" % (
         number, facts.head_sha[:10], "OK" if verdict.ok else "blocked by " + ",".join(c.key for c in verdict.blockers),
         result, "; ".join(actions) or "none"))
@@ -980,7 +780,6 @@ def main(argv: Optional[List[str]] = None) -> int:
     repo_info = gh.get("repos/%s" % args.repo)
 
     event_name = os.environ.get("GITHUB_EVENT_NAME", "")
-    label_heads: Dict[int, str] = {}
     numbers: Optional[List[int]]
     if args.pr:
         numbers = [args.pr]
@@ -992,9 +791,6 @@ def main(argv: Optional[List[str]] = None) -> int:
         with open(os.environ["GITHUB_EVENT_PATH"], encoding="utf-8") as fh:
             event = json.load(fh)
         numbers = prs_from_event(gh, args.repo, event_name, event)
-        if (event_name == "pull_request_target" and event.get("action") == "labeled"
-                and (event.get("label") or {}).get("name") == OVERRIDE_LABEL):
-            label_heads[int(event["pull_request"]["number"])] = event["pull_request"]["head"]["sha"]
     if numbers is None:
         open_prs = gh.get_all("repos/%s/pulls?state=open&base=%s" % (
             args.repo, urllib.parse.quote(repo_info["default_branch"], safe="")))
@@ -1018,7 +814,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     for number in sorted(set(numbers)):
         try:
             result = process(gh, merge_gh, args.repo, number, config, dry_run, repo_info, branch_cache,
-                             defer_automerge, label_heads.get(number))
+                             defer_automerge)
             if result:
                 summaries.append(result[0])
                 if result[1]:
