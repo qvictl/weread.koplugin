@@ -126,6 +126,7 @@ class MockServer(ThreadingHTTPServer):
         self.lock = threading.Lock()
         self.log_path = log_path
         self.events = deque(maxlen=500)
+        self.started_counts = {}
         self.progress = {}
         self.control = dict(delay=0, match="", status=503, times=0, drop=False,
                             empty_shelf=False, empty_annotations=False, shelf_idless_entry=False,
@@ -152,6 +153,8 @@ class MockServer(ThreadingHTTPServer):
         query = parse_qs(url.query)
         api = data.get("api_name", "") if path == "/api/agent/gateway" else ""
         with self.lock:
+            request_key = api or path
+            self.started_counts[request_key] = self.started_counts.get(request_key, 0) + 1
             control = self.control.copy()
             matches = not control["match"] or control["match"] in (api or path)
             fail = matches and control["times"] != 0
@@ -359,6 +362,7 @@ class Handler(BaseHTTPRequestHandler):
             elif path.path == "/__state" and self.command == "GET":
                 with self.server.lock:
                     status, result = 200, dict(control=self.server.control.copy(), requests=list(self.server.events),
+                                               started_counts=self.server.started_counts.copy(),
                                                progress=self.server.progress.copy(),
                                                progress_history=list(self.server.progress_history))
             elif path.path == "/__progress" and self.command == "POST":
