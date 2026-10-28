@@ -18,7 +18,7 @@ package.preload["logger"] = function()
 end
 package.preload["weread.lib.thoughts"] = function() return {} end
 
-local function quoted(path) return string.format("%q", path) end
+local function quoted(path) return "'" .. path:gsub("'", "'\\''") .. "'" end
 local function read_file(path)
     local file = io.open(path, "rb")
     if not file then return nil end
@@ -459,6 +459,29 @@ expect(Content.rewrite_image_sources(xhtml, { ["a.jpg"] = "../images/a.jpg",
     ["b.png"] = "../images/b-2.png" })
     == [[<img src="../images/a.jpg"/><img src='../images/b-2.png'/><img src="c.gif"/>]],
     "image sources were not rewritten by basename")
+
+-- All output formats must preserve a user-selected literal directory.
+local literal_settings = { cache_dir = root .. "/reader's $WEREAD_LITERAL_DIRECTORY with spaces" }
+local literal_chapter = { chapterUid = 1, title = "One" }
+local literal_single = Content.save_chapter_epub(literal_settings,
+    { book_id = "literal-single", title = "Literal" }, literal_chapter, "<p>one</p>")
+local literal_full_book = { book_id = "literal-full", title = "Literal" }
+local literal_full = Content.save_book_epub(literal_settings, literal_full_book,
+    { literal_chapter }, { ["1"] = "<p>one</p>" }, "full")
+local literal_article = Content.save_mp_article_html(literal_settings,
+    { book_id = "literal-article" }, { title = "Article" }, "<p>article</p>")
+for _, path in ipairs({ literal_single, literal_full, literal_article }) do
+    expect(path:sub(1, #literal_settings.cache_dir + 1) == literal_settings.cache_dir .. "/" and exists(path),
+        "an output format did not preserve the literal directory: " .. path)
+end
+local literal_full_data = read_file(literal_full)
+archiver.fail_memory = "OEBPS/toc.ncx"
+local literal_ok = pcall(Content.save_book_epub, literal_settings, literal_full_book,
+    { literal_chapter }, { ["1"] = "<p>replacement</p>" }, "full")
+archiver.fail_memory = nil
+expect(not literal_ok and read_file(literal_full) == literal_full_data
+        and no_leftovers(literal_full_book.cache_dir),
+    "failed literal-directory EPUB save damaged the old book or left temporary files")
 
 assert(os.execute("rm -rf " .. quoted(root)))
 print(("content_epub_packaging_spec: %d checks"):format(checks))
