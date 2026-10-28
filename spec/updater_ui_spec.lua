@@ -32,15 +32,34 @@ package.preload["ui/uimanager"] = function()
         unschedule = function() end,
     }
 end
+local dialogs = {}
 package.preload["weread.ui.download_dialog"] = function()
-    return { new = function(_, value) return value end }
+    return {
+        new = function(_, value)
+            value.show = function(self) self.shown = true end
+            value.close = function(self) self.closed = true end
+            value.setTitle = function(self, title) self.title = title end
+            value.reportProgress = function(self, percent) self.percent = percent end
+            dialogs[#dialogs + 1] = value
+            return value
+        end,
+    }
 end
 package.preload["weread.lib.logger"] = function()
     return { warn = function() end, err = function() end }
 end
+-- Real dictionary: the language follows saved_language (English when unset,
+-- as no gettext is loaded in standalone LuaJIT).
+local saved_language
+G_reader_settings = {
+    readSetting = function(_self, key)
+        assert(key == "language")
+        return saved_language
+    end,
+}
 package.preload["weread.lib.plugin_util"] = function()
     return {
-        tr = function(value) return value end,
+        tr = function(value) return require("weread.lib.i18n").tr(value) end,
         T = function(template, ...)
             local values = { ... }
             return (template:gsub("%%(%d+)", function(index)
@@ -186,5 +205,70 @@ expect(installed == install_release, "install button did not use the displayed r
 local scheduled_count = #scheduled
 install_button.callback()
 expect(#scheduled == scheduled_count, "double activation scheduled two installs")
+
+-- Regression: updater failures (e.g. a checksum mismatch) were shown in
+-- English in the Chinese UI. lib/updater returns English text from the forked
+-- worker; UpdaterUI translates it when the dialog is displayed.
+local function failed_install(err)
+    core.install_release = function(_self, _release, on_progress)
+        on_progress{ stage = "verifying", percent = 82 }
+        return nil, err
+    end
+    shown_widget = nil
+    UpdaterUI.install(ui, { version = "0.9.0" })
+    expect(dialogs[#dialogs].closed, "progress dialog must close after a failure")
+    return shown_widget and shown_widget.text
+end
+
+saved_language = "zh_CN.UTF-8"
+expect(failed_install("SHA-256 verification failed") == "安装更新失败：\nSHA-256 校验失败",
+    "checksum mismatch must be shown in Chinese")
+expect(failed_install("HTTP 404") == "安装更新失败：\n服务器返回 HTTP 404",
+    "HTTP status must be shown in Chinese")
+expect(failed_install("HTTP timeout") == "安装更新失败：\n网络错误：timeout",
+    "transport errors must keep the raw detail inside a Chinese message")
+expect(failed_install("cannot create staging directory: No space left on device")
+    == "安装更新失败：\n无法创建更新暂存目录：No space left on device",
+    "staging failure must keep the OS detail inside a Chinese message")
+expect(failed_install(nil) == "安装更新失败：\n未知错误", "missing error must be translated")
+expect(failed_install("/x: Permission denied") == "安装更新失败：\n/x: Permission denied",
+    "unknown OS errors must be shown unchanged")
+ui.check = UpdaterUI.check
+ui.is_connected = function() return true end
+core.fetch_release = function() return nil, "invalid GitHub response" end
+shown_widget = nil
+ui:check(true)
+expect(shown_widget and shown_widget.text == "检查更新失败：\nGitHub 返回的数据无效",
+    "manual check failure must be shown in Chinese")
+
+-- Every fixed failure message lib/updater can return must be translated.
+-- Prefixes with a variable part ("HTTP ", "...: ") are matched by pattern;
+-- the helpers listed here never reach the UI.
+local internal = {
+    [""] = true, error = true, ["could not rewind file"] = true,
+    ["invalid directory"] = true, ["directory cleanup unavailable"] = true,
+}
+local literals = 0
+for line in io.lines("weread/lib/updater.lua") do
+    if line:find("nil,", 1, true) or line:find('limit_error = "', 1, true) then
+        for literal in line:gmatch('"([^"]*)"') do
+            if not internal[literal] and not literal:match("[ :]$") then
+                literals = literals + 1
+                local display = UpdaterUI.display_error(literal)
+                expect(display ~= literal and not display:find("%a%a%a%a%a %a%a%a"),
+                    "untranslated updater error: " .. literal)
+            end
+        end
+    end
+end
+expect(literals >= 20, "updater error scan found too few messages")
+
+saved_language = nil
+expect(failed_install("SHA-256 verification failed")
+    == "Update installation failed:\nSHA-256 verification failed",
+    "English UI must keep the original message")
+expect(UpdaterUI.display_error("HTTP 503") == "Server returned HTTP 503"
+    and UpdaterUI.display_error("") == "Unknown error",
+    "English fallback for variable messages")
 
 print(("updater_ui_spec: %d checks"):format(checks))
