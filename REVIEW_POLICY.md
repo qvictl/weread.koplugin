@@ -12,30 +12,28 @@
 | 审查者 | 角色 | 配置 |
 |---|---|---|
 | [CodeRabbit](https://github.com/apps/coderabbitai) | 主审查。每次推送增量审查；有阻断性问题时 **Request changes**，问题解决且最新提交审查通过后自动 **Approve**（这个批准可以满足 `main` 的“需要 1 个批准”） | [`.coderabbit.yaml`](.coderabbit.yaml) |
-| [Gemini Code Assist](https://github.com/apps/gemini-code-assist) | 第二意见。PR 打开时审查；之后的推送评论 `/gemini review` 请它重新审查 | [`.gemini/config.yaml`](.gemini/config.yaml)、[`.gemini/styleguide.md`](.gemini/styleguide.md) |
 
-两个 AI 审查者的重点相同：512 MB Kindle 上的内存占用；绝不阻塞 UI 线程（事件处理里的网络、磁盘、DNS）；
+审查重点（`.coderabbit.yaml` 的 path instructions）：512 MB Kindle 上的内存占用；绝不阻塞 UI 线程（事件处理里的网络、磁盘、DNS）；
 子进程 / fork 安全；休眠 / 唤醒生命周期；Lua 陷阱（全局变量、nil 解引用、模式字符串转义）；KOReader 控件生命周期
 （paint 前先有 `dimen`）；测试是否满足覆盖率策略；WeRead 的密钥 / 隐私和 i18n 规则。摘要用简体中文，行内评论可以是英文。
 
 ## 处理审查意见
 
-- AI 标为 **潜在问题 / bug** 的评论（CodeRabbit 的 “Potential issue”、Gemini 的 HIGH / CRITICAL）：修复，或在对话里写明
+- AI 标为 **潜在问题 / bug** 的评论（CodeRabbit 的 “Potential issue”）：修复，或在对话里写明
   理由（为什么不是问题、为什么不在本 PR 修），然后 agent 自己把对话标为已解决。不回复就 Resolve 不行。
 - 其他建议（Nitpick、Refactor suggestion、MEDIUM / LOW）：采纳，或简短说明后解决。
-- 需要 AI 重新审查最新提交时，评论 `@coderabbitai review` 或 `/gemini review`。
+- 需要 AI 重新审查最新提交时，评论 `@coderabbitai review`。
 
 ## 自动批准与自动合并的条件
 
 网关（github-actions[bot]）在下面 **全部** 条件对 PR 的最新提交（head SHA）成立时批准，并开启自动合并
 （squash，上游同步分支 `sync/upstream-*` 用 merge commit，保留与上游共享的历史）：
 
-1. **必需检查全部成功**：`main` 分支保护要求的检查（网关运行时从分支保护读取；撰写本文时为 `ci`、`integration`、`tests-policy`，
+1. **必需检查全部成功**：`main` 分支保护要求的检查（网关运行时从分支保护读取；撰写本文时为 `ci`、`integration`、`tests-policy`；以分支保护为准，
    包括测试策略和覆盖率门禁）都成功（`success` / `neutral` / `skipped`）。排队或重跑中的检查算未完成。
-2. **AI 审查已完成且没有 Request changes**：至少一个 AI 审查者（`coderabbitai[bot]` 或 `gemini-code-assist[bot]`）
-   审查过 head SHA——提交了 `commit_id` 等于 head 的审查，或者（CodeRabbit 没有意见时不发 review）`coderabbitai` 应用在
-   该提交上最新的 `CodeRabbit` 检查已完成、结论为 success 且为 “Review completed”；并且每个 AI 审查者最新的结论性审查
-   （Approve / Request changes）都不是 **Request changes**。
+2. **AI 审查已完成且没有 Request changes**：CodeRabbit（`coderabbitai[bot]`）审查过 head SHA——提交了 `commit_id` 等于 head 的审查，或者（CodeRabbit 没有意见时不发 review）`coderabbitai` 应用在
+   该提交上最新的 `CodeRabbit` 检查已完成、结论为 success 且为 “Review completed”；并且它最新的结论性审查
+   （Approve / Request changes）不是 **Request changes**。（Gemini Code Assist 已按所有者决定停用。）
 3. **没有未解决的审查对话**（过时的对话也算）。
 4. **非草稿，没有 `do-not-merge` 标签。**
 
@@ -48,8 +46,8 @@
 ## 上游同步 PR
 
 *Upstream sync* 的 `sync/upstream-<date>` PR 合并时用 **merge commit**。配置了 `SYNC_TOKEN`（所有者的 PAT）后同步 PR 以所有者
-身份创建，和其他 PR 一样由网关处理；没有 `SYNC_TOKEN` 时 PR 由 `github-actions[bot]` 创建，GitHub 不允许它批准自己的 PR，
-这时 CodeRabbit 的自动批准或所有者的批准可以满足 `main` 的批准要求，网关仍会在条件满足时开启自动合并。
+身份创建，和其他 PR 一样由网关处理；没有 `SYNC_TOKEN` 时 PR 由 `github-actions[bot]` 创建，GitHub 不允许它批准自己的 PR，网关既不批准也不开启自动合并：
+CodeRabbit 的自动批准或所有者的批准可以满足 `main` 的批准要求，但需要所有者手动合并。
 
 ## 安全说明
 
@@ -155,12 +153,12 @@ gh api -X PATCH repos/$R/branches/main/protection/required_pull_request_reviews 
 
 - **No human gate** (owner decision, 2026-10-28): if the agent and the AI review think it is fine, it merges; regressions
   are fixed forward. Releases, version bumps, CI and policy changes follow the same flow.
-- **Reviewers:** CodeRabbit (primary; requests changes for blocking findings and auto-approves once resolved — its
-  approval may satisfy the required approval) and Gemini Code Assist (second opinion; `/gemini review` after new pushes).
+- **Reviewer:** CodeRabbit (requests changes for blocking findings and auto-approves once resolved — its approval may
+  satisfy the required approval). Gemini Code Assist was dropped.
 - **Review comments:** potential issues / bugs are fixed or answered with a justification; then the agent resolves the
   thread.
 - **The gate approves and enables auto-merge (squash)** when, on the head SHA: (1) all required checks passed
-  (coverage gates included); (2) an AI reviewer reviewed the head commit and none's latest decisive review requests
+  (coverage gates included); (2) CodeRabbit reviewed the head commit and its latest decisive review does not request
   changes; (3) no unresolved review thread; (4) not draft, no `do-not-merge`. It dismisses its own approval when a
   condition stops holding, and bot approvals on hard failures.
 - **Auto-merge** uses the owner's PAT from environment `review-gate` (main only); a PR that is already mergeable is

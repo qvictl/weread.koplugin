@@ -27,14 +27,6 @@ CONFIG: Dict[str, Any] = dict(rg.DEFAULT_CONFIG)
 CONFIG.update({
     "merge_method": "SQUASH",
     "merge_method_overrides": [{"head_ref": "sync/upstream-*", "method": "MERGE"}],
-    "max_changed_lines": 500,
-    "test_paths": ["spec/**", "**/*_spec.lua", "scripts/test_*.py"],
-    "doc_paths": ["**/*.md", "docs/**"],
-    "sensitive_paths": [".github/**", ".ci/**", "REVIEW_POLICY.md", ".gemini/**", "weread/lib/updater.lua"],
-    "sensitive_line_patterns": [
-        {"path": "main.lua", "regex": "^\\s*version\\s*=", "description": "版本号"},
-        {"path": "weread/lib/client.lua", "regex": "(?i)(cookie|token|auth)", "description": "认证"},
-    ],
 })
 
 
@@ -359,7 +351,7 @@ class RequiredChecksTest(GateCase):
         facts = rg.collect(gh, REPO, 7)
         verdict = rg.evaluate(facts, CONFIG)
         self.assertFalse(verdict.ok)
-        self.assertTrue(next(c for c in verdict.conditions if c.key == "checks").pending)
+        self.assertTrue(next(c for c in verdict.conditions if c.key == "protection").pending)
         rg.apply(gh, gh, facts, verdict, False, log=lambda _m: None)
         self.assertFalse(any(w[1].endswith("/dismissals") for w in gh.writes))
 
@@ -380,7 +372,7 @@ class AiReviewTest(GateCase):
         c = self.cond("ai")
         self.assertFalse(v.ok)
         self.assertTrue(c.pending)
-        self.assertIn("咨询模式", c.detail)
+        self.assertIn("@coderabbitai review", c.detail)
         self.assertFalse(self.approved())
         self.assertIsNone(self.automerge())
 
@@ -390,9 +382,14 @@ class AiReviewTest(GateCase):
         self.assertFalse(self.cond("ai").ok)
         self.assertIn("等待 AI 审查最新提交", self.cond("ai").detail)
 
-    def test_gemini_comment_review_on_head_is_enough(self):
-        self.state["reviews"] = [review("gemini-code-assist[bot]", "COMMENTED")]
+    def test_commented_review_on_head_is_enough(self):
+        self.state["reviews"] = [review("coderabbitai[bot]", "COMMENTED")]
         self.assertTrue(self.run_gate().ok)
+
+    def test_gemini_no_longer_counts(self):
+        # Gemini Code Assist was dropped (owner decision 2026-10-28).
+        self.state["reviews"] = [review("gemini-code-assist[bot]", "APPROVED")]
+        self.assertFalse(self.run_gate().ok)
 
     def cr_run(self, status="completed", conclusion="success",
                summary="Result: Success - Review completed\nRun ID: `x`", title="Finished", slug="coderabbitai"):
@@ -448,9 +445,9 @@ class AiReviewTest(GateCase):
         self.state["reviews"] = [review("someone", "APPROVED")]
         self.assertFalse(self.run_gate().ok)
 
-    def test_changes_requested_blocks_even_if_other_ai_approves(self):
+    def test_changes_requested_blocks_even_with_a_later_comment_on_head(self):
         self.state["reviews"] = [review("coderabbitai[bot]", "CHANGES_REQUESTED", rid=1),
-                                 review("gemini-code-assist[bot]", "COMMENTED", rid=2)]
+                                 review("coderabbitai[bot]", "COMMENTED", rid=2, at="2026-10-27T09:00:00Z")]
         self.run_gate()
         self.assertFalse(self.cond("ai").ok)
         self.assertIn("Request changes", self.cond("ai").detail)
@@ -466,8 +463,8 @@ class AiReviewTest(GateCase):
         self.assertTrue(self.run_gate().ok)
 
     def test_dismissed_approval_still_proves_the_review(self):
-        # The gate dismissed Gemini's approval while blocked; once unblocked it still counts.
-        self.state["reviews"] = [review("gemini-code-assist[bot]", "DISMISSED")]
+        # The gate dismissed CodeRabbit's approval while blocked; once unblocked it still counts.
+        self.state["reviews"] = [review("coderabbitai[bot]", "DISMISSED")]
         self.assertTrue(self.run_gate().ok)
 
     def test_dismissed_changes_request_is_ignored(self):
@@ -653,6 +650,7 @@ class ScheduleTest(GateCase):
         self.assertTrue(self.needs(self.sticky("")))
         self.assertTrue(self.needs(self.sticky("ai,threads")))
         self.assertTrue(self.needs(self.sticky("ai")))
+        self.assertTrue(self.needs(self.sticky("protection")))  # unreadable branch protection: retry soon
         self.assertFalse(self.needs(self.sticky("checks,ai")))
         self.assertFalse(self.needs(self.sticky("sensitive,author")))
         slot = rg.datetime(2026, 10, 28, 12, 7, tzinfo=rg.timezone.utc)

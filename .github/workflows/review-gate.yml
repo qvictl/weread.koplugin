@@ -4,8 +4,8 @@
 # with .github/review-gate/review_gate.py and keeps one sticky comment per PR.
 # It approves as github-actions[bot] and enables auto-merge (squash) when
 # the hard conditions hold: required checks green (coverage gates included),
-# an AI reviewer (CodeRabbit / Gemini Code Assist) reviewed the head commit
-# and none requests changes, no unresolved review thread, not draft / no
+# the AI reviewer (CodeRabbit) reviewed the head commit and does not
+# request changes, no unresolved review thread, not draft / no
 # do-not-merge. No human gate: regressions are fixed forward. It dismisses
 # its own approval (and bot approvals) when a condition stops holding.
 #

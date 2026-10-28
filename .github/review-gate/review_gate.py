@@ -10,8 +10,8 @@ hard conditions hold on the PR's head commit:
 
   1. every required status check of the base branch succeeded (CI, tests
      policy, coverage gates);
-  2. at least one AI reviewer (CodeRabbit / Gemini Code Assist) reviewed the
-     head commit and no AI reviewer's latest decisive review requests changes;
+  2. the AI reviewer (CodeRabbit) reviewed the head commit and its latest
+     decisive review does not request changes;
   3. no unresolved review thread (resolve after fixing, or after replying
      with a justification);
   4. not a draft, no `do-not-merge` label.
@@ -60,7 +60,6 @@ SCHEDULE_REFRESH_HOURS = 6  # full refresh in the first quarter hour of 00, 06, 
 GATE_LOGIN = "github-actions[bot]"
 AI_REVIEWERS = {
     "coderabbitai[bot]": "CodeRabbit",
-    "gemini-code-assist[bot]": "Gemini Code Assist",
 }
 # CodeRabbit also reports every review as a check run on the reviewed commit
 # ("CodeRabbit", summary "Result: Success - Review completed"). When a review
@@ -349,7 +348,7 @@ def check_required(facts: Facts) -> Condition:
     if facts.required_checks_error:
         # Usually transient (rate limit, 5xx, network): pending, so bot
         # approvals are not dismissed for it; the next run re-evaluates.
-        return Condition("checks", title, False, "暂时无法读取 `%s` 的分支保护：%s" % (
+        return Condition("protection", title, False, "暂时无法读取 `%s` 的分支保护：%s" % (
             facts.pr["base"]["ref"], facts.required_checks_error), pending=True)
     if not facts.required_checks:
         return Condition("checks", title, False, "`%s` 没有配置必需检查，网关不会自动批准" % facts.pr["base"]["ref"])
@@ -427,10 +426,10 @@ def check_ai(facts: Facts) -> Condition:
     if running:
         return Condition("ai", title, False, "%s 正在审查 `%s`" % ("、".join(running), head[:10]), pending=True)
     if not facts.ai_activity:
-        return Condition("ai", title, False, "等待 AI 审查：本 PR 尚无 CodeRabbit / Gemini Code Assist 的审查"
-                         "（应用可能尚未安装——咨询模式，网关只报告、不批准）", pending=True)
-    return Condition("ai", title, False, "等待 AI 审查最新提交 `%s`（已审查过旧提交的：%s；可评论 `@coderabbitai review` 或 "
-                     "`/gemini review` 请求重新审查）" % (head[:10], "、".join(sorted(seen)) or "无"), pending=True)
+        return Condition("ai", title, False, "等待 AI 审查：本 PR 尚无 CodeRabbit 的审查"
+                         "（可评论 `@coderabbitai review` 请求审查）", pending=True)
+    return Condition("ai", title, False, "等待 AI 审查最新提交 `%s`（已审查过旧提交的：%s；可评论 "
+                     "`@coderabbitai review` 请求重新审查）" % (head[:10], "、".join(sorted(seen)) or "无"), pending=True)
 
 
 def check_threads(facts: Facts) -> Condition:
@@ -714,10 +713,10 @@ def schedule_needs_eval(pr: Dict[str, Any], sticky: Optional[Dict[str, Any]], no
     head, blockers = m.group(1), set(filter(None, m.group(2).split(",")))
     if head != pr["head"]["sha"]:
         return True, "head moved"
-    if blockers <= {"threads", "ai"}:
+    if blockers <= {"threads", "ai", "protection"}:
         # No event fires when a thread is resolved, nor (in general) when
         # CodeRabbit's check suite completes on a SHA that already has one.
-        return True, "approved or only blocked by AI review / threads"
+        return True, "approved or only blocked by AI review / threads / unreadable protection"
     # The comment is not edited when unchanged, so its age cannot drive the
     # refresh: use fixed slots instead (one scheduled run per slot).
     if now.hour % SCHEDULE_REFRESH_HOURS == 0 and now.minute < 15:

@@ -1,8 +1,7 @@
 # yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
 #
 # CodeRabbit (primary AI reviewer) for qvictl/weread.koplugin. Policy: REVIEW_POLICY.md.
-# Gemini Code Assist (second opinion) reads .gemini/config.yaml and
-# .gemini/styleguide.md with the same priorities. The review gate
+# The review gate
 # (.github/workflows/review-gate.yml) counts a CodeRabbit review of the head commit and
 # blocks while CodeRabbit's latest decisive review is "Request changes".
 
@@ -96,9 +95,9 @@ reviews:
     - path: "{.github,.ci}/**"
       instructions: |
         CI / policy / release tooling: review with extra care (it merges without a human). Check for: weakened or skipped required checks, `pull_request_target` or `workflow_run` jobs that check out or execute PR code, secrets or write tokens exposed to untrusted code, script injection via `${{ github.event.* }}` in `run:`, unpinned or new third-party actions, broadened `permissions:`, and changes that would let a PR approve or merge itself.
-    - path: "{REVIEW_POLICY.md,CONTRIBUTING.md,CLAUDE.md,.coderabbit.yaml,.gemini/**,.github/PULL_REQUEST_TEMPLATE.md}"
+    - path: "{REVIEW_POLICY.md,CONTRIBUTING.md,CLAUDE.md,.coderabbit.yaml,.github/PULL_REQUEST_TEMPLATE.md}"
       instructions: |
-        Policy documents (review / coverage / contribution rules, AI reviewer configuration): review with extra care. Check consistency between REVIEW_POLICY.md, CONTRIBUTING.md, the PR template, .coderabbit.yaml, .gemini/ and the review gate config; flag any loosening of a rule that is not called out in the PR description.
+        Policy documents (review / coverage / contribution rules, AI reviewer configuration): review with extra care. Check consistency between REVIEW_POLICY.md, CONTRIBUTING.md, the PR template, .coderabbit.yaml and the review gate config; flag any loosening of a rule that is not called out in the PR description.
     - path: "{CHANGELOG.md,_meta.lua}"
       instructions: |
         Release version / changelog: releases are published to devices by the in-app updater, so check version bumps carefully. `_meta.lua` and `main.lua` versions must match and CHANGELOG.md needs the matching `## [X.Y.Z]` section.
@@ -137,7 +136,6 @@ knowledge_base:
       - "CONTRIBUTING.md"
       - "CLAUDE.md"
       - "docs/testing.md"
-      - ".gemini/styleguide.md"
   learnings:
     scope: local
   issues:
