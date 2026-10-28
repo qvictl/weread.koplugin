@@ -329,6 +329,7 @@ test("the gateway progress API is the fallback for the web progress", function()
         "time-only report re-asserts the gateway position")
     expect(outcome.book.reported_local == false, "not our own position")
 
+    book = H.ready_book(report, { chapter_offset = 10, progress = 3, reported_local = true })
     outcome = run(report, { guard = {} })
     expect(outcome.accepted == true, "guarded position report accepted")
     expect(outcome.floor and outcome.floor.chapter_uid == 7
