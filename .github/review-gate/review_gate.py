@@ -59,6 +59,9 @@ AUTOMERGE_STATE = "<!-- review-gate:automerge=on -->"
 # The commit a maintainer's `human-approved` was applied to (head SHA in the
 # `labeled` event's payload), recorded in a separate gate comment.
 OVERRIDE_RE = re.compile(r"<!-- review-gate:override head=([0-9a-f]{40}) -->")
+# The whole body of an override record (and nothing else) must match.
+OVERRIDE_RECORD_RE = re.compile(r"\A审查网关：`human-approved` 由 @[A-Za-z0-9-]+(?:\[bot\])? 添加于提交 `[0-9a-f]{10}`，"
+                                r"[^\n<]*\n<!-- review-gate:override head=([0-9a-f]{40}) -->\Z")
 STATE_RE = re.compile(r"<!-- review-gate:state head=([0-9a-f]+) blockers=([a-z,]*) -->")
 # Scheduled runs re-evaluate a PR only when it may have changed without an
 # event (see schedule_needs_eval); every PR is still refreshed this often.
@@ -344,7 +347,7 @@ def bound_override_head(comments: List[Dict[str, Any]]) -> Optional[str]:
     head = None
     for c in comments:
         if (c.get("user") or {}).get("login") == GATE_LOGIN:
-            m = OVERRIDE_RE.search(c.get("body", ""))
+            m = OVERRIDE_RECORD_RE.match(c.get("body", ""))
             if m:
                 head = m.group(1)
     return head
@@ -694,7 +697,8 @@ def render(facts: Facts, verdict: Verdict, automerge_on: bool) -> str:
               "| # | 条件 | 状态 | 说明 |", "|---|---|---|---|"]
     for i, c in enumerate(verdict.conditions, 1):
         detail = c.detail + ("（已被 `%s` 豁免）" % OVERRIDE_LABEL if c.waived else "")
-        lines.append("| %d | %s | %s | %s |" % (i, c.title, icon(c), detail.replace("|", "\\|").replace("\n", " ")))
+        detail = detail.replace("|", "\\|").replace("\n", " ").replace("<", "&lt;")  # no HTML from PR data
+        lines.append("| %d | %s | %s | %s |" % (i, c.title, icon(c), detail))
     lines.append("")
     if verdict.override_note:
         lines += ["**覆盖：** " + verdict.override_note, ""]

@@ -212,8 +212,9 @@ gh api repos/$R --jq '{allow_auto_merge}'
     -F require_code_owner_reviews=false -F require_last_push_approval=false )
 ```
 
-紧急情况（网关或 AI 应用故障且必须合并）：先设 `REVIEW_GATE_DRY_RUN=true`，再按上面的命令回退到 0 个批准；
-处理完后恢复（删除该变量或设为 `false`），并在 PR 中记录原因。
+紧急情况（网关或 AI 应用故障且必须合并）：先设 `REVIEW_GATE_DRY_RUN=true`，再取消所有排队中和运行中的 *Review gate*
+运行（变量不影响已经启动的运行，它们的 `automerge` 作业仍可能开启自动合并或直接合并），确认一个不剩，然后按上面的命令
+回退到 0 个批准；处理完后恢复（删除该变量或设为 `false`），并在 PR 中记录原因。
 
 ```sh
 ( set -euo pipefail
@@ -222,7 +223,16 @@ gh api repos/$R --jq '{allow_auto_merge}'
     gh api -X PATCH repos/$R/actions/variables/REVIEW_GATE_DRY_RUN -f value=true
   else
     gh api -X POST repos/$R/actions/variables -f name=REVIEW_GATE_DRY_RUN -f value=true
-  fi )
+  fi
+  for st in queued in_progress waiting pending requested; do
+    ids=$(gh api --paginate "repos/$R/actions/workflows/review-gate.yml/runs?status=$st&per_page=100" --jq '.workflow_runs[].id')
+    for id in $ids; do gh api -X POST repos/$R/actions/runs/$id/cancel >/dev/null; done
+  done
+  sleep 30
+  for st in queued in_progress waiting pending requested; do
+    left=$(gh api --paginate "repos/$R/actions/workflows/review-gate.yml/runs?status=$st&per_page=100" --jq '.workflow_runs[].id')
+    if [ -n "$left" ]; then echo "review gate runs still $st: $left" >&2; exit 1; fi
+  done )
 ```
 
 ---

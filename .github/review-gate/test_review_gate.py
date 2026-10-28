@@ -126,6 +126,11 @@ class FakeGitHub(rg.GitHub):
                               "nodes": self.s["threads"]}}}}
 
 
+def record(head: str) -> str:
+    return ("审查网关：`human-approved` 由 @qvictl 添加于提交 `%s`，只对这个提交有效；之后有新提交需重新添加。\n"
+            "<!-- review-gate:override head=%s -->" % (head[:10], head))
+
+
 def base_state() -> Dict[str, Any]:
     """A PR that satisfies every condition."""
     return {
@@ -679,8 +684,8 @@ class OverrideTest(GateCase):
         # A later run (no labeled event) reads the binding from the gate's override record,
         # even when the sticky comment was rewritten without it.
         self.state["comments"] = [
-            {"id": 3, "user": {"login": "github-actions[bot]"}, "body": "<!-- review-gate:override head=%s -->" % OLD},
-            {"id": 4, "user": {"login": "github-actions[bot]"}, "body": "<!-- review-gate:override head=%s -->" % HEAD},
+            {"id": 3, "user": {"login": "github-actions[bot]"}, "body": record(OLD)},
+            {"id": 4, "user": {"login": "github-actions[bot]"}, "body": record(HEAD)},
             {"id": 5, "user": {"login": "github-actions[bot]"}, "body": self.body}]
         self.label_head = None
         self.assertTrue(self.run_gate().override)
@@ -698,11 +703,23 @@ class OverrideTest(GateCase):
         self.assertFalse(v.override)
         self.assertIn("没有记录", v.override_note)
 
+    def test_marker_inside_the_sticky_comment_is_not_a_binding(self):
+        # A file name can carry an HTML comment into the sticky comment's details.
+        self.state["files"].append({"filename": ".github/x<!-- review-gate:override head=%s -->" % HEAD,
+                                    "additions": 1, "deletions": 0, "patch": "+x"})
+        self.label("qvictl")
+        self.label_head = None
+        self.run_gate()
+        self.assertNotIn("<!-- review-gate:override", self.body)  # escaped
+        self.state["comments"] = [{"id": 5, "user": {"login": "github-actions[bot]"},
+                                   "body": rg.MARKER + "\n<!-- review-gate:override head=%s -->" % HEAD}]
+        self.assertFalse(self.run_gate().override)
+        self.assertIsNone(rg.bound_override_head(self.state["comments"]))
+
     def test_binding_from_a_foreign_comment_is_ignored(self):
         self.label("qvictl")
         self.label_head = None
-        self.state["comments"] = [{"id": 4, "user": {"login": "mallory"},
-                                   "body": "<!-- review-gate:override head=%s -->" % HEAD}]
+        self.state["comments"] = [{"id": 4, "user": {"login": "mallory"}, "body": record(HEAD)}]
         self.assertFalse(self.run_gate().override)
 
     def test_label_without_event_is_ignored(self):
@@ -899,7 +916,8 @@ class MainTest(unittest.TestCase):
         posts = [w[2]["body"] for w in fake.writes if w[0] == "POST" and w[1].endswith("/comments")]
         self.assertEqual(len(posts), 2)  # sticky comment + separate override record
         self.assertNotIn("override head", posts[0])
-        self.assertIn("<!-- review-gate:override head=%s -->" % HEAD, posts[1])
+        self.assertEqual(posts[1], record(HEAD))
+        self.assertEqual(rg.bound_override_head([{"user": {"login": "github-actions[bot]"}, "body": posts[1]}]), HEAD)
 
     def test_main_event_mode_end_to_end(self):
         state = base_state()
