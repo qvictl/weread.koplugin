@@ -55,7 +55,7 @@ end
 ffi_util_stub.purgeDir = purge_dir
 package.preload["ffi/util"] = function() return ffi_util_stub end
 
-local function quoted(path) return string.format("%q", path) end
+local function quoted(path) return "'" .. path:gsub("'", "'\\''") .. "'" end
 local lfs_reports_times = true
 local function lfs_stub()
     return {
@@ -283,6 +283,22 @@ expect(not exists(root .. "/cache/full-disk/catalog.json.tmp")
     and not exists(root .. "/cache/full-disk/catalog.json"),
     "short catalog write left a temporary or final file")
 
+-- Legal user directory names must be passed literally to the filesystem.
+local literal_settings = { cache_dir = root .. "/reader's $WEREAD_LITERAL_DIRECTORY with spaces" }
+local literal_book = { book_id = "literal-catalog" }
+ok, err = Content.save_catalog_cache(client, literal_settings, literal_book, catalog)
+expect(ok, "catalog save did not preserve the literal directory: " .. tostring(err))
+local literal_catalog = literal_settings.cache_dir .. "/literal-catalog/catalog.json"
+local literal_saved = read_file(literal_catalog)
+expect(literal_saved and literal_book.cache_dir == literal_settings.cache_dir .. "/literal-catalog",
+    "catalog was saved outside the requested literal directory")
+client.fail_encode = true
+local literal_ok = Content.save_catalog_cache(client, literal_settings, literal_book, catalog)
+client.fail_encode = false
+expect(not literal_ok and read_file(literal_catalog) == literal_saved
+        and not exists(literal_catalog .. ".tmp"),
+    "failed catalog save damaged the literal directory or left a temporary file")
+
 -- Catalog helpers -------------------------------------------------------------
 local updated = { { chapterUid = 9 } }
 expect(Content.normalize_chapters({ data = { { bookId = "x", updated = {} },
@@ -331,6 +347,10 @@ expect(#made == 6 and made[1] == book.cache_dir,
     "workspace directories were not created through util.makePath")
 local reopened = Content.open_full_download_workspace(settings, { book_id = "full-book" })
 expect(reopened.text_dir == workspace.text_dir, "reopening the workspace moved it")
+local literal_workspace = Content.open_full_download_workspace(literal_settings, { book_id = "literal-workspace" })
+expect(literal_workspace.path:sub(1, #literal_settings.cache_dir + 1) == literal_settings.cache_dir .. "/"
+        and is_dir(literal_workspace.incoming_dir) and is_dir(literal_workspace.rendered_text_dir),
+    "fallback workspace creation did not preserve the literal directory")
 
 util_stub.makePath = function() return nil, "read-only file system" end
 ok, err = pcall(Content.open_full_download_workspace, settings, { book_id = "ro" })
