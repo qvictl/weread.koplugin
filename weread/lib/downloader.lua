@@ -59,6 +59,12 @@ local function apply_reader_book(book, updated)
     for _, key in ipairs(READER_BOOK_FIELDS) do book[key] = updated[key] end
 end
 
+local function account_id(settings)
+    if not settings or type(settings.get) ~= "function" then return "" end
+    local account = settings:get("account", {})
+    return type(account) == "table" and tostring(account.user_vid or "") or ""
+end
+
 local Downloader = {}
 Downloader.__index = Downloader
 -- Finalize pipeline (footnote rescan and transform of every chapter before
@@ -422,6 +428,9 @@ function Downloader:_ensureProgressDialog(dl)
                     else
                         dl.cancelled = true
                         dl.cancel_reason = dl.cancel_reason or "cancelled"
+                        if dl.mp_article and dl.worker_handle and self.background_worker then
+                            self.background_worker:cancel(dl.worker_handle, "cancelled")
+                        end
                     end
                     if dl.progress_dialog then
                         dl.progress_dialog:close()
@@ -846,6 +855,7 @@ function Downloader:start(book, chapters, suffix, options)
             fallback = 0,
         },
         single_chapter = options.single_chapter == true,
+        mp_article = options.mp_article == true,
         separate_chapters = options.separate_chapters == true,
         include_annotations = false,
         open_on_complete = options.open_on_complete == true,
@@ -857,6 +867,7 @@ function Downloader:start(book, chapters, suffix, options)
         on_complete = options.on_complete,
         started_at = time.now(),
         auth_fingerprint = WorkerSettings.fingerprint(self.settings),
+        account_id = account_id(self.settings),
     }
     self._active_job = dl
 
@@ -871,6 +882,26 @@ function Downloader:start(book, chapters, suffix, options)
         if not called then
             logger.warn("download start callback failed:", log_error(start_err))
         end
+    end
+    if dl.mp_article then
+        if self.is_connected and not self.is_connected() then
+            self:_notifyCompletion(dl, false, "offline")
+            self:_finishJob(dl)
+            self.show_info(_("No network connection. Please connect Wi-Fi and try again."))
+            return false
+        end
+        dl.stage_title = T(_("Downloading article: %1"), chapters[1] and chapters[1].title or "")
+        self:_ensureProgressDialog(dl)
+        self:_scheduleGuarded(dl, function()
+            if self._active_job ~= dl then return end
+            if dl.cancelled then
+                self:_notifyCompletion(dl, false, "cancelled")
+                self:_finishJob(dl)
+                return
+            end
+            require("weread.lib.mp_article_download").start(self, dl)
+        end)
+        return true
     end
     if dl.prefetch then
         notifyStart()

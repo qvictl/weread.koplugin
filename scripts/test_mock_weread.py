@@ -49,12 +49,16 @@ class MockTests(unittest.TestCase):
                                         empty_shelf=False, empty_annotations=False, shelf_idless_entry=False,
                                         qr_mode="succeed", qr_delay=0))
 
-    def test_synthetic_cookie_renewal(self):
-        status, result = self.request("/web/login/renewal", {"rq": "%2Fweb%2Fbook%2Fread", "ql": False})
+    def test_synthetic_mp_content_and_bounded_image_host(self):
+        status, html = self.request("/web/mp/content?reviewId=mock-mp-article")
         self.assertEqual(status, 200)
-        self.assertEqual(result, {"succ": 1})
-        self.assertEqual(self.request("/web/login/renewal", {"rq": "wrong", "ql": False})[0], 400)
-        self.assertEqual(self.request("/web/login/renewal", {"rq": "%2Fweb%2Fbook%2Fread", "ql": True})[0], 400)
+        self.assertIn(b"Synthetic article body.", html)
+        self.assertIn(b"https://mmbiz.qpic.cn/mock/illustration.png", html)
+        status, image = self.request("/__proxy?url=https%3A%2F%2Fmmbiz.qpic.cn%2Fmock%2Fillustration.png")
+        self.assertEqual(status, 200)
+        self.assertTrue(image.startswith(b"\x89PNG"))
+        self.assertEqual(self.request("/web/mp/content?reviewId=unknown")[0], 400)
+        self.assertEqual(self.request("/__proxy?url=https%3A%2F%2Fmmbiz.qpic.cn%2Fapi%2FuserInfo")[0], 501)
 
     def test_synthetic_mp_article_list(self):
         before = self.request("/__state")[1]["started_counts"].get("/web/mp/articles", 0)
@@ -155,6 +159,13 @@ class MockTests(unittest.TestCase):
         events = [e for e in self.request("/__state")[1]["requests"] if e["path"] == "/api/userInfo"]
         self.assertEqual([e["status"] for e in events][-2:], [0, 200])
         self.assertEqual(self.request("/__control", dict(drop="yes"))[0], 400)
+
+    def test_synthetic_cookie_renewal(self):
+        status, result = self.request("/web/login/renewal", {"rq": "%2Fweb%2Fbook%2Fread", "ql": False})
+        self.assertEqual(status, 200)
+        self.assertEqual(result, {"succ": 1})
+        self.assertEqual(self.request("/web/login/renewal", {"rq": "wrong", "ql": False})[0], 400)
+        self.assertEqual(self.request("/web/login/renewal", {"rq": "%2Fweb%2Fbook%2Fread", "ql": True})[0], 400)
 
     def test_qr_login_modes(self):
         status, page = self.request("/__proxy?url=https%3A%2F%2Fweread.qq.com%2Fr%2Fweread-skills")
