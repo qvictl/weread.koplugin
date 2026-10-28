@@ -12,10 +12,17 @@ local function expect(condition, message)
 end
 
 local SQ = require("spec.helpers.ljsqlite3_ffi")
-local saved_util, saved_util_loader = package.loaded["util"], package.preload["util"]
+local module_names = {
+    "util", "weread.lib.logger", "libs/libkoreader-lfs", "lua-ljsqlite3/init",
+    "weread.lib.thoughts", "weread.lib.thought_db", "weread.lib.annotations", "weread.lib.content",
+}
+local saved_modules = {}
+for _, name in ipairs(module_names) do
+    saved_modules[name] = { loaded = package.loaded[name], preload = package.preload[name] }
+end
 local root
 local spec_ok, spec_err = xpcall(function()
-package.loaded["util"], package.preload["util"] = nil, nil
+for _, name in ipairs(module_names) do package.loaded[name], package.preload[name] = nil, nil end
 package.preload["lua-ljsqlite3/init"] = function() return { open = SQ.open } end
 package.preload["libs/libkoreader-lfs"] = function() return SQ.lfs() end
 package.preload["util"] = function() return { makePath = SQ.makePath } end
@@ -247,7 +254,9 @@ expect(merged:find("line-height", 1, true) and merged:sub(-6) == "\nextra",
     "default base CSS not used")
 end, debug.traceback)
 
-package.loaded["util"], package.preload["util"] = saved_util, saved_util_loader
+for _, name in ipairs(module_names) do
+    package.loaded[name], package.preload[name] = saved_modules[name].loaded, saved_modules[name].preload
+end
 package.path = saved_path
 SQ.rmtree(root)
 if not spec_ok then error(spec_err, 0) end

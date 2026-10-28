@@ -13,10 +13,17 @@ local function expect(condition, message)
 end
 
 local SQ = require("spec.helpers.ljsqlite3_ffi")
-local saved_util, saved_util_loader = package.loaded["util"], package.preload["util"]
+local module_names = {
+    "util", "weread.lib.logger", "libs/libkoreader-lfs", "lua-ljsqlite3/init",
+    "weread.lib.thought_db", "weread.lib.annotations",
+}
+local saved_modules = {}
+for _, name in ipairs(module_names) do
+    saved_modules[name] = { loaded = package.loaded[name], preload = package.preload[name] }
+end
 local root
 local spec_ok, spec_err = xpcall(function()
-package.loaded["util"], package.preload["util"] = nil, nil
+for _, name in ipairs(module_names) do package.loaded[name], package.preload[name] = nil, nil end
 
 local warnings = {}
 package.preload["weread.lib.logger"] = function()
@@ -294,7 +301,9 @@ expect(#ThoughtDB.getReviewItems(db, 101, "70-80") == 0, "removed database kept 
 ThoughtDB.close(db)
 end, debug.traceback)
 
-package.loaded["util"], package.preload["util"] = saved_util, saved_util_loader
+for _, name in ipairs(module_names) do
+    package.loaded[name], package.preload[name] = saved_modules[name].loaded, saved_modules[name].preload
+end
 package.path = saved_path
 SQ.rmtree(root)
 if not spec_ok then error(spec_err, 0) end
