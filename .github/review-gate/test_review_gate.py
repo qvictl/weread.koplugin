@@ -78,17 +78,8 @@ class FakeGitHub(rg.GitHub):
             return s["statuses"]
         if path == "repos/%s/pulls/%d/reviews" % (REPO, n):
             return s["reviews"]
-        if path == "repos/%s/pulls/%d/files" % (REPO, n):
-            return s["files"]
         if path == "repos/%s/issues/%d/comments" % (REPO, n):
             return s["comments"]
-        if path == "repos/%s/issues/%d/events" % (REPO, n):
-            return s["events"]
-        if path.startswith("repos/%s/collaborators/" % REPO):
-            user = path.split("/")[4]
-            return {"role_name": s["roles"].get(user, "none"), "permission": s["roles"].get(user, "none")}
-        if path == "search/issues":
-            return {"total_count": s["merged_prs"]}
         if path.endswith("/check-suites"):
             return {"check_suites": s.get("suites", [{"created_at": "2026-10-27T08:00:00Z"}])}
         if path.startswith("repos/%s/commits/" % REPO) and path.endswith("/pulls"):
@@ -142,12 +133,7 @@ def base_state() -> Dict[str, Any]:
         "reviews": [review("coderabbitai[bot]", "APPROVED")],
         "threads": [{"isResolved": True, "isOutdated": False, "path": "a.lua",
                      "comments": {"nodes": [{"author": {"login": "coderabbitai"}, "url": "u"}]}}],
-        "files": [{"filename": "weread/lib/thing.lua", "additions": 10, "deletions": 2, "patch": "+x\n-y"},
-                  {"filename": "spec/thing_spec.lua", "additions": 900, "deletions": 0, "patch": "+t"}],
         "comments": [],
-        "events": [],
-        "roles": {},
-        "merged_prs": 0,
         "auto_merge": None,
     }
 
@@ -366,6 +352,17 @@ class RequiredChecksTest(GateCase):
         self.state["statuses"].append({"id": 2, "context": "legacy", "state": "failure", "updated_at": "2"})
         self.assertFalse(self.run_gate().ok)
 
+    def test_unreadable_protection_is_pending_and_keeps_bot_approvals(self):
+        self.state["reviews"].append(review("coderabbitai[bot]", "APPROVED", rid=20))
+        gh = FakeGitHub(self.state)
+        gh.fail["repos/%s/branches/" % REPO] = 502
+        facts = rg.collect(gh, REPO, 7)
+        verdict = rg.evaluate(facts, CONFIG)
+        self.assertFalse(verdict.ok)
+        self.assertTrue(next(c for c in verdict.conditions if c.key == "checks").pending)
+        rg.apply(gh, gh, facts, verdict, False, log=lambda _m: None)
+        self.assertFalse(any(w[1].endswith("/dismissals") for w in gh.writes))
+
     def test_unreadable_or_missing_protection_fails_closed(self):
         self.state["branch"] = {"protection": {}}
         self.assertFalse(self.run_gate().ok)
@@ -502,10 +499,8 @@ class EligibilityTest(GateCase):
         self.assertFalse(v.ok)
         self.assertFalse(self.approved())
 
-    def test_sync_branch_uses_merge_commit_and_large_or_sensitive_changes_pass(self):
-        # No size / sensitive-path / human rules any more (owner decision 2026-10-28).
+    def test_sync_branch_uses_merge_commit(self):
         self.state["pr"]["head"]["ref"] = "sync/upstream-20261027"
-        self.state["files"] = [{"filename": ".github/workflows/ci.yml", "additions": 5000, "deletions": 0}]
         v = self.run_gate()
         self.assertTrue(v.ok)
         self.assertEqual(v.merge_method, "MERGE")

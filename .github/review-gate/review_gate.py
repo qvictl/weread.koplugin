@@ -347,8 +347,10 @@ def latest_by_name(runs: List[Dict[str, Any]], context: str, app_id: Optional[in
 def check_required(facts: Facts) -> Condition:
     title = "必需检查全部通过"
     if facts.required_checks_error:
-        return Condition("checks", title, False, "无法读取 `%s` 的分支保护：%s" % (
-            facts.pr["base"]["ref"], facts.required_checks_error))
+        # Usually transient (rate limit, 5xx, network): pending, so bot
+        # approvals are not dismissed for it; the next run re-evaluates.
+        return Condition("checks", title, False, "暂时无法读取 `%s` 的分支保护：%s" % (
+            facts.pr["base"]["ref"], facts.required_checks_error), pending=True)
     if not facts.required_checks:
         return Condition("checks", title, False, "`%s` 没有配置必需检查，网关不会自动批准" % facts.pr["base"]["ref"])
     failed, pending = [], []
