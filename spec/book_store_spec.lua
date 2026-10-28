@@ -142,7 +142,7 @@ settings._book_file_cache = { parsed = parsed, unparsed = unparsed }
 local rewrite_mark = BookStore.cache_mark(settings)
 local replacement = { content = "new JSON", value = { title = "newly parsed after rewrite" } }
 settings._book_file_cache.parsed, settings._book_file_cache.unparsed = replacement, replacement
-parsed, unparsed = nil, nil
+parsed, unparsed = nil, nil -- luacheck: ignore 311
 collectgarbage("collect")
 expect(old_refs[1] == nil and old_refs[2] == nil and old_refs[3] == nil,
     "cache mark retained replaced entry payloads")
