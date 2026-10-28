@@ -606,7 +606,7 @@ def render(facts: Facts, verdict: Verdict, automerge_on: bool) -> str:
     if automerge_on:
         lines.append(AUTOMERGE_STATE)
     if verdict.ok:
-        status = "✅ **满足全部条件**：网关已批准" + ("并开启自动合并" if automerge_on else "")
+        status = "✅ **满足全部条件**：网关批准" + ("并开启自动合并" if automerge_on else "")
     else:
         status = "⛔ **暂不自动批准**（%d 项未满足）" % len(verdict.blockers) if verdict.blockers else \
             "⛔ **暂不自动批准**"
@@ -676,6 +676,7 @@ def apply(gh: GitHub, merge_gh: Optional[GitHub], facts: Facts, verdict: Verdict
             return True
         except ApiError as err:
             actions.append("%s 失败：%s" % (desc, err))
+            verdict.notes.append("⚠️ %s 失败（HTTP %s），下次运行会重试" % (desc, err.status))
             log("::warning::%s failed: %s" % (desc, err))
             return False
 

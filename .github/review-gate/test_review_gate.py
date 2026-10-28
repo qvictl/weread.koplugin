@@ -207,6 +207,7 @@ class HappyPathTest(GateCase):
         self.assertTrue(self.body.startswith(rg.MARKER))
         self.assertIn(rg.AUTOMERGE_STATE, self.body)
         self.assertIn("满足全部条件", self.body)
+        self.assertIn("网关批准并开启自动合并", self.body)
 
     def test_existing_valid_approval_is_not_repeated(self):
         self.state["reviews"].append(review("github-actions[bot]", "APPROVED", rid=9, body=rg.APPROVAL_MARKER))
@@ -601,6 +602,15 @@ class DismissTest(GateCase):
         verdict = rg.evaluate(facts, CONFIG)
         actions, _ = rg.apply(gh, gh, facts, verdict, False, log=lambda _m: None)
         self.assertTrue(any("失败" in a for a in actions))
+        self.assertIn("HTTP 403", rg.render(facts, verdict, False))
+
+    def test_failed_approval_is_shown_in_the_comment(self):
+        gh = FakeGitHub(self.state)
+        facts = rg.collect(gh, REPO, 7)
+        gh.fail["repos/%s/pulls/7/reviews" % REPO] = 422
+        verdict = rg.evaluate(facts, CONFIG)
+        rg.apply(gh, None, facts, verdict, False, log=lambda _m: None)
+        self.assertIn("批准 `aaaaaaaaaa` 失败（HTTP 422）", rg.render(facts, verdict, False))
 
 
 class EventTest(unittest.TestCase):
