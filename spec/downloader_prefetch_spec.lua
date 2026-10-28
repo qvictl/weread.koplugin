@@ -322,6 +322,50 @@ for _, failure in ipairs({ "auth", "save", "refresh" }) do
     expect(failing._active_job and failing._active_job.suffix == "manual",
         failure .. " failure prevented the queued manual download from starting")
 end
+-- Stable identity protects deferred launch and parent delivery; rotating a
+-- ticket for the same account still permits downloaded chapter metadata.
+for _, change in ipairs({ "before_launch", "after_worker", "ticket" }) do
+    scheduled = {}
+    local settings = fake_settings()
+    settings:set("account", { user_vid = "one" })
+    settings:set("wr_ticket", "original-ticket")
+    settings.update_auth = function(self, auth) self:set("wr_ticket", auth.wr_ticket) end
+    local account_worker = fake_worker()
+    local result_ok, result_reason, opened, refreshed
+    local candidate = { book_id = "isolated", title = "Account fixture" }
+    local account_downloader = Downloader:new{
+        client = {}, settings = settings, background_worker = account_worker,
+        require_login = function() return true end,
+        refresh_ui = function() end,
+        refresh_shelf = function() refreshed = true end,
+        open_file = function() opened = true end,
+    }
+    account_downloader:start(candidate, { chapter_2 }, "chapter", {
+        prefetch = true, single_chapter = true, open_on_complete = true,
+        on_complete = function(ok, value) result_ok, result_reason = ok, value end,
+    })
+    if change == "before_launch" then settings:set("account", { user_vid = "two" }) end
+    run_scheduled()
+    if change == "before_launch" then
+        expect(#account_worker.starts == 0, "old-account deferred prefetch started under new credentials")
+    else
+        if change == "after_worker" then settings:set("account", { user_vid = "two" })
+        else settings:set("wr_ticket", "rotated-parent-ticket") end
+        account_worker.starts[1].options.on_done({ ok = true,
+            value = { path = downloaded_path, chapter_uid = "2", auth = { wr_ticket = "old-account_worker-ticket" } } })
+    end
+    if change == "ticket" then
+        expect(result_ok and settings:get("books").isolated.cached_chapters["2"] == downloaded_path
+            and opened and refreshed, "same-account ticket rotation discarded chapter result")
+        expect(settings:get("wr_ticket") == "rotated-parent-ticket", "old account_worker auth replaced rotated ticket")
+    else
+        expect(result_ok == false and result_reason == "account_changed" and not settings:get("books").isolated
+            and not candidate.cached_chapters and not opened and not refreshed,
+            change .. " wrote old-account metadata or refreshed/opened UI")
+    end
+    expect(account_downloader._active_job == nil and (account_downloader._standby_ref or 0) == 0,
+        change .. " stranded prefetch active slot/standby")
+end
 os.remove(downloaded_path)
 
 print(string.format(

@@ -59,6 +59,12 @@ local function apply_reader_book(book, updated)
     for _, key in ipairs(READER_BOOK_FIELDS) do book[key] = updated[key] end
 end
 
+local function account_id(settings)
+    if not settings or type(settings.get) ~= "function" then return "" end
+    local account = settings:get("account", {})
+    return type(account) == "table" and tostring(account.user_vid or "") or ""
+end
+
 local Downloader = {}
 Downloader.__index = Downloader
 -- Finalize pipeline (footnote rescan and transform of every chapter before
@@ -485,6 +491,11 @@ function Downloader:_applyPrefetchResult(dl, result)
         dl.progress_dialog = nil
     end
     if self._active_job ~= dl then return end
+    if dl.account_id ~= account_id(self.settings) then
+        self:_notifyCompletion(dl, false, "account_changed")
+        self:_finishJob(dl)
+        return
+    end
     if dl.cancelled then
         self:_notifyCompletion(dl, false, dl.cancel_reason or "cancelled")
         self:_finishJob(dl)
@@ -543,6 +554,10 @@ function Downloader:_applyPrefetchResult(dl, result)
 end
 
 function Downloader:_startPrefetchWorker(dl)
+    if dl.account_id ~= account_id(self.settings) then
+        self:_applyPrefetchResult(dl, { ok = false, error = "account_changed" })
+        return false
+    end
     local worker = self.background_worker
     if not worker or not worker:available() then
         self:_applyPrefetchResult(dl, {
@@ -857,6 +872,7 @@ function Downloader:start(book, chapters, suffix, options)
         on_complete = options.on_complete,
         started_at = time.now(),
         auth_fingerprint = WorkerSettings.fingerprint(self.settings),
+        account_id = account_id(self.settings),
     }
     self._active_job = dl
 
