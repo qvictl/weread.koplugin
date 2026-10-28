@@ -203,11 +203,12 @@ jobs:
             base_args=()
             declare -A recorded=()
             if [[ -s "$history" ]]; then
-              while read -r sha; do recorded[$sha]=1; done < <(jq -r '.sha // empty' "$history" 2>/dev/null || true)
+              while read -r sha; do recorded[$sha]=1; done < <(jq -R -r 'fromjson? | objects | .sha // empty' "$history")
             fi
             while read -r sha; do
               if [[ -n "${recorded[$sha]:-}" ]]; then
-                jq -c --arg sha "$sha" 'select(.sha == $sha)' "$history" | tail -n 1 > "$RUNNER_TEMP/baseline/base.json"
+                jq -R -c --arg sha "$sha" 'fromjson? | objects | select(.sha == $sha)' "$history" | tail -n 1 \
+                  > "$RUNNER_TEMP/baseline/base.json"
                 base_args=(--baseline "$RUNNER_TEMP/baseline/base.json")
                 echo "Older gate tooling: baseline main@${sha:0:8} for base ${BASE_SHA:0:8}"
                 break
