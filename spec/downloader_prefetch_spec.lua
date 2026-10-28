@@ -368,6 +368,43 @@ for _, change in ipairs({ "before_launch", "after_worker", "ticket" }) do
 end
 os.remove(downloaded_path)
 
+-- MP jobs use the same active slot and capture identity before deferred work.
+scheduled = {}
+local mp_launched, mp_snapshot = 0, nil
+package.preload["weread.lib.mp_article_download"] = function()
+    return { start = function(_owner, job)
+        mp_launched, mp_snapshot = mp_launched + 1, job.account_id
+    end }
+end
+local mp_settings = fake_settings()
+mp_settings:set("account", { user_vid = "first" })
+local mp_messages = {}
+local mp = Downloader:new{
+    settings = mp_settings, client = {}, background_worker = fake_worker(),
+    require_login = function() return true end,
+    is_connected = function() return true end,
+    show_info = function(message) mp_messages[#mp_messages + 1] = message end,
+    refresh_ui = function() end,
+}
+expect(mp:start(book_a, { chapter_2 }, "article", { mp_article = true, single_chapter = true }),
+    "MP job was not accepted by shared downloader")
+expect(mp._active_job and mp._active_job.progress_dialog and mp_launched == 0,
+    "MP work ran before its cancellable dialog could paint")
+mp_settings:set("account", { user_vid = "second" })
+run_scheduled()
+expect(mp_launched == 1 and mp_snapshot == "first", "MP deferred launch captured new account instead of job account")
+mp:_finishJob(mp._active_job)
+scheduled = {}
+expect(mp:start(book_a, { chapter_3 }, "article", { mp_article = true, single_chapter = true }),
+    "second MP job did not start")
+mp._active_job.progress_dialog.buttons[1][1].callback()
+run_scheduled()
+expect(mp._active_job == nil and mp_launched == 1, "cancel-before-launch executed MP worker or kept active slot")
+mp.is_connected = function() return false end
+expect(not mp:start(book_a, { chapter_3 }, "article", { mp_article = true, single_chapter = true })
+    and mp._active_job == nil and mp_messages[#mp_messages]:find("No network connection", 1, true),
+    "offline MP job was silent or stranded the downloader")
+
 print(string.format(
     "downloader_prefetch_spec: %d checks, %d failure(s)", checks, failures))
 os.exit(failures == 0 and 0 or 1)

@@ -1,6 +1,8 @@
 local I18n = {}
 
 local zh = {
+    ["Background downloads are unavailable on this device."] = "当前设备无法使用后台下载。",
+    ["Another background task is running. Try again shortly."] = "另一个后台任务正在运行，请稍后重试。",
     ["Network subprocess is unavailable."] = "当前环境无法启动网络子进程。",
     ["Could not start network subprocess."] = "无法启动网络子进程。",
     ["Could not read network subprocess result."] = "无法读取网络子进程的结果。",
