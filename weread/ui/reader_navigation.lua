@@ -49,9 +49,9 @@ function M:showEndOfBookDialog(book_id)
         local chapter_info = { self:getChapterInfoFromFile(book, file_path) }
         current_idx, is_full_book = chapter_info[1], chapter_info[3]
     end
-    -- The chapter-nav row is shown only for single downloaded chapters (a mapped
-    -- current chapter that is not part of a full-book EPUB); "next chapter"
-    -- additionally requires a successor.
+    -- Chapter actions remain visible in the quick menu. The chapter list
+    -- needs a catalog; "next chapter" additionally needs a single-chapter
+    -- download mapped to a chapter with a successor.
     local next_chapter = current_idx and not is_full_book
         and chapters[current_idx + 1] or nil
 
