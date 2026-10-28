@@ -283,6 +283,9 @@ for _, failure in ipairs({ "auth", "save", "refresh" }) do
     local failing = Downloader:new{
         client = {}, settings = failed_settings, background_worker = failure_worker,
         is_connected = function() return true end,
+        refresh_ui = function() end,
+        require_login = function() return true end,
+        run_online_task = function() return true end,
         refresh_shelf = function()
             if failure == "refresh" then error("injected shelf refresh failure") end
         end,
@@ -312,6 +315,12 @@ for _, failure in ipairs({ "auth", "save", "refresh" }) do
         failure .. " failure opened a chapter whose parent state was not saved")
     expect(failing._scheduled_start and failing._scheduled_start.pending.suffix == "manual",
         failure .. " failure swallowed the queued manual download")
+    local preserved = io.open(downloaded_path, "rb")
+    expect(preserved ~= nil, failure .. " failure removed the successful worker's EPUB")
+    if preserved then preserved:close() end
+    run_scheduled()
+    expect(failing._active_job and failing._active_job.suffix == "manual",
+        failure .. " failure prevented the queued manual download from starting")
 end
 os.remove(downloaded_path)
 
