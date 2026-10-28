@@ -38,6 +38,15 @@ expect(c.wr_skey == "kept", "unparseable Expires deleted the cookie")
 c = merge({ wr_skey = "old" }, "wr_skey=; Path=/")
 expect(c.wr_skey == nil, "empty value did not delete")
 
+-- Out-of-range fields make a date invalid; an invalid Expires never deletes.
+for _, bad in ipairs({ "Thu Jan  1 24:00:00 1970", "Thu, 01 Jan 1970 00:60:00 GMT",
+        "Thu, 01 Jan 1970 00:00:60 GMT", "Thu, 32 Jan 1970 00:00:00 GMT", "Thu, 00 Jan 1970 00:00:00 GMT",
+        "Fri, 29 Feb 2030 00:00:00 GMT", "Mon, 01 Jan 1600 00:00:00 GMT" }) do
+    expect(Cookie.parse_http_date(bad) == nil, "invalid date accepted: " .. bad)
+    c = merge({ wr_skey = "old" }, "wr_skey=XXX-new; Expires=" .. bad)
+    expect(c.wr_skey == "XXX-new", "invalid Expires deleted the cookie: " .. bad)
+end
+
 -- asctime dates, and attributes unknown to the parser stay on their cookie.
 expect(Cookie.parse_http_date("Thu Jan  1 00:00:00 1970") == 0, "asctime date")
 expect(Cookie.parse_http_date("Wed Oct 21 07:28:00 2026") == 1792567680, "asctime date with a 2-digit day")

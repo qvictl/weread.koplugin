@@ -51,10 +51,16 @@ function Cookie.parse_http_date(text)
     end
     local month = mon and MONTHS[mon:lower()]
     if not month then return nil end
-    y = tonumber(y)
+    y, d, hh, mm, ss = tonumber(y), tonumber(d), tonumber(hh), tonumber(mm), tonumber(ss)
     if y < 70 then y = y + 2000 elseif y < 100 then y = y + 1900 end
-    return days_from_civil(y, month, tonumber(d)) * 86400
-        + tonumber(hh) * 3600 + tonumber(mm) * 60 + tonumber(ss)
+    -- Out-of-range fields make the date invalid (RFC 6265 5.1.1): an invalid
+    -- Expires is ignored, it must not turn into a past date and delete a cookie.
+    local month_days = { 31, (y % 4 == 0 and (y % 100 ~= 0 or y % 400 == 0)) and 29 or 28,
+        31, 30, 31, 30, 31, 31, 30, 31, 30, 31 }
+    if y < 1601 or d < 1 or d > month_days[month] or hh > 23 or mm > 59 or ss > 59 then
+        return nil
+    end
+    return days_from_civil(y, month, d) * 86400 + hh * 3600 + mm * 60 + ss
 end
 
 -- Splits one Set-Cookie value (LuaSocket joins repeated headers with ", ")
