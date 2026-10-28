@@ -89,18 +89,21 @@ See [docs/testing.md](docs/testing.md).
 ### Review policy / 审查策略
 
 Every PR to `main` is reviewed by AI reviewers (CodeRabbit, Gemini Code Assist) and evaluated by the *Review gate*
-workflow, which keeps a checklist comment on the PR. The gate approves and enables auto-merge (squash) only when all
-required checks pass, an AI reviewer reviewed the head commit without requesting changes, every review thread is
-resolved, the change is small (≤ 500 non-test / non-doc lines) and touches no sensitive path (CI, policy, release and
-version files, the updater, credential / cookie / crypto code); otherwise a maintainer decides (`human-approved`
-label). AI comments flagged as potential issues / bugs must be fixed or answered with a justification before resolving
-them. Full rules, override and activation steps: [REVIEW_POLICY.md](REVIEW_POLICY.md).
+workflow, which keeps a checklist comment on the PR. The gate approves and enables auto-merge (squash) only when all of
+these hold on the head commit: the required checks passed; an AI reviewer reviewed it and none requests changes; every
+review thread is resolved; at most 500 changed non-test / non-doc lines; no sensitive path (CI, policy, release and
+version files, the updater, credential / cookie / crypto code); not a draft, no `do-not-merge` label, and the author
+is a collaborator or has a merged PR already. A maintainer's `human-approved` label waives only the size,
+sensitive-path and first-time-contributor rules — never the checks, the AI review or the threads. AI comments flagged
+as potential issues / bugs must be fixed or answered with a justification before resolving them. Full rules and
+activation steps: [REVIEW_POLICY.md](REVIEW_POLICY.md).
 
 所有合入 `main` 的 PR 由 AI 审查（CodeRabbit、Gemini Code Assist）并经 *Review gate* 工作流评估，网关在 PR 上维护一条
-检查清单评论。只有必需检查全部通过、AI 已审查最新提交且没有要求修改、所有审查对话已解决、非测试/文档改动不超过 500 行、
-没有触及敏感路径（CI、策略、发布与版本文件、更新器、凭据/Cookie/加密代码）时，网关才自动批准并开启自动合并（squash）；
-否则由维护者决定（`human-approved` 标签）。AI 标出的潜在问题 / bug 必须修复或回复理由后才能解决对话。完整规则、
-覆盖方式和启用步骤见 [REVIEW_POLICY.md](REVIEW_POLICY.md)。
+检查清单评论。只有最新提交上必需检查全部通过、AI 已审查且没有要求修改、所有审查对话已解决、非测试/文档改动不超过 500 行、
+没有触及敏感路径（CI、策略、发布与版本文件、更新器、凭据/Cookie/加密代码）、非草稿、无 `do-not-merge` 且作者可信
+（协作者，或已有合并过的 PR）时，网关才自动批准并开启自动合并（squash）。维护者的 `human-approved` 标签只豁免行数、
+敏感路径和首次贡献者限制，不豁免检查、AI 审查和未解决对话。AI 标出的潜在问题 / bug 必须修复或回复理由后才能解决对话。
+完整规则和启用步骤见 [REVIEW_POLICY.md](REVIEW_POLICY.md)。
 
 ## Issues / 提交 Issue
 

@@ -11,34 +11,31 @@
 # paths and the first-time-contributor rule, never checks, AI review or
 # threads. It dismisses its own approval when a condition stops holding.
 #
-# Security: the gate script always comes from the default branch, never from
-# the PR (pull_request_target / workflow_run / schedule run the default
-# branch's workflow; the review events run the PR's copy of this file, so the
-# checkout below pins the script to the default branch). PR code is never
-# checked out or executed.
+# Every trigger here runs the default branch's copy of this workflow
+# (pull_request_target, workflow_run, check_suite, schedule; manual runs are
+# meant for `main`), and the script is checked out from the default branch:
+# PR code is never checked out or executed. Review events are relayed by
+# review-gate-relay.yml (no permissions) through workflow_run, so they too end up
+# here. REVIEW_GATE_MERGE_TOKEN lives in environment `review-gate`
+# (deployments from `main` only) and is used only by the `automerge` job.
 #
-# Triggers: PR events, AI / human reviews and review comments, completion of
-# the required-check workflows and of third-party check suites, and a
-# 15-minute schedule as a safety net (review-thread resolution has no
+# Triggers: PR events, reviews and review comments (relay), completion of
+# the required-check workflows and of third-party check suites (CodeRabbit),
+# and a 15-minute schedule as a safety net (review-thread resolution has no
 # workflow trigger). Scheduled runs are cheap: one API call per open PR, and
 # a full evaluation only for PRs that may have changed without an event (head
 # moved, blocked only by threads, approved, or not refreshed for 6 hours).
-# The sticky comment is edited only when its content changes. Repository variable
-# REVIEW_GATE_DRY_RUN=true turns it into report-only. Secret
-# REVIEW_GATE_MERGE_TOKEN (fine-grained PAT: contents + pull requests write)
-# lets it enable auto-merge; without it, approved PRs are merged by hand.
+# The sticky comment is edited only when its content changes.
+# Repository variables: REVIEW_GATE_DRY_RUN=true (report only),
+# REVIEW_GATE_AUTOMERGE=on (the merge token is configured).
 
 name: Review gate
 
 on:
   pull_request_target:
     types: [opened, synchronize, reopened, labeled, unlabeled, ready_for_review, converted_to_draft]
-  pull_request_review:
-    types: [submitted, edited, dismissed]
-  pull_request_review_comment:
-    types: [created, edited, deleted]
   workflow_run:
-    workflows: [CI, Integration, PR policy]
+    workflows: [CI, Integration, PR policy, Review gate relay]
     types: [completed]
   check_suite:
     types: [completed]
@@ -53,10 +50,6 @@ on:
 
 permissions:
   contents: read
-  pull-requests: write
-  issues: write
-  checks: read
-  statuses: read
 
 # One run per PR at a time (a newer event supersedes an older run); scheduled
 # and manual all-PR runs share one group.
@@ -70,11 +63,18 @@ jobs:
     name: Review gate
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    # Skip runs caused by the gate's own reviews, and PRs to other branches.
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+      checks: read
+      statuses: read
+    # PRs to other branches are left alone.
     if: >-
-      github.event.sender.login != 'github-actions[bot]' &&
-      (github.event.pull_request == null ||
-       github.event.pull_request.base.ref == github.event.repository.default_branch)
+      github.event.pull_request == null ||
+      github.event.pull_request.base.ref == github.event.repository.default_branch
+    outputs:
+      automerge: ${{ steps.evaluate.outputs.automerge }}
     steps:
       - name: Checkout the gate (default branch only)
         uses: actions/checkout@v6
@@ -84,8 +84,41 @@ jobs:
           sparse-checkout: .github/review-gate
           sparse-checkout-cone-mode: false
       - name: Evaluate
+        id: evaluate
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          REVIEW_GATE_DRY_RUN: ${{ vars.REVIEW_GATE_DRY_RUN }}
+          REVIEW_GATE_AUTOMERGE: ${{ vars.REVIEW_GATE_AUTOMERGE }}
+        run: python3 .github/review-gate/review_gate.py --repo "$GITHUB_REPOSITORY" --event
+
+  automerge:
+    # Re-evaluates the PRs the gate just approved and enables auto-merge with
+    # the merge token (merges made with GITHUB_TOKEN would not trigger the
+    # push workflows on main).
+    name: Enable auto-merge
+    needs: gate
+    if: needs.gate.outputs.automerge != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: review-gate
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+      checks: read
+      statuses: read
+    steps:
+      - name: Checkout the gate (default branch only)
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.repository.default_branch || 'main' }}
+          persist-credentials: false
+          sparse-checkout: .github/review-gate
+          sparse-checkout-cone-mode: false
+      - name: Enable auto-merge
         env:
           GITHUB_TOKEN: ${{ github.token }}
           REVIEW_GATE_MERGE_TOKEN: ${{ secrets.REVIEW_GATE_MERGE_TOKEN }}
           REVIEW_GATE_DRY_RUN: ${{ vars.REVIEW_GATE_DRY_RUN }}
-        run: python3 .github/review-gate/review_gate.py --repo "$GITHUB_REPOSITORY" --event
+          PRS: ${{ needs.gate.outputs.automerge }}
+        run: python3 .github/review-gate/review_gate.py --repo "$GITHUB_REPOSITORY" --prs "$PRS"

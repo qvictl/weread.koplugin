@@ -5,10 +5,9 @@
 [`.github/review-gate/`](.github/review-gate/)，工作流是
 [`.github/workflows/review-gate.yml`](.github/workflows/review-gate.yml)。
 
-> **当前状态：咨询模式（advisory）。** 分支保护要求的批准数仍为 0，AI 审查应用尚未安装。
-> 网关照常评估每个 PR 并更新置顶评论，但因为没有 AI 审查，第 2 项永远不满足，所以它不会批准、
-> 也不会开启自动合并；合并仍由维护者按 CONTRIBUTING.md 手动完成。安装应用后按
-> [启用步骤](#启用步骤) 切换。
+> **两种模式。** 咨询模式（advisory）：分支保护所需批准数为 0，网关照常评估每个 PR、更新置顶评论，满足条件时批准，
+> 但不批准也能合并；没有 AI 审查时第 2 项不满足，网关只报告。强制模式：按 [启用步骤](#启用步骤) 把 `main` 改为需要
+> 1 个批准后，以所有者账号提交的 PR 只能由网关批准，网关不批准就不能合并。
 
 ## 审查者
 
@@ -105,17 +104,24 @@
 
 - 插件内置更新器（`weread/lib/updater.lua`）会把 `main` 上版本号升级后的发布自动推送到设备。合入 `main` 的缺陷会直接到达读者的设备，所以**发布永远需要人**：版本号、发布 / 更新器、CI 和策略文件都是敏感路径，
   只有维护者用 `human-approved` 才能让它们自动合并，而且 CI 与 AI 审查仍须全部通过。
-- 网关脚本永远从默认分支检出（`pull_request_target`、`workflow_run`、定时任务运行的都是默认分支上的工作流；审查事件触发的运行
-  也会显式检出默认分支的脚本），从不检出或执行 PR 的代码，因此 PR 不能修改网关来批准自己。修改网关本身（`.github/**`）属于敏感路径。
-- 网关只认带有自己标记的批准；其他以 github-actions[bot] 身份做出的批准（例如某个 PR 新增的工作流）会被撤销。
+- 网关的所有运行都使用默认分支上的工作流和脚本（`pull_request_target`、`workflow_run`、`check_suite`、定时任务）；
+  审查和审查评论事件由没有任何权限、不检出代码的 `review-gate-relay.yml` 转发（它结束后触发 `workflow_run`）。网关从不检出或执行
+  PR 的代码，所以 PR 改不了**本次**评估它的网关逻辑；修改网关、工作流和 AI 审查配置本身属于敏感路径。
 - 用 `GITHUB_TOKEN` 合并不会触发 `main` 上的 push 工作流（覆盖率基线、nightly），所以自动合并使用单独的
-  `REVIEW_GATE_MERGE_TOKEN`；未配置时网关只批准，合并由人完成。
+  `REVIEW_GATE_MERGE_TOKEN`。它只存放在 environment `review-gate` 中，该 environment 只允许 `main` 部署：
+  只有默认分支上运行的 `automerge` 作业读得到，PR 分支上（被修改过的）工作流读不到。未配置时网关只批准，合并由人完成。
+- **局限（写权限是信任边界）**：对本仓库有写权限的人可以在自己的分支上新增工作流，用该分支运行时的 `GITHUB_TOKEN`
+  以 github-actions[bot] 身份批准 PR（仓库允许 Actions 批准 PR 时）。默认分支检出只保护网关脚本，挡不住这条路。
+  缓解：网关每次运行（以及每 15 分钟的定时任务）都会撤销所有不带网关标记的 github-actions 批准，但两次运行之间存在时间窗口；
+  fork 来的 PR 拿到的是只读 token，不受影响。因此写权限只授予可信的人和 agent。
+- CodeRabbit 使用 PR 分支上的 `.coderabbit.yaml`：PR 可以借此削弱对自己的审查，所以 `.coderabbit.yaml`、`.gemini/**`
+  都是敏感路径，改动必须由人确认。
 - 首次贡献者的 PR 必须由人看过一次（防止恶意或刷量 PR 自动合入）。
 
 ## 网关如何运行
 
 - 触发：PR 事件（`pull_request_target`：opened / synchronize / reopened / labeled / unlabeled / ready_for_review /
-  converted_to_draft）、审查与审查评论（`pull_request_review`、`pull_request_review_comment`）、必需检查所在工作流完成
+  converted_to_draft）、审查与审查评论（`pull_request_review`、`pull_request_review_comment`，经 `review-gate-relay.yml` 转发）、必需检查所在工作流完成
   （`workflow_run`）、第三方 check suite 完成（`check_suite`），以及每 15 分钟一次的定时兜底
   （GitHub Actions 没有“审查对话已解决”的触发器，由定时任务补上）。也可以在 Actions 页面手动运行 *Review gate*，填 PR 号或留空评估全部。
 - 定时任务很轻：每个打开的 PR 只读一次评论列表，只有可能在没有事件的情况下发生变化的 PR 才完整评估（head 变了、
@@ -140,8 +146,12 @@ gh api -X PUT repos/$R/actions/permissions/workflow \
 # 1. 允许自动合并
 gh api -X PATCH repos/$R -F allow_auto_merge=true
 
-# 2. 自动合并用的 token：fine-grained PAT，仅限本仓库，Contents 和 Pull requests 读写
-gh secret set REVIEW_GATE_MERGE_TOKEN -R $R
+# 2. 自动合并用的 token：fine-grained PAT，仅限本仓库，Contents 和 Pull requests 读写。
+#    放进只允许 main 部署的 environment `review-gate`，再打开 REVIEW_GATE_AUTOMERGE 开关
+echo '{"deployment_branch_policy":{"protected_branches":false,"custom_branch_policies":true}}' | gh api -X PUT repos/$R/environments/review-gate --input -
+gh api -X POST repos/$R/environments/review-gate/deployment-branch-policies -f name=main -f type=branch
+gh secret set REVIEW_GATE_MERGE_TOKEN -R $R --env review-gate
+gh api -X POST repos/$R/actions/variables -f name=REVIEW_GATE_AUTOMERGE -f value=on
 
 # 3. main 需要 1 个批准；新提交使旧批准失效；不要求 CODEOWNERS
 gh api -X PATCH repos/$R/branches/main/protection/required_pull_request_reviews \

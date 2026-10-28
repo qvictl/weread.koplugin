@@ -92,7 +92,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
 
 
 # --------------------------------------------------------------------------
-# Glob matching (`**` crosses directories, `*` and `?` do not).
+# Glob matching (`**` crosses directories, `*` and `?` do not, `{a,b}`
+# alternatives, not nested).
 
 def glob_to_regex(pattern: str) -> "re.Pattern[str]":
     out, i = [], 0
@@ -109,6 +110,10 @@ def glob_to_regex(pattern: str) -> "re.Pattern[str]":
         elif pattern[i] == "?":
             out.append("[^/]")
             i += 1
+        elif pattern[i] == "{" and "}" in pattern[i:]:
+            end = pattern.index("}", i)
+            out.append("(?:" + "|".join(glob_to_regex(alt).pattern[1:-1] for alt in pattern[i + 1:end].split(",")) + ")")
+            i = end + 1
         else:
             out.append(re.escape(pattern[i]))
             i += 1
@@ -359,6 +364,7 @@ class Verdict:
     is_sync: bool
     merge_method: str
     notes: List[str] = field(default_factory=list)
+    defer_automerge: bool = False
 
     @property
     def ok(self) -> bool:
@@ -369,10 +375,17 @@ class Verdict:
         return [c for c in self.conditions if not (c.ok or c.waived)]
 
 
+def newest(runs: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """The most recent check run. A run that has not started yet (queued,
+    `started_at` null) is newer than any started one: it was created by a later
+    push or re-run, so an older success must not count while it is pending."""
+    return max(runs, key=lambda r: (r.get("started_at") is None, r.get("started_at") or "", r.get("id") or 0))
+
+
 def latest_by_name(runs: List[Dict[str, Any]], context: str, app_id: Optional[int]) -> Optional[Dict[str, Any]]:
     matching = [r for r in runs if r.get("name") == context
                 and (app_id in (None, -1) or (r.get("app") or {}).get("id") == app_id)]
-    return max(matching, key=lambda r: (r.get("started_at") or "", r.get("id") or 0)) if matching else None
+    return newest(matching) if matching else None
 
 
 def check_required(facts: Facts) -> Condition:
@@ -416,7 +429,7 @@ def ai_check_runs(runs: List[Dict[str, Any]]) -> List[Tuple[str, Dict[str, Any]]
     for slug, (name, label) in AI_CHECK_RUNS.items():
         mine = [r for r in runs if (r.get("app") or {}).get("slug") == slug and r.get("name") == name]
         if mine:
-            found.append((label, max(mine, key=lambda r: (r.get("started_at") or "", r.get("id") or 0))))
+            found.append((label, newest(mine)))
     return found
 
 
@@ -678,8 +691,13 @@ mutation($id: ID!) { disablePullRequestAutoMerge(input: {pullRequestId: $id}) { 
 
 
 def apply(gh: GitHub, merge_gh: Optional[GitHub], facts: Facts, verdict: Verdict, dry_run: bool,
-          log: Callable[[str], None] = print) -> Tuple[List[str], bool]:
-    """Approve / dismiss / auto-merge. Returns (actions taken, auto-merge enabled by the gate)."""
+          log: Callable[[str], None] = print, defer_automerge: bool = False) -> Tuple[List[str], bool]:
+    """Approve / dismiss / auto-merge. Returns (actions taken, auto-merge enabled by the gate).
+
+    Without `merge_gh` and with `defer_automerge`, a PR ready for auto-merge is
+    only flagged (verdict.defer_automerge): the workflow's `automerge` job, the
+    only one that can read REVIEW_GATE_MERGE_TOKEN (environment `review-gate`,
+    default branch only), then re-runs the gate for it with the token."""
     repo, number, head = facts.repo, facts.pr["number"], facts.head_sha
     actions: List[str] = []
     gate_enabled_automerge = bool(facts.sticky and AUTOMERGE_STATE in facts.sticky.get("body", ""))
@@ -740,8 +758,10 @@ def apply(gh: GitHub, merge_gh: Optional[GitHub], facts: Facts, verdict: Verdict
     elif not facts.allow_auto_merge:
         verdict.notes.append("仓库未开启 *Allow auto-merge*：已批准，需手动合并（启用步骤见 REVIEW_POLICY.md）")
     elif merge_gh is None:
-        verdict.notes.append("未配置 `REVIEW_GATE_MERGE_TOKEN`：已批准，需手动合并"
-                             "（用 GITHUB_TOKEN 合并不会触发 main 上的 push 工作流）")
+        if defer_automerge:
+            verdict.defer_automerge = True
+        else:
+            verdict.notes.append("自动合并未启用（需要 `REVIEW_GATE_MERGE_TOKEN`，见 REVIEW_POLICY.md 启用步骤）：已批准，需手动合并")
     elif facts.pr_node_id:
         if run("开启自动合并（%s）" % verdict.merge_method.lower(), lambda: merge_gh.graphql(
                 ENABLE_AUTOMERGE, {"id": facts.pr_node_id, "method": verdict.merge_method})):
@@ -834,21 +854,22 @@ def find_sticky(comments: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
 
 
 def process(gh: GitHub, merge_gh: Optional[GitHub], repo: str, number: int, config: Dict[str, Any], dry_run: bool,
-            repo_info: Dict[str, Any], branch_cache: Dict[str, Any]) -> Optional[str]:
+            repo_info: Dict[str, Any], branch_cache: Dict[str, Any],
+            defer_automerge: bool = False) -> Optional[Tuple[str, bool]]:
     try:
         facts = collect(gh, repo, number, repo_info, branch_cache)
     except OutOfScope:
         print("#%d: not an open PR to %s, skipped" % (number, repo_info["default_branch"]))
         return None
     verdict = evaluate(facts, config)
-    actions, automerge_on = apply(gh, merge_gh, facts, verdict, dry_run)
+    actions, automerge_on = apply(gh, merge_gh, facts, verdict, dry_run, defer_automerge=defer_automerge)
     body = render(facts, verdict, automerge_on)
     result = upsert_comment(gh, facts, body, dry_run)
     print("#%d %s: %s; comment %s; actions: %s" % (
         number, facts.head_sha[:10], "OK" if verdict.ok else "blocked by " + ",".join(c.key for c in verdict.blockers),
         result, "; ".join(actions) or "none"))
     done = "\n".join("- " + a for a in actions) or "- 无"
-    return "## #%d\n\n%s\n**本次操作：**\n%s\n" % (number, body, done)
+    return "## #%d\n\n%s\n**本次操作：**\n%s\n" % (number, body, done), verdict.defer_automerge
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -856,6 +877,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--repo", default=os.environ.get("GITHUB_REPOSITORY"))
     group = ap.add_mutually_exclusive_group(required=True)
     group.add_argument("--pr", type=int)
+    group.add_argument("--prs", help="comma / space separated PR numbers (the automerge job)")
     group.add_argument("--all-open", action="store_true")
     group.add_argument("--event", action="store_true")
     ap.add_argument("--config")
@@ -872,6 +894,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     merge_token = os.environ.get("REVIEW_GATE_MERGE_TOKEN")
     merge_gh = GitHub(merge_token, api) if merge_token else None
     dry_run = args.dry_run or os.environ.get("REVIEW_GATE_DRY_RUN", "").lower() == "true"
+    # Repository variable REVIEW_GATE_AUTOMERGE=on: the token is configured in
+    # environment `review-gate`; flag ready PRs for the automerge job.
+    defer_automerge = merge_gh is None and os.environ.get("REVIEW_GATE_AUTOMERGE", "").lower() == "on"
     config = load_config(args.config)
     repo_info = gh.get("repos/%s" % args.repo)
 
@@ -879,6 +904,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     numbers: Optional[List[int]]
     if args.pr:
         numbers = [args.pr]
+    elif args.prs is not None:
+        numbers = [int(n) for n in re.split(r"[,\s]+", args.prs) if n]
     elif args.all_open:
         numbers = None
     else:
@@ -903,13 +930,16 @@ def main(argv: Optional[List[str]] = None) -> int:
                     continue
             numbers.append(pr["number"])
 
-    summaries = []
+    summaries, ready = [], []
     branch_cache: Dict[str, Any] = {}
     for number in sorted(set(numbers)):
         try:
-            summary = process(gh, merge_gh, args.repo, number, config, dry_run, repo_info, branch_cache)
-            if summary:
-                summaries.append(summary)
+            result = process(gh, merge_gh, args.repo, number, config, dry_run, repo_info, branch_cache,
+                             defer_automerge)
+            if result:
+                summaries.append(result[0])
+                if result[1]:
+                    ready.append(number)
         except ApiError as err:
             # e.g. the read-only token of a fork PR's review event: the next
             # scheduled run (default branch, write token) catches up.
@@ -919,6 +949,10 @@ def main(argv: Optional[List[str]] = None) -> int:
             fh.write("\n\n".join(summaries) + "\n")
     if not numbers:
         print("No pull request to evaluate.")
+    output = os.environ.get("GITHUB_OUTPUT")
+    if output:
+        with open(output, "a", encoding="utf-8") as fh:
+            fh.write("automerge=%s\n" % " ".join(str(n) for n in ready))
     return 0
 
 

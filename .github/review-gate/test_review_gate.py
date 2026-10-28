@@ -190,6 +190,10 @@ class GlobTest(unittest.TestCase):
         self.assertTrue(rg.glob_to_regex("base").match("base"))
         self.assertTrue(rg.glob_to_regex("sync/upstream-*").match("sync/upstream-20261027"))
         self.assertFalse(rg.glob_to_regex("weread/lib/updater.lua").match("weread/lib/updaterXlua"))
+        self.assertTrue(rg.glob_to_regex("{frontend,plugins}/**/*.lua").match("plugins/kosync.koplugin/main.lua"))
+        self.assertTrue(rg.glob_to_regex("{frontend,plugins}/**/*.lua").match("frontend/ui/a.lua"))
+        self.assertFalse(rg.glob_to_regex("{frontend,plugins}/**/*.lua").match("spec/unit/a.lua"))
+        self.assertTrue(rg.glob_to_regex("{.github,.ci}/**").match(".ci/x.sh"))
 
 
 class HappyPathTest(GateCase):
@@ -228,6 +232,37 @@ class HappyPathTest(GateCase):
         self.assertTrue(self.approved())
         self.assertIsNone(self.automerge())
         self.assertIn("REVIEW_GATE_MERGE_TOKEN", self.body)
+        self.assertFalse(self.verdict.defer_automerge)
+
+    def test_automerge_is_deferred_to_the_token_job(self):
+        gh = FakeGitHub(self.state)
+        facts = rg.collect(gh, REPO, 7)
+        verdict = rg.evaluate(facts, CONFIG)
+        _actions, on = rg.apply(gh, None, facts, verdict, False, log=lambda _m: None, defer_automerge=True)
+        self.assertTrue(verdict.defer_automerge)
+        self.assertFalse(on)
+        self.assertNotIn("REVIEW_GATE_MERGE_TOKEN", rg.render(facts, verdict, on))
+        self.assertFalse(any(w[0] == "GRAPHQL" for w in gh.writes))
+
+    def test_main_reports_ready_prs_and_automerge_job_enables(self):
+        fake = FakeGitHub(self.state)
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "out"
+            old_env, old_cls = dict(os.environ), rg.GitHub
+            os.environ.update({"GITHUB_TOKEN": "t", "GITHUB_OUTPUT": str(out), "REVIEW_GATE_AUTOMERGE": "on"})
+            os.environ.pop("REVIEW_GATE_MERGE_TOKEN", None)
+            rg.GitHub = lambda *_a, **_k: fake  # type: ignore
+            try:
+                rg.main(["--repo", REPO, "--pr", "7", "--summary", str(Path(tmp) / "s.md")])
+                self.assertEqual(out.read_text().strip(), "automerge=7")
+                self.assertFalse(any(w[0] == "GRAPHQL" for w in fake.writes))
+                os.environ["REVIEW_GATE_MERGE_TOKEN"] = "m"
+                rg.main(["--repo", REPO, "--prs", "7", "--summary", str(Path(tmp) / "s.md")])
+                self.assertIn(("GRAPHQL", "enable"), [(w[0], w[1]) for w in fake.writes])
+            finally:
+                rg.GitHub = old_cls  # type: ignore
+                os.environ.clear()
+                os.environ.update(old_env)
 
     def test_repo_without_auto_merge_setting(self):
         self.state["repo"]["allow_auto_merge"] = False
@@ -279,6 +314,12 @@ class RequiredChecksTest(GateCase):
         self.assertTrue(self.run_gate().ok)
         self.state["check_runs"] += [check("ci", "cancelled", rid=11, at="2026-10-27T11:00:00Z")]
         self.assertFalse(self.run_gate().ok)
+
+    def test_queued_rerun_supersedes_older_success(self):
+        self.state["check_runs"].append(check("ci", None, status="queued", rid=0, at=None))
+        self.run_gate()
+        self.assertFalse(self.cond("checks").ok)
+        self.assertIn("`ci`（queued）", self.cond("checks").detail)
 
     def test_check_from_another_app_does_not_count(self):
         self.state["check_runs"][0]["app"] = {"id": 1}
@@ -347,6 +388,26 @@ class AiReviewTest(GateCase):
         self.assertFalse(self.run_gate().ok)
         self.state["check_runs"][-1] = self.cr_run(slug="impostor")
         self.assertFalse(self.run_gate().ok)
+
+    def test_queued_coderabbit_run_supersedes_older_success(self):
+        self.state["reviews"] = []
+        old = self.cr_run()
+        old["started_at"] = "2026-10-28T01:00:00Z"
+        new = self.cr_run(status="queued", conclusion=None, summary="")
+        new["started_at"], new["id"] = None, 1  # newer although its id is smaller
+        self.state["check_runs"] += [old, new]
+        self.run_gate()
+        self.assertFalse(self.cond("ai").ok)
+        self.assertFalse(self.verdict.ok)
+
+    def test_newer_success_beats_older_failed_or_skipped_coderabbit_run(self):
+        self.state["reviews"] = []
+        old = self.cr_run(title="Review skipped")
+        old["started_at"] = "2026-10-28T01:00:00Z"
+        new = self.cr_run()
+        new["started_at"] = "2026-10-28T02:00:00Z"
+        self.state["check_runs"] += [old, new]
+        self.assertTrue(self.run_gate().ok)
 
     def test_check_run_does_not_override_changes_requested(self):
         self.state["reviews"] = [review("coderabbitai[bot]", "CHANGES_REQUESTED", commit=OLD)]
@@ -669,7 +730,7 @@ class EventTest(unittest.TestCase):
             rg.collect(self.gh, REPO, 7)
         self.state["pr"]["base"]["ref"] = "main"
         self.state["pr"]["state"] = "closed"
-        out = rg.process(self.gh, None, REPO, 7, CONFIG, False, self.state["repo"], {})
+        out = rg.process(self.gh, None, REPO, 7, CONFIG, False, self.state["repo"], {})  # noqa
         self.assertIsNone(out)
         self.assertEqual(self.gh.writes, [])
 
