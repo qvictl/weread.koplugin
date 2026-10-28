@@ -19,6 +19,7 @@ local T = require("ffi/util").template
 
 local Content = require("weread.lib.content")
 local DownloadDialog = require("weread.ui.download_dialog")
+local ErrorText = require("weread.lib.error_text")
 local Footnotes = require("weread.lib.footnotes")
 local I18n = require("weread.lib.i18n")
 local MemoryGate = require("weread.lib.memory_gate")
@@ -38,14 +39,8 @@ local function log_error(err)
     return text
 end
 
-local function display_error(err)
-    local text = tostring(err)
-    text = text:match("^[^\r\n]+") or text
-    if #text > 300 then
-        return text:sub(1, 300) .. "..."
-    end
-    return text
-end
+-- Never shows a Lua source position ("content.lua:1699: ") to the user.
+local display_error = ErrorText.display
 
 local READER_BOOK_FIELDS = {
     "book_id", "title", "author", "psvts", "pclts", "token", "reader_url",
@@ -67,9 +62,21 @@ end
 local Downloader = {}
 Downloader.__index = Downloader
 local RESUME_SKIP_BATCH_SIZE = 25
--- Resumable footnote rescans: chapters per UI step and time budget per step.
-local FOOTNOTE_SCAN_BATCH_SIZE = 4
-local FOOTNOTE_SCAN_BUDGET_MS = 200
+-- Finalize pipeline (footnote rescan and transform of every chapter before
+-- the EPUB is built) runs in time-budgeted batches: one UI step processes
+-- chapters until FINALIZE_BATCH_BUDGET_MS has elapsed (at least one chapter
+-- per step), then yields to the UI loop for FINALIZE_YIELD_S so taps (Cancel)
+-- and repaints get through. There is no per-chapter sleep: waiting 0.1 s per
+-- chapter cost a 200-chapter book ~25 s of idle time.
+-- The yield must be a real delay, not nextTick/scheduleIn(0): UIManager keeps
+-- running due tasks and repainting while its task queue is dirty and polls
+-- input only afterwards, so a chain of zero-delay steps starves input until
+-- the chain ends. KOReader's Trapper:info uses 0.05-0.1 s for the same reason
+-- ("0.01 is too fast").
+local FINALIZE_BATCH_BUDGET_MS = 200
+local FINALIZE_YIELD_S = 0.05
+Downloader.FINALIZE_BATCH_BUDGET_MS = FINALIZE_BATCH_BUDGET_MS
+Downloader.FINALIZE_YIELD_S = FINALIZE_YIELD_S
 -- Re-download passes for chapters that fail the final checkpoint check.
 local MAX_VERIFY_REDOWNLOAD_PASSES = 2
 -- Before each worker fork, wait (with backoff, yielding to the UI) for memory
@@ -121,6 +128,8 @@ end
 --   require_login(cookie, api_key), run_online_task(label, fn),
 --   background_worker,                         -- host framework
 --   read_meminfo(), read_self_status(),        -- optional, for specs
+--   clock(),                                   -- optional, for specs: ui/time
+--                                              -- style now() for batch budgets
 -- }
 function Downloader:new(o)
     o = o or {}
@@ -950,6 +959,25 @@ function Downloader:_setStage(dl, title, progress)
     end
 end
 
+-- Clock for finalize batch budgets (ui/time units); injectable for specs.
+function Downloader:_now()
+    if self.clock then return self.clock() end
+    return time.now()
+end
+
+-- True once the finalize batch that started at `batch_started` has used up
+-- its time budget and the next chapter must wait for the next UI step.
+function Downloader:_batchSpent(batch_started)
+    return tonumber(self:_now() - batch_started) / 1000 >= FINALIZE_BATCH_BUDGET_MS
+end
+
+-- End the current finalize batch: let the UI loop poll input and repaint,
+-- then continue with step_fn (guarded like every download step).
+function Downloader:_yieldFinalize(dl, step_fn)
+    dl.finalize_yields = (dl.finalize_yields or 0) + 1
+    self:_scheduleGuarded(dl, step_fn, FINALIZE_YIELD_S)
+end
+
 function Downloader:_perf(dl, stage, started, ...)
     local elapsed = tonumber(time.now() - started) / 1000
     logger.info("download_perf", "stage=", stage,
@@ -1088,41 +1116,10 @@ function Downloader:_stopCancelled(dl)
     end
 end
 
-function Downloader:_footnoteStep(dl)
-    if dl.cancelled then
-        self:_stopCancelled(dl)
-        return
-    end
-    local job = dl.footnote_job
-    if not job then
-        dl.footnotes_done = true
-        self:_scheduleGuarded(dl, function() self:_step(dl) end)
-        return
-    end
-    if job.index > #dl.selected then
-        dl.footnotes_done = true
-        dl.footnote_job = nil
-        if job.css_needed then
-            dl.state.css = (dl.state.css or "") .. "\n"
-                .. Footnotes.FOOTNOTES_CSS
-        end
-        logger.info("book footnotes processed:",
-            "candidates=", tostring(dl.footnote_stats.candidates),
-            "converted=", tostring(dl.footnote_stats.converted),
-            "images=", tostring(dl.footnote_stats.image_notes),
-            "backlinks=", tostring(dl.footnote_stats.backlinks),
-            "removed_note_blocks=", tostring(dl.footnote_stats.removed_note_blocks),
-            "unresolved=", tostring(dl.footnote_stats.unresolved),
-            "fallback=", tostring(dl.footnote_stats.fallback))
-        self:_scheduleGuarded(dl, function() self:_step(dl) end)
-        return
-    end
-
-    local chapter = (job.chapters or dl.selected)[job.index]
+-- Transform one chapter's footnotes with the book-wide index. A failed or
+-- invalid transform keeps the original chapter (counted as a fallback).
+function Downloader:_transformFootnoteChapter(dl, job, chapter)
     local uid = tostring(chapter.chapterUid or job.index)
-    self:_setStage(dl,
-        T(_("Processing footnotes · chapter %1/%2"),
-            tostring(job.index), tostring(#dl.selected)), dl.total)
     local original = dl.bodies[uid]
     if dl.resumable then
         original = Content.load_full_download_chapter(
@@ -1166,8 +1163,56 @@ function Downloader:_footnoteStep(dl)
     end
     self:_perf(dl, "footnotes", started, "chapter_uid=", uid,
         "ok=", tostring(ok), "fallback=", tostring(not ok))
-    job.index = job.index + 1
-    self:_scheduleGuarded(dl, function() self:_footnoteStep(dl) end)
+end
+
+-- Transform phase of the finalize pipeline: chapters in order, as many per
+-- UI step as fit in FINALIZE_BATCH_BUDGET_MS. `batch_started` continues the
+-- batch of the scan phase; a scheduled step starts a new batch.
+function Downloader:_footnoteStep(dl, batch_started)
+    if dl.cancelled then
+        self:_stopCancelled(dl)
+        return
+    end
+    local job = dl.footnote_job
+    if not job then
+        dl.footnotes_done = true
+        self:_yieldFinalize(dl, function() self:_step(dl) end)
+        return
+    end
+    batch_started = batch_started or self:_now()
+    local chapters = job.chapters or dl.selected
+    local total = #dl.selected
+    local function report()
+        self:_setStage(dl,
+            T(_("Processing footnotes · chapter %1/%2"),
+                tostring(job.index - 1), tostring(total)), dl.total)
+    end
+    while job.index <= total do
+        self:_transformFootnoteChapter(dl, job, chapters[job.index])
+        job.index = job.index + 1
+        if job.index <= total and self:_batchSpent(batch_started) then
+            report()
+            self:_yieldFinalize(dl, function() self:_footnoteStep(dl) end)
+            return
+        end
+    end
+    report()
+    dl.footnotes_done = true
+    dl.footnote_job = nil
+    if job.css_needed then
+        dl.state.css = (dl.state.css or "") .. "\n"
+            .. Footnotes.FOOTNOTES_CSS
+    end
+    logger.info("book footnotes processed:",
+        "candidates=", tostring(dl.footnote_stats.candidates),
+        "converted=", tostring(dl.footnote_stats.converted),
+        "images=", tostring(dl.footnote_stats.image_notes),
+        "backlinks=", tostring(dl.footnote_stats.backlinks),
+        "removed_note_blocks=", tostring(dl.footnote_stats.removed_note_blocks),
+        "unresolved=", tostring(dl.footnote_stats.unresolved),
+        "fallback=", tostring(dl.footnote_stats.fallback),
+        "ui_yields=", tostring(dl.finalize_yields or 0))
+    self:_yieldFinalize(dl, function() self:_step(dl) end)
 end
 
 function Downloader:_startFootnotes(dl)
@@ -1181,6 +1226,7 @@ function Downloader:_startFootnotes(dl)
         unresolved = 0,
         fallback = 0,
     }
+    dl.finalize_yields = 0
     local selected = dl.resumable and dl.chapters or dl.selected
     dl.footnote_scan_job = { index = 1, chapters = selected or {}, scans = {} }
     if dl.resumable then
@@ -1189,18 +1235,19 @@ function Downloader:_startFootnotes(dl)
         -- rendering directory that can be rebuilt after an interrupted run.
         Content.reset_full_download_rendered_text(dl.workspace)
         -- Rescanning every checkpoint from disk is too slow for one UI step
-        -- on a large book; scan a few chapters per scheduled step.
-        self:_scheduleGuarded(dl, function() self:_footnoteScanStep(dl) end)
+        -- on a large book; it runs in budgeted batches from the next step.
+        self:_yieldFinalize(dl, function() self:_footnoteScanStep(dl) end)
         return
     end
     -- Other jobs scanned each chapter while downloading it.
     self:_footnoteScanStep(dl)
 end
 
--- Collect the per-chapter footnote scans for the book-wide index. Resumable
--- jobs read and scan their checkpoints here (the download loop skips it),
--- yielding to the UI after FOOTNOTE_SCAN_BATCH_SIZE chapters or
--- FOOTNOTE_SCAN_BUDGET_MS, whichever comes first.
+-- Scan phase of the finalize pipeline: collect the per-chapter footnote scans
+-- for the book-wide index. Resumable jobs read and scan their checkpoints
+-- here (the download loop skips it) and yield to the UI whenever a batch
+-- has used FINALIZE_BATCH_BUDGET_MS. The transform phase continues in the
+-- same batch while its budget lasts.
 function Downloader:_footnoteScanStep(dl)
     if dl.cancelled then
         self:_stopCancelled(dl)
@@ -1209,8 +1256,7 @@ function Downloader:_footnoteScanStep(dl)
     local job = dl.footnote_scan_job
     local chapters = job.chapters
     local total = #chapters
-    local step_started = time.now()
-    local scanned = 0
+    local batch_started = self:_now()
     while job.index <= total do
         local chapter_index = job.index
         local chapter = chapters[chapter_index]
@@ -1225,18 +1271,16 @@ function Downloader:_footnoteScanStep(dl)
                 logger.warn("checkpoint footnote scan failed; keeping original chapter:",
                     "chapter_uid=", uid, "error=", log_error(scan))
             end
-            scanned = scanned + 1
         end
         if dl.footnote_scans[uid] then
             job.scans[uid] = dl.footnote_scans[uid]
         end
         job.index = chapter_index + 1
-        if dl.resumable and job.index <= total and (scanned >= FOOTNOTE_SCAN_BATCH_SIZE
-            or tonumber(time.now() - step_started) / 1000 >= FOOTNOTE_SCAN_BUDGET_MS) then
+        if dl.resumable and job.index <= total and self:_batchSpent(batch_started) then
             self:_setStage(dl,
                 T(_("Scanning footnotes · chapter %1/%2"),
                     tostring(job.index - 1), tostring(total)), dl.total)
-            self:_scheduleGuarded(dl, function() self:_footnoteScanStep(dl) end)
+            self:_yieldFinalize(dl, function() self:_footnoteScanStep(dl) end)
             return
         end
     end
@@ -1247,7 +1291,11 @@ function Downloader:_footnoteScanStep(dl)
         index_data = Footnotes.build_book_index(job.scans, chapters),
         css_needed = false,
     }
-    self:_scheduleGuarded(dl, function() self:_footnoteStep(dl) end)
+    if self:_batchSpent(batch_started) then
+        self:_yieldFinalize(dl, function() self:_footnoteStep(dl) end)
+        return
+    end
+    self:_footnoteStep(dl, batch_started)
 end
 
 function Downloader:_finishChapter(dl)
