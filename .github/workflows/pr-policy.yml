@@ -192,12 +192,34 @@ jobs:
             python3 scripts/coverage_tools.py report coverage/combined.stats.out coverage/combined.report.out
             combined_args=(--combined coverage/combined.report.out)
           fi
+          history="$RUNNER_TEMP/baseline/history.jsonl"
+          if python3 scripts/coverage_tools.py gate --help | grep -q -- '--base-sha'; then
+            base_args=(--base-sha "$BASE_SHA")
+          else
+            # The measured tree predates per-commit baselines (a PR head whose
+            # Integration artifact has no measured-commit.txt): hand its gate
+            # the record of the base, or its nearest recorded ancestor, as
+            # --baseline instead of main's latest.
+            base_args=()
+            declare -A recorded=()
+            if [[ -s "$history" ]]; then
+              while read -r sha; do recorded[$sha]=1; done < <(jq -r '.sha // empty' "$history" 2>/dev/null || true)
+            fi
+            while read -r sha; do
+              if [[ -n "${recorded[$sha]:-}" ]]; then
+                jq -c --arg sha "$sha" 'select(.sha == $sha)' "$history" | tail -n 1 > "$RUNNER_TEMP/baseline/base.json"
+                base_args=(--baseline "$RUNNER_TEMP/baseline/base.json")
+                echo "Older gate tooling: baseline main@${sha:0:8} for base ${BASE_SHA:0:8}"
+                break
+              fi
+            done < <(git rev-list --max-count=5000 "$BASE_SHA")
+          fi
           python3 scripts/coverage_tools.py gate \
             --unit coverage/unit.report.out "${combined_args[@]}" \
             --base "origin/$BASE_REF" --head HEAD \
             --labels "$LABELS" \
-            --base-sha "$BASE_SHA" \
-            --history "$RUNNER_TEMP/baseline/history.jsonl" \
+            "${base_args[@]}" \
+            --history "$history" \
             --summary "$RUNNER_TEMP/coverage.md" --json "$RUNNER_TEMP/coverage.json"
 
       - name: Compose summary
