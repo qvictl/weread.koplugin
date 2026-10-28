@@ -328,6 +328,19 @@ test("the gateway progress API is the fallback for the web progress", function()
     expect(payload.chapter_uid == 7 and payload.progress == 50 and payload.summary == "Chapter 7",
         "time-only report re-asserts the gateway position")
     expect(outcome.book.reported_local == false, "not our own position")
+
+    outcome = run(report, { guard = {} })
+    expect(outcome.accepted == true, "guarded position report accepted")
+    expect(outcome.floor and outcome.floor.chapter_uid == 7
+            and outcome.floor.chapter_idx == 3 and outcome.floor.chapter_offset == 3
+            and outcome.floor.percent == 50,
+        "the gateway position becomes the floor for a lagging local position")
+    payload = env.client.sent[3]
+    expect(payload.chapter_uid == 7 and payload.chapter_idx == 3
+            and payload.chapter_offset == 3 and payload.progress == 50
+            and payload.summary == "Chapter 7",
+        "guarded report re-asserts the gateway position instead of the older local position")
+    expect(outcome.book.reported_local == false, "guarded cloud position is not our own position")
 end)
 
 -- ------------------------------------------------------------------
