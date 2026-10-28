@@ -7,7 +7,8 @@
 -- keep its checkpoint; starting again while offline is refused without any
 -- request. With the link up but the server silent (requests time out), it
 -- pauses the same way after two attempts. With the network back, the restart
--- reuses the completed chapters.
+-- reuses the completed chapters. The "Last error" shown in the pause dialog
+-- names the cause but never a Lua source position ("content.lua:1699: ").
 local BOOK_ID = "900001"
 
 return function(H)
@@ -54,6 +55,25 @@ return function(H)
             })
         end)
         return state
+    end
+
+    local PAUSE_MESSAGE = "Full-book download paused: the network seems to be unavailable.\n\nCompleted chapters were kept. Choose Download full book again to continue when the connection is back.\n\nLast error: %1"
+
+    -- Waits for the network pause dialog and returns the "Last error" text it
+    -- shows (up to the end of that widget's text).
+    local function pause_last_error()
+        local message = H.tr(PAUSE_MESSAGE)
+        H.wait_text(message:match("^[^\n]+"), 10)
+        local label = message:match("([^\n]*)%%1$")
+        local screen = H.screen_text()
+        local start = screen:find(label, 1, true)
+        H.check(start ~= nil, "pause dialog shows the last error", screen)
+        local last = screen:sub(start + #label):match("^([^|]*)") or ""
+        last = last:match("^%s*(.-)%s*$")
+        H.check(last ~= "", "last error is not empty", screen)
+        H.check(not last:find("%.lua:%d+:"), "last error shows no Lua source position", last)
+        H.check(not last:find("stack traceback", 1, true), "last error shows no traceback", last)
+        return last
     end
 
     local function standby_released()
@@ -113,9 +133,8 @@ return function(H)
         H.mock_control({ match = "", delay = 0, times = 0 })
         H.check(not first.ok, "paused job reports no success")
         H.equal(first.value, "network_unavailable", "completion reason")
-        local message = H.tr("Full-book download paused: the network seems to be unavailable.\n\nCompleted chapters were kept. Choose Download full book again to continue when the connection is back.\n\nLast error: %1")
-        H.wait_text(message:match("^[^\n]+"), 10)
-        H.check(H.has_text("network is not connected"), "last error names the missing link")
+        local last = pause_last_error()
+        H.equal(last, "network is not connected", "last error names the missing link")
         H.sleep(0.3)
         H.shot("paused_network")
         local fetched = select(3, chapter_fetches(mark))
@@ -171,9 +190,9 @@ return function(H)
         H.mock_control({ match = "", delay = 0, times = 0 })
         H.check(not state.ok, "paused job reports no success")
         H.equal(state.value, "network_unavailable", "timeouts count as a lost network")
-        local message = H.tr("Full-book download paused: the network seems to be unavailable.\n\nCompleted chapters were kept. Choose Download full book again to continue when the connection is back.\n\nLast error: %1")
-        H.wait_text(message:match("^[^\n]+"), 10)
-        H.check(H.has_text("timeout"), "last error names the timeout")
+        local last = pause_last_error()
+        H.check(last:find("^/web/book/chapter/e_0 failed: HTTP unknown %(timeout%)") ~= nil,
+            "last error names the timed-out chapter request", last)
         H.shot("paused_timeouts")
         -- The mock logs a request when it answers, i.e. after the delay.
         H.wait_until("both timed-out attempts logged", function()

@@ -327,6 +327,11 @@ do
         .. fetches .. " index=" .. dl.index)
     expect(infos[#infos]:find("network seems to be unavailable", 1, true)
         and infos[#infos]:find("wantread", 1, true), "network pause was not explained")
+    -- The fake raises with error(msg) (level 1), like an unexpected error
+    -- would: the dialog keeps the message but drops the source position.
+    expect(infos[#infos]:find("Last error: /web/book/chapter/e_0 failed: HTTP unknown (wantread)", 1, true)
+        and not infos[#infos]:find("%.lua:%d+:"),
+        "network pause showed a Lua source position: " .. infos[#infos])
     expect(downloader._active_job == nil, "paused job stayed active")
 
     fetches = 0
