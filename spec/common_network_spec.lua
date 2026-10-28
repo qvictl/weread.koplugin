@@ -121,6 +121,8 @@ package.loaded["ui/trapper"] = {
     dismissableRunInSubprocess = function(_self, task)
         if mode == "cancel" then return false end
         if mode == "fork_error" then return false, "fork failed" end
+        if mode == "start_failed" or mode == "read_failed" then return false, nil, mode end
+        if mode == "unknown_failure" then return false, nil, "worker_failed" end
         if mode == "invalid" then return true, "garbage" end
         in_child = true
         local value = task()
@@ -130,9 +132,9 @@ package.loaded["ui/trapper"] = {
     end,
 }
 for _, current in ipairs({ "success", "task_error", "cancel", "fork_error", "invalid", "auth_error", "ui_error",
-    "ticket_rotated", "account_changed" }) do
+    "ticket_rotated", "account_changed", "start_failed", "read_failed", "unknown_failure" }) do
     mode, account.user_vid = current, "original"
-    local results, failures, cancelled, reason = 0, 0, false, nil
+    local results, failures, cancelled, reason, failure_message = 0, 0, false, nil, nil
     host:_runNetworkRequest("Loading", "Load", function()
         eq(in_child, true, "network task runs in worker")
         if mode == "task_error" then error("HTTP 503") end
@@ -142,15 +144,22 @@ for _, current in ipairs({ "success", "task_error", "cancel", "fork_error", "inv
         eq(result.books, 3, "task result delivered")
         if mode == "ui_error" then error("UI update failed") end
         results = results + 1
-    end, function(_err, was_cancelled, why)
+    end, function(err, was_cancelled, why)
         eq(in_child, false, "failure cleanup runs in parent")
-        failures, cancelled, reason = failures + 1, was_cancelled, why
+        failures, cancelled, reason, failure_message = failures + 1, was_cancelled, why, err
     end)
     local succeeds = current == "success" or current == "ticket_rotated"
     eq(results, succeeds and 1 or 0, current .. " success delivery")
     eq(failures, succeeds and 0 or 1, current .. " failure cleanup exactly once")
     eq(cancelled, current == "cancel" or current == "account_changed", current .. " cancellation distinguished")
     eq(reason, current == "account_changed" and "account_changed" or nil, current .. " discard reason")
+    if current == "start_failed" then
+        eq(failure_message, "Could not start network subprocess.", "explicit launch failure is reported")
+    elseif current == "read_failed" then
+        eq(failure_message, "Could not read network subprocess result.", "explicit result I/O failure is reported")
+    elseif current == "unknown_failure" then
+        eq(failure_message, "worker_failed", "unrecognized explicit reason is not mistaken for cancellation")
+    end
 end
 eq(merged, 3, "successful worker credentials merged before task/UI error delivery")
 
