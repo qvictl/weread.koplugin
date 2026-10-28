@@ -134,10 +134,25 @@ def report(args) -> int:
     return 0
 
 
+def hit_column_width(lines: list) -> int:
+    """Width of LuaCov's hit column: digits of the report's highest hit count + 1.
+
+    LuaCov's default reporter right-aligns hits in a column one wider than the
+    largest count ("*...0" for misses), so the width depends on the run. Miss
+    lines and hit lines both start with exactly that many characters; a
+    non-executable source line that happens to start with digits only makes a
+    longer prefix, so the minimum is the column width.
+    """
+    widths = [len(m.group(1)) for line in lines
+              for m in [re.match(r"^(\*+0|\s+\d+) ", line)] if m]
+    return min(widths) if widths else 9
+
+
 def parse_report(path: Path) -> dict:
     """luacov.report.out -> {file: {line: hits}} for executable lines only."""
     files: dict = {}
     lines = Path(path).read_text(encoding="utf-8", errors="replace").split("\n")
+    width = hit_column_width(lines)
     i, current, line_no = 0, None, 0
     while i < len(lines):
         line = lines[i]
@@ -151,8 +166,8 @@ def parse_report(path: Path) -> dict:
             continue
         if current is not None:
             line_no += 1
-            # Fixed 9-character hit column, then a space, then the source.
-            token = line[:9].strip()
+            # Hit column of `width` characters, then a space, then the source.
+            token = line[:width].strip()
             if token:
                 current[line_no] = 0 if token.startswith("*") else int(token)
         i += 1
@@ -244,13 +259,72 @@ def load_policy() -> dict:
 
 
 def effective_targets(policy: dict) -> list:
-    day_one = policy.get("day_one_baseline", {}).get("combined", 0.0)
+    """Dated targets; each may set combined_min, unit_min and module_unit_min.
+
+    Effective overall minimum = max(configured, day-one baseline of the same
+    kind), so a target never sits below what main already had on day one.
+    module_unit_min = {"pattern": regex, "min": percent} is a per-file floor
+    for the unit coverage of every plugin file whose path matches the pattern.
+    """
+    day_one = policy.get("day_one_baseline", {})
     out = []
     for target in policy.get("targets", []):
-        minimum = max(float(target["combined_min"]), float(day_one))
-        out.append(dict(date=target["date"], configured=float(target["combined_min"]), effective=round(minimum, 2),
-                        label=target.get("label", "")))
+        entry = dict(date=target["date"], label=target.get("label", ""))
+        for kind in ("combined", "unit"):
+            key = f"{kind}_min"
+            if key in target:
+                configured = float(target[key])
+                entry[kind] = dict(configured=configured,
+                                   effective=round(max(configured, float(day_one.get(kind, 0.0))), 2))
+        floor = target.get("module_unit_min")
+        if floor:
+            entry["module_unit"] = dict(pattern=floor["pattern"], min=float(floor["min"]))
+        out.append(entry)
     return out
+
+
+def module_floor_misses(report_cov: dict, pattern: str, minimum: float) -> list:
+    """Plugin files matching pattern whose unit coverage is below minimum, worst first."""
+    misses = []
+    for name, cov in report_cov.items():
+        if not re.search(pattern, name) or not cov:
+            continue
+        percent = 100.0 * sum(1 for value in cov.values() if value > 0) / len(cov)
+        if percent < minimum:
+            misses.append((name, round(percent, 2)))
+    return sorted(misses, key=lambda item: (item[1], item[0]))
+
+
+def target_checks(policy: dict, today, o_unit: dict, o_comb, unit_cov: dict) -> list:
+    """(name, ok, blocking, detail) per dated target; report-only before its date, blocking from it."""
+    checks = []
+    for target in effective_targets(policy):
+        active = today >= dt.date.fromisoformat(target["date"])
+        title = f"Target {target['label'] or target['date']}"
+        suffix = "" if active else f" (report-only until {target['date']})"
+        if "combined" in target:
+            minimum = target["combined"]
+            value = o_comb["percent"] if o_comb is not None else None
+            checks.append((f"{title}: overall unit + emulator ≥ {minimum['effective']:.2f}%{suffix}",
+                           value is not None and value >= minimum["effective"], active,
+                           f"{fmt_pct(value)}; configured {minimum['configured']:.0f}%, "
+                           f"effective max(configured, day-one baseline)"))
+        if "unit" in target:
+            minimum = target["unit"]
+            value = o_unit["percent"]
+            checks.append((f"{title}: overall unit ≥ {minimum['effective']:.2f}%{suffix}",
+                           value >= minimum["effective"], active,
+                           f"{fmt_pct(value)}; configured {minimum['configured']:.0f}%, "
+                           f"effective max(configured, day-one baseline)"))
+        if "module_unit" in target:
+            floor = target["module_unit"]
+            misses = module_floor_misses(unit_cov, floor["pattern"], floor["min"])
+            shown = ", ".join(f"`{name}` {percent:.1f}%" for name, percent in misses[:8])
+            more = f" (+{len(misses) - 8} more)" if len(misses) > 8 else ""
+            checks.append((f"{title}: each file matching `{floor['pattern']}` unit ≥ {floor['min']:.0f}%{suffix}",
+                           not misses, active,
+                           f"{len(misses)} below: {shown}{more}" if misses else "all files at or above the floor"))
+    return checks
 
 
 def fmt_pct(value) -> str:
@@ -299,14 +373,8 @@ def gate(args) -> int:
     if o_comb is not None:
         add("Overall unit + emulator coverage does not drop (ratchet)", o_comb["percent"] + tol >= base_comb, True,
             f"{fmt_pct(o_comb['percent'])} vs {fmt_pct(base_comb)} on {base_src}")
-    for target in effective_targets(policy):
-        active = today >= dt.date.fromisoformat(target["date"])
-        value = o_comb["percent"] if o_comb is not None else None
-        ok = value is not None and value >= target["effective"]
-        add(f"Target {target['label'] or target['date']}: overall unit + emulator ≥ {target['effective']:.2f}%"
-            + ("" if active else f" (report-only until {target['date']})"),
-            ok, active, f"{fmt_pct(value)}; configured {target['configured']:.0f}%, "
-                        f"effective max(configured, day-one baseline)")
+    for name, ok, blocking, detail in target_checks(policy, today, o_unit, o_comb, unit_cov):
+        add(name, ok, blocking, detail)
 
     failed_blocking = [c for c in checks if c["blocking"] and not c["ok"]]
     md = [f"### Coverage: {'✅ pass' if not failed_blocking else '❌ fail'}", ""]
@@ -354,6 +422,18 @@ def gate(args) -> int:
     return 0 if not failed_blocking else 1
 
 
+def target_summary(target: dict) -> str:
+    parts = []
+    if "combined" in target:
+        parts.append(f"unit + emulator ≥ {target['combined']['effective']:.2f}%")
+    if "unit" in target:
+        parts.append(f"unit ≥ {target['unit']['effective']:.2f}%")
+    if "module_unit" in target:
+        floor = target["module_unit"]
+        parts.append(f"each `{floor['pattern']}` file unit ≥ {floor['min']:.0f}%")
+    return f"from {target['date']}: " + ", ".join(parts)
+
+
 def badge_color(percent: float) -> str:
     for limit, color in ((90, "brightgreen"), (85, "green"), (75, "yellowgreen"), (65, "yellow"), (50, "orange")):
         if percent >= limit:
@@ -387,8 +467,7 @@ def baseline(args) -> int:
     lines = ["# Coverage history (main)", "",
              "Generated by the *Coverage* workflow after every successful `Integration` run on `main`. "
              "Scope: `main.lua`, `weread/`, `integrations/`. Policy: `.ci/coverage-policy.json` on main.", "",
-             "Targets (unit + emulator): " + ", ".join(
-                 f"≥ {t['effective']:.2f}% from {t['date']}" for t in effective_targets(policy)), "",
+             "Targets: " + "; ".join(target_summary(t) for t in effective_targets(policy)), "",
              "| Date (UTC) | Commit | Unit | Unit + emulator | Run |", "| --- | --- | --- | --- | --- |"]
     for entry in reversed(entries[-100:]):
         run = f"[run]({entry['run']})" if entry.get("run") else ""
