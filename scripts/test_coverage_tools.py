@@ -1,13 +1,19 @@
 #!/usr/bin/env python3
-"""Offline tests for scripts/coverage_tools.py (report parsing and dated targets).
+"""Offline tests for scripts/coverage_tools.py (report parsing, dated targets, ratchet baseline).
 
     python3 scripts/test_coverage_tools.py
 """
 
 from __future__ import annotations
 
+import argparse
+import contextlib
 import datetime as dt
+import io
+import json
+import os
 from pathlib import Path
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -159,6 +165,137 @@ class TargetsTest(unittest.TestCase):
         for target in targets:
             dt.date.fromisoformat(target["date"])
             self.assertTrue({"combined", "unit"} & set(target), target)
+
+
+def record(sha: str, unit: float, combined: float) -> dict:
+    return dict(sha=sha, date="2026-10-28T00:00:00+00:00", unit=dict(percent=unit), combined=dict(percent=combined))
+
+
+class GitRepo:
+    """Throw-away linear repository; commits() returns SHAs oldest first."""
+
+    def __init__(self, tmp: str, count: int):
+        self.path = tmp
+        env = dict(os.environ, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@example.com",
+                   GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@example.com")
+        self.git("init", "-q", env=env)
+        self.shas = []
+        for index in range(count):
+            self.git("commit", "-q", "--allow-empty", "-m", f"c{index}", env=env)
+            self.shas.append(self.git("rev-parse", "HEAD"))
+
+    def git(self, *argv, env=None) -> str:
+        return subprocess.check_output(["git", *argv], cwd=self.path, text=True, env=env).strip()
+
+
+class RatchetBaselineTest(unittest.TestCase):
+    def test_exact_base_commit(self):
+        records = [record("a", 70, 80), record("b", 71, 81)]
+        chosen, match = ct.select_baseline(records, "a", ["a"])
+        self.assertEqual((chosen["sha"], match), ("a", "exact"))
+
+    def test_missing_sha_falls_back_to_nearest_ancestor(self):
+        records = [record("a", 70, 80), record("b", 71, 81), record("d", 75, 85)]
+        # base c has no record (its coverage run failed or was superseded); b is its parent
+        chosen, match = ct.select_baseline(records, "c", ["c", "b", "a"])
+        self.assertEqual((chosen["sha"], match), ("b", "ancestor"))
+
+    def test_no_recorded_ancestor_uses_day_one(self):
+        chosen, match = ct.select_baseline([record("x", 90, 95)], "c", ["c", "b"])
+        self.assertEqual((chosen, match), (None, "none"))
+        result = ct.ratchet_checks(POLICY, dict(percent=73.8), dict(percent=80.78), chosen, match, "c")
+        self.assertEqual((result["unit"], result["combined"]), (73.8, 80.78))
+        self.assertTrue(all(ok for _name, ok, _blocking, _detail in result["checks"]))
+        self.assertIn("day-one baseline", result["source"])
+
+    def test_republished_sha_last_record_wins(self):
+        chosen, _match = ct.select_baseline([record("a", 70, 80), record("a", 72, 82)], "a", ["a"])
+        self.assertEqual(chosen["unit"]["percent"], 72)
+
+    def test_git_ancestors_walk_real_history(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = GitRepo(tmp, 4)
+            c0, c1, c2, c3 = repo.shas
+            self.assertEqual(ct.git_ancestors(c3, cwd=tmp), [c3, c2, c1, c0])
+            self.assertEqual(ct.git_ancestors("0" * 40, cwd=tmp), ["0" * 40])
+            chosen, match = ct.select_baseline([record(c0, 70, 80), record(c1, 71, 81)], c3,
+                                               ct.git_ancestors(c3, cwd=tmp))
+            self.assertEqual((chosen["sha"], match), (c1, "ancestor"))
+
+    def ratchet_ok(self, records, base, ancestors, unit, combined):
+        chosen, match = ct.select_baseline(records, base, ancestors)
+        result = ct.ratchet_checks(POLICY, dict(percent=unit), dict(percent=combined), chosen, match, base)
+        return all(ok for _name, ok, _blocking, _detail in result["checks"]), result
+
+    def test_parallel_prs_each_judged_against_their_own_base(self):
+        # main: A, then B = A + another PR that added tests (coverage went up)
+        history = [record("A", 74.00, 80.00), record("B", 74.50, 81.00)]
+        # PR 1 branched from A, keeps A's coverage: passes although B is higher now
+        ok1, result1 = self.ratchet_ok(history, "A", ["A"], 74.00, 80.00)
+        self.assertTrue(ok1, result1)
+        self.assertIn("main@A", result1["source"])
+        # what the old "latest main" ratchet did to PR 1
+        stale, _ = self.ratchet_ok(history, "B", ["B", "A"], 74.00, 80.00)
+        self.assertFalse(stale)
+        # PR 2 branched from B keeps B's coverage: passes too
+        ok2, _ = self.ratchet_ok(history, "B", ["B", "A"], 74.50, 81.00)
+        self.assertTrue(ok2)
+        # both in flight together, whatever merges first: still independent
+        history.append(record("C", 74.50, 81.00))
+        self.assertTrue(self.ratchet_ok(history, "A", ["A"], 74.00, 80.00)[0])
+        self.assertTrue(self.ratchet_ok(history, "B", ["B", "A"], 74.50, 81.00)[0])
+
+    def test_drop_against_own_base_fails_beyond_tolerance(self):
+        history = [record("A", 74.00, 80.00), record("B", 74.50, 81.00)]
+        policy = dict(POLICY, ratchet_tolerance_pp=0.1)
+        chosen, match = ct.select_baseline(history, "B", ["B", "A"])
+        within = ct.ratchet_checks(policy, dict(percent=74.41), dict(percent=80.91), chosen, match, "B")
+        self.assertTrue(all(ok for _n, ok, _b, _d in within["checks"]))
+        unit_drop = ct.ratchet_checks(policy, dict(percent=74.30), dict(percent=81.00), chosen, match, "B")
+        self.assertEqual([ok for _n, ok, _b, _d in unit_drop["checks"]], [False, True])
+        comb_drop = ct.ratchet_checks(policy, dict(percent=74.50), dict(percent=80.80), chosen, match, "B")
+        self.assertEqual([ok for _n, ok, _b, _d in comb_drop["checks"]], [True, False])
+        self.assertTrue(all(blocking for _n, _ok, blocking, _d in comb_drop["checks"]))
+
+    def test_read_history_skips_bad_lines(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "history.jsonl"
+            path.write_text(json.dumps(record("a", 1, 2)) + "\nnot json\n{}\n" + json.dumps(record("b", 3, 4)) + "\n",
+                            encoding="utf-8")
+            self.assertEqual([r["sha"] for r in ct.read_history(path)], ["a", "b"])
+            self.assertEqual(ct.read_history(Path(tmp) / "missing.jsonl"), [])
+            self.assertEqual(ct.read_history(None), [])
+
+    def test_out_of_order_publish_keeps_baseline_json_on_the_newest_commit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = GitRepo(tmp, 3)
+            c0, _c1, c2 = repo.shas
+            path = Path(tmp) / "baseline.json"
+            self.assertTrue(ct.is_newest_publish(path, c0, cwd=tmp))
+            path.write_text(json.dumps(record(c2, 1, 2)), encoding="utf-8")
+            self.assertFalse(ct.is_newest_publish(path, c0, cwd=tmp))
+            self.assertTrue(ct.is_newest_publish(path, c2, cwd=tmp))
+            path.write_text(json.dumps(record(c0, 1, 2)), encoding="utf-8")
+            self.assertTrue(ct.is_newest_publish(path, c2, cwd=tmp))
+
+    def test_baseline_command_keys_history_by_sha(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            report = Path(tmp) / "report.out"
+            report.write_text(luacov_report({"weread/lib/m.lua": [(1, "a()"), (0, "b()")]}), encoding="utf-8")
+            site = Path(tmp) / "site"
+
+            def publish(sha):
+                args = argparse.Namespace(unit=str(report), combined=str(report), sha=sha, run_url="",
+                                          out_dir=str(site))
+                with contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(ct.baseline(args), 0)
+
+            publish("a" * 40)
+            publish("b" * 40)
+            publish("a" * 40)  # re-run of the same commit replaces its record
+            shas = [r["sha"] for r in ct.read_history(site / "history.jsonl")]
+            self.assertEqual(shas, ["b" * 40, "a" * 40])
+            self.assertEqual(json.loads((site / "baseline.json").read_text())["unit"]["percent"], 50.0)
 
 
 if __name__ == "__main__":

@@ -9,10 +9,13 @@ with all their executable lines missed (`merge --all-files`).
     coverage_tools.py merge --out coverage/unit.stats.out --all-files coverage/parts
     # line report (needs LuaCov on LUA_PATH and luajit)
     coverage_tools.py report coverage/unit.stats.out coverage/unit.report.out
-    # PR gate: diff unit, diff combined, overall ratchet, dated targets
+    # PR gate: diff unit, diff combined, overall ratchet, dated targets. The
+    # ratchet compares with main's coverage at merge-base(base, head) (for a
+    # PR merge commit: its first parent) taken from history.jsonl, falling
+    # back to the nearest ancestor with a record, then the day-one baseline.
     coverage_tools.py gate --unit coverage/unit.report.out --combined coverage/combined.report.out \
-        --base origin/main --labels "a,b" --baseline baseline.json --summary out.md --json out.json
-    # main: baseline.json, badge.json and a history line for the coverage branch
+        --base origin/main --labels "a,b" --history history.jsonl --summary out.md --json out.json
+    # main: history record (keyed by SHA), baseline.json and badges for the coverage branch
     coverage_tools.py baseline --unit ... --combined ... --sha SHA --out-dir DIR
     # quick totals / single diff
     coverage_tools.py total coverage/unit.report.out
@@ -178,7 +181,7 @@ def parse_report(path: Path) -> dict:
 
 
 def changed_lines(base: str, head: str) -> dict:
-    merge_base = subprocess.check_output(["git", "merge-base", base, head], cwd=REPO, text=True).strip()
+    merge_base = git_merge_base(base, head)
     diff = subprocess.check_output(["git", "diff", "-U0", "--no-color", "--diff-filter=AM", merge_base, head, "--",
                                     "main.lua", "weread", "integrations"], cwd=REPO, text=True)
     result: dict = {}
@@ -331,6 +334,81 @@ def fmt_pct(value) -> str:
     return "n/a" if value is None else f"{value:.2f}%"
 
 
+def read_history(path) -> list:
+    """Records of history.jsonl (one per measured main commit); unreadable lines are skipped."""
+    records = []
+    if path and Path(path).is_file():
+        for line in Path(path).read_text(encoding="utf-8").splitlines():
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(record, dict) and record.get("sha"):
+                records.append(record)
+    return records
+
+
+def git_merge_base(base: str, head: str, cwd=REPO) -> str:
+    return subprocess.check_output(["git", "merge-base", base, head], cwd=cwd, text=True).strip()
+
+
+def git_ancestors(sha: str, cwd=REPO, limit: int = 5000) -> list:
+    """sha itself, then its ancestors, nearest first (empty if git cannot resolve it)."""
+    if not sha:
+        return []
+    try:
+        out = subprocess.check_output(["git", "rev-list", f"--max-count={limit}", sha, "--"],
+                                      cwd=cwd, text=True, stderr=subprocess.DEVNULL)
+    except subprocess.CalledProcessError:
+        return [sha]
+    return out.split() or [sha]
+
+
+def select_baseline(records: list, base_sha: str, ancestors: list):
+    """Main's coverage record for the commit a PR is measured against.
+
+    Returns (record, match): match is "exact" when base_sha itself has a record,
+    "ancestor" when the nearest ancestor of base_sha that has one is used (a main
+    commit whose coverage was never published: failed or superseded run), and
+    "none" (record None) when no ancestor has one. When a SHA was published more
+    than once the last record wins.
+    """
+    by_sha = {record["sha"]: record for record in records}
+    for index, sha in enumerate(ancestors or ([base_sha] if base_sha else [])):
+        if sha in by_sha:
+            return by_sha[sha], ("exact" if index == 0 else "ancestor")
+    return None, "none"
+
+
+def ratchet_checks(policy: dict, o_unit: dict, o_comb, baseline, match: str, base_sha: str) -> dict:
+    """Overall-coverage ratchet against main's coverage at the PR's own base commit.
+
+    Comparing with the base the PR is measured against (not main's latest) keeps
+    PRs independent: tests another PR merges meanwhile do not raise this PR's bar.
+    """
+    day_one = policy["day_one_baseline"]
+    if baseline:
+        base_unit = baseline.get("unit", {}).get("percent", day_one["unit"])
+        base_comb = baseline.get("combined", {}).get("percent", day_one["combined"])
+        source = f"main@{baseline['sha'][:8]}"
+        if match == "ancestor":
+            source += f" (nearest ancestor with coverage of base {(base_sha or '?')[:8]})"
+        else:
+            source += " (this PR's base)"
+    else:
+        base_unit, base_comb = day_one["unit"], day_one["combined"]
+        source = (f"day-one baseline ({day_one['date']}; no coverage recorded for base "
+                  f"{(base_sha or '?')[:8]} or its ancestors)")
+    tol = float(policy.get("ratchet_tolerance_pp", 0.0))
+    checks = [("Overall unit coverage does not drop (ratchet)", o_unit["percent"] + tol >= base_unit, True,
+               f"{fmt_pct(o_unit['percent'])} vs {fmt_pct(base_unit)} on {source}")]
+    if o_comb is not None:
+        checks.append(("Overall unit + emulator coverage does not drop (ratchet)",
+                       o_comb["percent"] + tol >= base_comb, True,
+                       f"{fmt_pct(o_comb['percent'])} vs {fmt_pct(base_comb)} on {source}"))
+    return dict(checks=checks, unit=base_unit, combined=base_comb, source=source)
+
+
 def gate(args) -> int:
     policy = load_policy()
     labels = {label.strip() for label in (args.labels or "").split(",") if label.strip()}
@@ -343,14 +421,10 @@ def gate(args) -> int:
     d_comb = diff_stats(combined_cov, changes) if combined_cov is not None else None
     o_unit = overall(unit_cov)
     o_comb = overall(combined_cov) if combined_cov is not None else None
-    baseline = {}
-    if args.baseline and Path(args.baseline).is_file():
-        baseline = json.loads(Path(args.baseline).read_text(encoding="utf-8"))
-    base_unit = baseline.get("unit", {}).get("percent", policy["day_one_baseline"]["unit"])
-    base_comb = baseline.get("combined", {}).get("percent", policy["day_one_baseline"]["combined"])
-    base_src = (f"main@{baseline.get('sha', '?')[:8]} ({baseline.get('date', '?')})" if baseline
-                else f"day-one baseline ({policy['day_one_baseline']['date']})")
-    tol = float(policy.get("ratchet_tolerance_pp", 0.0))
+    records = read_history(args.history)
+    ancestors = git_ancestors(args.base_sha or git_merge_base(args.base, args.head))
+    base_sha = ancestors[0]
+    baseline, match = select_baseline(records, base_sha, ancestors)
     checks = []  # (name, ok, blocking, detail)
 
     def add(name, ok, blocking, detail):
@@ -368,11 +442,9 @@ def gate(args) -> int:
         add(f"Diff coverage, unit + emulator ≥ {comb_min:.0f}%",
             d_comb["executable"] == 0 or d_comb["percent"] >= comb_min, not exempt,
             f"{d_comb['percent']:.1f}% ({d_comb['covered']}/{d_comb['executable']})")
-    add("Overall unit coverage does not drop (ratchet)", o_unit["percent"] + tol >= base_unit, True,
-        f"{fmt_pct(o_unit['percent'])} vs {fmt_pct(base_unit)} on {base_src}")
-    if o_comb is not None:
-        add("Overall unit + emulator coverage does not drop (ratchet)", o_comb["percent"] + tol >= base_comb, True,
-            f"{fmt_pct(o_comb['percent'])} vs {fmt_pct(base_comb)} on {base_src}")
+    ratchet = ratchet_checks(policy, o_unit, o_comb, baseline, match, base_sha)
+    for name, ok, blocking, detail in ratchet["checks"]:
+        add(name, ok, blocking, detail)
     for name, ok, blocking, detail in target_checks(policy, today, o_unit, o_comb, unit_cov):
         add(name, ok, blocking, detail)
 
@@ -387,13 +459,7 @@ def gate(args) -> int:
                f"{o_unit['files']} files)"
            + (f" · unit + emulator {fmt_pct(o_comb['percent'])} ({o_comb['covered']}/{o_comb['executable']})"
               if o_comb else "")]
-    history = []
-    if args.history and Path(args.history).is_file():
-        for line in Path(args.history).read_text(encoding="utf-8").splitlines()[-8:]:
-            try:
-                history.append(json.loads(line))
-            except json.JSONDecodeError:
-                pass
+    history = records[-8:]
     if history:
         trend = " → ".join(f"{h['combined']['percent']:.1f}" for h in history if h.get("combined"))
         md += ["", f"Trend on main (unit + emulator, last {len(history)}): {trend}"]
@@ -416,7 +482,9 @@ def gate(args) -> int:
     if args.json:
         Path(args.json).write_text(json.dumps(dict(
             checks=checks, diff_unit=d_unit, diff_combined=d_comb, overall_unit=o_unit, overall_combined=o_comb,
-            baseline_unit=base_unit, baseline_combined=base_comb, passed=not failed_blocking),
+            baseline_unit=ratchet["unit"], baseline_combined=ratchet["combined"],
+            baseline_sha=baseline.get("sha") if baseline else None, baseline_match=match, base_sha=base_sha,
+            passed=not failed_blocking),
             ensure_ascii=False, indent=2), encoding="utf-8")
     print(text)
     return 0 if not failed_blocking else 1
@@ -441,6 +509,26 @@ def badge_color(percent: float) -> str:
     return "red"
 
 
+def is_newest_publish(baseline_path: Path, sha: str, cwd=REPO) -> bool:
+    """True unless baseline.json already holds a commit that sha is an ancestor of.
+
+    Coverage runs for main commits may finish out of order; history.jsonl keeps
+    every commit (keyed by SHA, what the PR ratchet reads) while baseline.json
+    and the badges only move forward.
+    """
+    if not baseline_path.is_file():
+        return True
+    try:
+        current = json.loads(baseline_path.read_text(encoding="utf-8")).get("sha", "")
+    except json.JSONDecodeError:
+        return True
+    if not current or current == sha:
+        return True
+    older = subprocess.run(["git", "merge-base", "--is-ancestor", sha, current], cwd=cwd,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
+    return not older
+
+
 def baseline(args) -> int:
     unit = overall(parse_report(Path(args.unit)))
     combined = overall(parse_report(Path(args.combined)))
@@ -448,21 +536,18 @@ def baseline(args) -> int:
     record = dict(sha=args.sha, date=now, unit=unit, combined=combined, run=args.run_url or "")
     out = Path(args.out_dir)
     out.mkdir(parents=True, exist_ok=True)
-    (out / "baseline.json").write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
-    with (out / "history.jsonl").open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(record) + "\n")
-    (out / "badge.json").write_text(json.dumps(dict(
-        schemaVersion=1, label="coverage", message=f"{combined['percent']:.1f}%",
-        color=badge_color(combined["percent"]))) + "\n", encoding="utf-8")
-    (out / "badge-unit.json").write_text(json.dumps(dict(
-        schemaVersion=1, label="unit coverage", message=f"{unit['percent']:.1f}%",
-        color=badge_color(unit["percent"]))) + "\n", encoding="utf-8")
-    entries = []
-    for line in (out / "history.jsonl").read_text(encoding="utf-8").splitlines():
-        try:
-            entries.append(json.loads(line))
-        except json.JSONDecodeError:
-            pass
+    entries = [entry for entry in read_history(out / "history.jsonl") if entry["sha"] != args.sha] + [record]
+    (out / "history.jsonl").write_text("".join(json.dumps(entry) + "\n" for entry in entries), encoding="utf-8")
+    if is_newest_publish(out / "baseline.json", args.sha):
+        (out / "baseline.json").write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
+        (out / "badge.json").write_text(json.dumps(dict(
+            schemaVersion=1, label="coverage", message=f"{combined['percent']:.1f}%",
+            color=badge_color(combined["percent"]))) + "\n", encoding="utf-8")
+        (out / "badge-unit.json").write_text(json.dumps(dict(
+            schemaVersion=1, label="unit coverage", message=f"{unit['percent']:.1f}%",
+            color=badge_color(unit["percent"]))) + "\n", encoding="utf-8")
+    else:
+        print(f"{args.sha[:8]} is older than the published baseline.json; history only")
     policy = load_policy()
     lines = ["# Coverage history (main)", "",
              "Generated by the *Coverage* workflow after every successful `Integration` run on `main`. "
@@ -501,8 +586,9 @@ def main() -> int:
     p.add_argument("--base", required=True)
     p.add_argument("--head", default="HEAD")
     p.add_argument("--labels", default="")
-    p.add_argument("--baseline")
-    p.add_argument("--history")
+    p.add_argument("--history", help="history.jsonl of the coverage branch (per-commit main coverage)")
+    p.add_argument("--base-sha",
+                   help="main commit the PR is measured against (default: merge-base of --base and --head)")
     p.add_argument("--today")
     p.add_argument("--summary")
     p.add_argument("--json")

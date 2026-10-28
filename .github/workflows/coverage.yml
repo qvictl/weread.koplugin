@@ -3,11 +3,19 @@ name: Coverage
 # After every successful Integration run on main: combine unit-spec and
 # emulator-scenario line coverage of the whole plugin and publish it on the
 # `coverage` branch:
-#   baseline.json  ratchet baseline for the tests-policy gate
-#   history.jsonl  one record per main commit (trend)
+#   history.jsonl  one record per main commit, keyed by SHA: the tests-policy
+#                  ratchet reads the record of the PR's own base commit (or
+#                  its nearest recorded ancestor), plus the trend
+#   baseline.json  newest main commit's record (never moved back by a run
+#                  that finishes out of order)
 #   badge.json     shields.io endpoint for the README badge (unit + emulator)
 #   badge-unit.json, README.md (history table)
-# The branch holds no workflow files, so GITHUB_TOKEN may push it.
+# One concurrency group per commit, so a burst of merges does not cancel the
+# pending runs in between; pushes to the branch retry on a race. A commit
+# whose Integration run failed or was superseded gets no record: PRs based
+# on it fall back to its nearest recorded ancestor (re-run this workflow with
+# `integration_run` to fill it in). The branch holds no workflow files, so
+# GITHUB_TOKEN may push it.
 
 on:
   workflow_run:
@@ -28,7 +36,7 @@ permissions:
   actions: read
 
 concurrency:
-  group: coverage-main
+  group: coverage-main-${{ github.event.workflow_run.head_sha || inputs.integration_run || github.run_id }}
   cancel-in-progress: false
 
 env:
@@ -99,30 +107,47 @@ jobs:
         run: |
           set -euo pipefail
           site="$RUNNER_TEMP/coverage-site"
-          if git fetch --no-tags origin coverage:refs/remotes/origin/coverage 2>/dev/null; then
-            git worktree add "$site" origin/coverage
-            git -C "$site" checkout -B coverage
-          else
-            git worktree add --detach "$site"
-            git -C "$site" checkout --orphan coverage
-            git -C "$site" rm -rfq .
-          fi
-          if [[ -f "$site/baseline.json" ]] && [[ "$(jq -r .sha "$site/baseline.json")" == "$SHA" ]]; then
-            echo "Coverage for $SHA already published."
-            exit 0
-          fi
-          python3 scripts/coverage_tools.py baseline \
-            --unit coverage/unit.report.out --combined coverage/combined.report.out \
-            --sha "$SHA" --run-url "$RUN_URL" --out-dir "$site"
-          cd "$site"
-          git add baseline.json history.jsonl badge.json badge-unit.json README.md
-          git -c user.name="github-actions[bot]" \
-              -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
-              commit -q -m "coverage: ${SHA:0:8} $(jq -r '.combined.percent' baseline.json)% (unit $(jq -r '.unit.percent' baseline.json)%)"
-          git push origin coverage
+          publish() {
+            if git fetch --no-tags origin +coverage:refs/remotes/origin/coverage 2>/dev/null; then
+              if [[ -d "$site" ]]; then
+                git -C "$site" checkout -q -B coverage origin/coverage || return 1
+              else
+                git worktree add -q "$site" origin/coverage || return 1
+                git -C "$site" checkout -q -B coverage || return 1
+              fi
+            elif [[ ! -d "$site" ]]; then
+              git worktree add -q --detach "$site" || return 1
+              git -C "$site" checkout -q --orphan coverage || return 1
+              git -C "$site" rm -rfq . || return 1
+            fi
+            if [[ -f "$site/history.jsonl" ]] && jq -e --arg sha "$SHA" 'select(.sha == $sha)' "$site/history.jsonl" >/dev/null 2>&1; then
+              echo "Coverage for $SHA already published."
+              return 0
+            fi
+            python3 scripts/coverage_tools.py baseline \
+              --unit coverage/unit.report.out --combined coverage/combined.report.out \
+              --sha "$SHA" --run-url "$RUN_URL" --out-dir "$site" || return 1
+            git -C "$site" add -A baseline.json history.jsonl badge.json badge-unit.json README.md || return 1
+            git -C "$site" -c user.name="github-actions[bot]" \
+                -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+                commit -q -m "coverage: ${SHA:0:8} $(record .combined.percent)% (unit $(record .unit.percent)%)" || return 1
+            git -C "$site" push origin coverage
+          }
+          record() { jq -r --arg sha "$SHA" "select(.sha == \$sha) | $1" "$site/history.jsonl" | tail -n 1; }
+          for attempt in 1 2 3 4 5; do
+            if publish; then
+              break
+            fi
+            if (( attempt == 5 )); then
+              echo "::error::Could not push the coverage branch."
+              exit 1
+            fi
+            echo "Push raced with another coverage run; retrying ($attempt)."
+            sleep $((attempt * 5))
+          done
           {
             echo "### Coverage on main @ ${SHA:0:8}"
             echo
-            echo "- unit + emulator: $(jq -r '.combined.percent' baseline.json)%"
-            echo "- unit: $(jq -r '.unit.percent' baseline.json)%"
+            echo "- unit + emulator: $(record .combined.percent)%"
+            echo "- unit: $(record .unit.percent)%"
           } >> "$GITHUB_STEP_SUMMARY"
