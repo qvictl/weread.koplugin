@@ -323,6 +323,36 @@ class AiReviewTest(GateCase):
         self.state["reviews"] = [review("gemini-code-assist[bot]", "COMMENTED")]
         self.assertTrue(self.run_gate().ok)
 
+    def cr_run(self, status="completed", conclusion="success",
+               summary="Result: Success - Review completed\nRun ID: `x`", title="Finished", slug="coderabbitai"):
+        return {"id": 50, "name": "CodeRabbit", "status": status, "conclusion": conclusion, "started_at": "z",
+                "app": {"id": 347564, "slug": slug}, "output": {"title": title, "summary": summary}}
+
+    def test_coderabbit_check_run_counts_when_no_review_was_posted(self):
+        # Clean PR: CodeRabbit posts no review, only its check run (seen on qvictl/weread.koplugin#36).
+        self.state["reviews"] = []
+        self.state["check_runs"].append(self.cr_run())
+        self.assertTrue(self.run_gate().ok)
+        self.assertIn("CodeRabbit 已审查", self.cond("ai").detail)
+
+    def test_coderabbit_check_run_in_progress_or_skipped(self):
+        self.state["reviews"] = []
+        self.state["check_runs"].append(self.cr_run(status="in_progress", conclusion=None))
+        self.run_gate()
+        self.assertFalse(self.cond("ai").ok)
+        self.assertIn("正在审查", self.cond("ai").detail)
+        self.state["check_runs"][-1] = self.cr_run(title="Review skipped", summary="Result: Success - Review completed")
+        self.assertFalse(self.run_gate().ok)
+        self.state["check_runs"][-1] = self.cr_run(conclusion="failure")
+        self.assertFalse(self.run_gate().ok)
+        self.state["check_runs"][-1] = self.cr_run(slug="impostor")
+        self.assertFalse(self.run_gate().ok)
+
+    def test_check_run_does_not_override_changes_requested(self):
+        self.state["reviews"] = [review("coderabbitai[bot]", "CHANGES_REQUESTED", commit=OLD)]
+        self.state["check_runs"].append(self.cr_run())
+        self.assertFalse(self.run_gate().ok)
+
     def test_human_review_does_not_count_as_ai(self):
         self.state["reviews"] = [review("someone", "APPROVED")]
         self.assertFalse(self.run_gate().ok)

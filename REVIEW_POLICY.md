@@ -39,7 +39,8 @@
 
 1. **必需检查全部成功**：`main` 分支保护要求的检查（当前为 `ci`、`integration`、`tests-policy`）在 head SHA 上都已成功（`success` / `neutral` / `skipped`）。
 2. **AI 审查已完成且没有 Request changes**：至少一个 AI 审查者（`coderabbitai[bot]` 或 `gemini-code-assist[bot]`）
-   提交了 `commit_id` 等于 head SHA 的审查；并且每个 AI 审查者最新的结论性审查（Approve / Request changes）都不是
+   提交了 `commit_id` 等于 head SHA 的审查（CodeRabbit 没有可操作意见时不发 PR review，只在该提交上留下
+   `CodeRabbit` 检查 “Review completed”，这同样算审查完成）；并且每个 AI 审查者最新的结论性审查（Approve / Request changes）都不是
    **Request changes**（之后的普通评论不会抵消 Request changes）。尚无任何 AI 审查时，网关显示“等待 AI 审查（咨询模式）”。
 3. **没有未解决的审查对话**（GraphQL `reviewThreads.isResolved`，过时的对话也算）。
 4. **非测试、非文档的改动 ≤ 500 行**（新增 + 删除）。测试：`spec/**`、`scripts/test_*.py`；文档：`**/*.md`、`docs/**`、`screenshots/**`。

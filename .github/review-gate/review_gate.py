@@ -65,6 +65,13 @@ AI_REVIEWERS = {
     "coderabbitai[bot]": "CodeRabbit",
     "gemini-code-assist[bot]": "Gemini Code Assist",
 }
+# CodeRabbit also reports every review as a check run on the reviewed commit
+# ("CodeRabbit", summary "Result: Success - Review completed"). When a review
+# produces no actionable comment it posts no PR review at all, so this check
+# run is the evidence that the head commit was reviewed.
+AI_CHECK_RUNS = {"coderabbitai": ("CodeRabbit", "CodeRabbit")}  # app slug: (check name, reviewer)
+AI_CHECK_DONE = re.compile(r"Review completed", re.IGNORECASE)
+AI_CHECK_NOT_DONE = re.compile(r"skip|pause|fail|error|cancel", re.IGNORECASE)
 OVERRIDE_LABEL = "human-approved"
 BLOCK_LABEL = "do-not-merge"
 MAINTAINER_ROLES = {"admin", "maintain"}
@@ -285,7 +292,7 @@ def collect(gh: GitHub, repo: str, number: int, repo_info: Optional[Dict[str, An
 
     ai_logins = set(AI_REVIEWERS)
     ai_activity = any((r.get("user") or {}).get("login") in ai_logins for r in reviews) or any(
-        (c.get("user") or {}).get("login") in ai_logins for c in comments)
+        (c.get("user") or {}).get("login") in ai_logins for c in comments) or bool(ai_check_runs(check_runs))
     sticky = find_sticky(comments)
 
     facts = Facts(
@@ -403,17 +410,36 @@ def check_required(facts: Facts) -> Condition:
         len(facts.required_checks), "、".join("`%s`" % r["context"] for r in facts.required_checks)))
 
 
+def ai_check_runs(runs: List[Dict[str, Any]]) -> List[Tuple[str, Dict[str, Any]]]:
+    """(reviewer, latest run) for every AI reviewer that reports a check run."""
+    found = []
+    for slug, (name, label) in AI_CHECK_RUNS.items():
+        mine = [r for r in runs if (r.get("app") or {}).get("slug") == slug and r.get("name") == name]
+        if mine:
+            found.append((label, max(mine, key=lambda r: (r.get("started_at") or "", r.get("id") or 0))))
+    return found
+
+
 def check_ai(facts: Facts) -> Condition:
     title = "AI 审查已覆盖最新提交且无 Request changes"
     head = facts.head_sha
-    reviewed_head, requesting, seen = [], [], set()
+    reviewed_head, requesting, seen, running = [], [], set(), []
+    for label, run in ai_check_runs(facts.check_runs):
+        seen.add(label)
+        output = run.get("output") or {}
+        text = "%s %s" % (output.get("title") or "", output.get("summary") or "")
+        if run.get("status") != "completed":
+            running.append(label)
+        elif (run.get("conclusion") == "success" and AI_CHECK_DONE.search(text)
+              and not AI_CHECK_NOT_DONE.search(output.get("title") or "")):
+            reviewed_head.append(label)
     for login, label in AI_REVIEWERS.items():
         mine = [r for r in facts.reviews if (r.get("user") or {}).get("login") == login
                 and r.get("state") not in ("PENDING",)]
         if not mine:
             continue
         seen.add(label)
-        if any(r.get("commit_id") == head and r.get("state") != "DISMISSED" for r in mine):
+        if any(r.get("commit_id") == head and r.get("state") != "DISMISSED" for r in mine) and label not in reviewed_head:
             reviewed_head.append(label)
         decisive = [r for r in mine if r.get("state") in ("APPROVED", "CHANGES_REQUESTED")]
         if decisive:
@@ -425,6 +451,8 @@ def check_ai(facts: Facts) -> Condition:
                          % "、".join(requesting))
     if reviewed_head:
         return Condition("ai", title, True, "%s 已审查 `%s`" % ("、".join(reviewed_head), head[:10]))
+    if running:
+        return Condition("ai", title, False, "%s 正在审查 `%s`" % ("、".join(running), head[:10]), pending=True)
     if not facts.ai_activity:
         return Condition("ai", title, False, "等待 AI 审查：本 PR 尚无 CodeRabbit / Gemini Code Assist 的审查"
                          "（应用可能尚未安装——咨询模式，网关只报告、不批准）", pending=True)
