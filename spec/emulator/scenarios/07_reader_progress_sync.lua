@@ -21,37 +21,14 @@ return function(H)
     local Event = require("ui/event")
     local UIManager = require("ui/uimanager")
 
-    local function has_dimen(widget)
-        local d = rawget(widget, "dimen")
-        return type(d) == "table" and type(d.x) == "number" and type(d.w) == "number"
-            and d.w > 0 and d.h > 0
-    end
-
     -- Painted widget whose text is exactly label (buttons; avoids matching
     -- the same word inside a dialog's message).
     local function find_exact(label)
-        local found
-        H.walk(function(widget, chain, depth)
-            if rawget(widget, "text") == label then
-                for i = depth, 1, -1 do
-                    if has_dimen(chain[i]) then
-                        found = chain[i]
-                        return true
-                    end
-                end
-            end
-        end)
-        return found
+        return H.find_tappable(label)
     end
 
     local function tap_exact(label, timeout)
-        local target = H.wait_until("button '" .. label .. "' painted", function()
-            return find_exact(label)
-        end, timeout or 15)
-        local x = math.floor(target.dimen.x + target.dimen.w / 2)
-        local y = math.floor(target.dimen.y + target.dimen.h / 2)
-        H.log("tap button", label, "@", x, y)
-        return H.tap_at(x, y)
+        return H.tap_exact(label, timeout)
     end
 
     local function wait_reader_ready(previous)

@@ -12,32 +12,15 @@ return function(H)
     local TARGET = "山谷来信 · 离线测试"
     local CHAPTERS = { "第1章 启程", "第2章 雨中的小站", "第3章 山间来信", "第4章 海边的夜晚", "第5章 重逢", "第6章 归途" }
 
+    -- Placed by paintTo (init-time dimens have no x/y of their own).
     local function painted(dimen)
-        return type(dimen) == "table" and type(dimen.x) == "number" and (dimen.w or 0) > 0 and (dimen.h or 0) > 0
+        return type(dimen) == "table" and type(rawget(dimen, "x")) == "number"
+            and type(rawget(dimen, "y")) == "number" and (dimen.w or 0) > 0 and (dimen.h or 0) > 0
     end
 
     -- Exact-text tap (H.tap_text is a substring match).
     local function tap_exact(text, root_fn, timeout)
-        local target = H.wait_until("exact text '" .. text .. "' painted", function()
-            local root = root_fn and root_fn() or nil
-            if root_fn and not root then return nil end
-            local found
-            H.walk(function(widget, chain, depth)
-                if rawget(widget, "text") == text then
-                    for i = depth, 1, -1 do
-                        local d = rawget(chain[i], "dimen")
-                        if painted(d) then
-                            found = d
-                            return true
-                        end
-                    end
-                end
-            end, root)
-            return found
-        end, timeout or 15)
-        local x, y = math.floor(target.x + target.w / 2), math.floor(target.y + target.h / 2)
-        H.log("tap exact", text, "@", x, y)
-        H.tap_at(x, y)
+        return H.tap_exact(text, timeout, root_fn)
     end
 
     local function shelf_view()

@@ -33,30 +33,7 @@ return function(H)
     -- Taps the painted widget whose text is exactly `text` (H.tap_text does a
     -- substring match and "验证" is also part of the title "需要验证码").
     local function tap_exact(text, root_pred, timeout)
-        local target = H.wait_until("exact text '" .. text .. "' painted", function()
-            local found
-            local roots
-            if root_pred then
-                local root = root_pred()
-                if not root then return nil end
-                roots = root
-            end
-            H.walk(function(widget, chain, depth)
-                if rawget(widget, "text") == text then
-                    for i = depth, 1, -1 do
-                        local d = rawget(chain[i], "dimen")
-                        if type(d) == "table" and type(d.x) == "number" and (d.w or 0) > 0 and (d.h or 0) > 0 then
-                            found = d
-                            return true
-                        end
-                    end
-                end
-            end, roots)
-            return found
-        end, timeout or 15)
-        local x, y = math.floor(target.x + target.w / 2), math.floor(target.y + target.h / 2)
-        H.log("tap exact", text, "@", x, y)
-        H.tap_at(x, y)
+        return H.tap_exact(text, timeout, root_pred)
     end
 
     local function auth()

@@ -102,6 +102,7 @@ Current scenarios (`python3 scripts/run_emulator_scenarios.py --list`):
 | `09_annotations_thoughts` | annotation sync, underline drawn, tap opens the thought popup, popup paging and close |
 | `10_updater` | updater against a mocked GitHub release: notes dialog, SHA-256 mismatch rejected, install with backup |
 | `11_budget_200_chapters` | 200-chapter download: peak RSS growth, Lua heap growth, late/early per-chapter time, packaging and total time budgets |
+| `12_harness_taps` | the harness itself: taps wait for a dialog's painted position, also when it was shown in the predicate's own UI tick |
 
 Every scenario exits non-zero on failure. Evidence per scenario: `crash.log`
 (KOReader output), `requests.jsonl` (mock requests), `result.json` (steps,
@@ -150,14 +151,29 @@ python3 scripts/run_emulator_scenarios.py --koreader /tmp/koreader/official/extr
 
 Writing a scenario: add `spec/emulator/scenarios/NN_name.lua` returning
 `function(H) ... end` with `-- @title` and `-- @timeout` header lines. Drive
-the plugin through `H.call` / `H.tap_text` (UI-loop context, like a user
-event), assert with `H.check` / `H.wait_until`, record budgets with
+the plugin through `H.call` / `H.tap_exact` / `H.tap_text` (UI-loop context,
+like a user event), assert with `H.check` / `H.wait_until`, record budgets with
 `H.metric`. Extend `scripts/mock_weread.py` (and its contract test
 `scripts/test_mock_weread.py`) instead of stubbing plugin code.
 
+Tap through `H.tap_exact` / `H.tap_text`, never by reading a widget's `dimen`
+and calling `H.tap_at`: a dialog shown earlier in the same UI tick is not
+painted yet, and its Buttons' init-time `dimen` reads as `x = 0, y = 0`, so the
+tap lands in the top-left corner and dismisses the dialog. The helpers repaint
+pending windows, accept only a position `paintTo` stored, search the window
+that actually receives the tap, and find and tap in one UI task. A
+`wait_until` timeout (and the scenario watchdog) logs the window stack,
+pending repaints, scheduled tasks and the downloader state, also stored as
+`diagnostics` in `result.json`. To shake out such races, set
+`WEREAD_TEST_POLL_INTERVAL=0` (poll every UI tick) and run scenarios
+repeatedly, ideally under CPU contention (`docker run --cpus=1`, parallel runs).
+
 新增场景：在 `spec/emulator/scenarios/` 添加返回 `function(H)` 的 Lua 文件，通过
-`H.call`/`H.tap_text` 在 UI 循环中操作插件，用 `H.check`/`H.wait_until` 断言。需要新
-接口时扩展 mock 服务及其契约测试，不要替换被测插件代码。
+`H.call`/`H.tap_exact`/`H.tap_text` 在 UI 循环中操作插件，用 `H.check`/`H.wait_until`
+断言。需要新接口时扩展 mock 服务及其契约测试，不要替换被测插件代码。点击一律用
+`H.tap_exact`/`H.tap_text`，不要自己读 `dimen` 再 `H.tap_at`：同一个 UI tick 里刚弹出的
+对话框尚未绘制，按钮的 `dimen` 还是占位的 (0, 0)，点击会落在左上角并关掉对话框。
+排查这类竞争可设置 `WEREAD_TEST_POLL_INTERVAL=0` 并在 CPU 争用下反复运行。
 
 ### 3.2 PluginLoader at the pinned KOReader commit / 固定版本 PluginLoader
 
