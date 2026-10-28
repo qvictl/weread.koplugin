@@ -63,6 +63,23 @@ local function format_bytes(value)
     return tostring(value) .. " B"
 end
 
+-- lib/updater reports failures as stable English text: it is logged verbatim
+-- and crosses the forked worker boundary (Trapper subprocess), so it is only
+-- translated here, at the point of display. Fixed messages are dictionary
+-- keys in weread/lib/i18n.lua; messages with a variable part are matched by
+-- pattern. Anything else (OS or archiver errors) is shown unchanged.
+function UpdaterUI.display_error(err)
+    if err == nil or err == "" then return _("Unknown error") end
+    local text = tostring(err)
+    local code = text:match("^HTTP (%d+)$")
+    if code then return T(_("Server returned HTTP %1"), code) end
+    local status = text:match("^HTTP (.+)$")
+    if status then return T(_("Network error: %1"), status) end
+    local detail = text:match("^cannot create staging directory: (.*)$")
+    if detail then return T(_("Cannot create staging directory: %1"), detail) end
+    return _(text)
+end
+
 function UpdaterUI:new(options)
     options = options or {}
     return setmetatable({
@@ -242,7 +259,7 @@ function UpdaterUI:check(manual)
             if manual and not (result and result.cancelled) then
                 UIManager:show(InfoMessage:new{
                     text = T(_("Update check failed:\n%1"),
-                        result and result.error or _("Unknown error")),
+                        UpdaterUI.display_error(result and result.error)),
                 })
             end
             return
@@ -337,7 +354,7 @@ function UpdaterUI:install(release)
             if not (result and result.cancelled) then
                 UIManager:show(InfoMessage:new{
                     text = T(_("Update installation failed:\n%1"),
-                        result and result.error or _("Unknown error")),
+                        UpdaterUI.display_error(result and result.error)),
                 })
             end
             return

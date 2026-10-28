@@ -19,6 +19,7 @@ local T = require("ffi/util").template
 
 local Content = require("weread.lib.content")
 local DownloadDialog = require("weread.ui.download_dialog")
+local ErrorText = require("weread.lib.error_text")
 local Footnotes = require("weread.lib.footnotes")
 local I18n = require("weread.lib.i18n")
 local MemoryGate = require("weread.lib.memory_gate")
@@ -38,14 +39,8 @@ local function log_error(err)
     return text
 end
 
-local function display_error(err)
-    local text = tostring(err)
-    text = text:match("^[^\r\n]+") or text
-    if #text > 300 then
-        return text:sub(1, 300) .. "..."
-    end
-    return text
-end
+-- Never shows a Lua source position ("content.lua:1699: ") to the user.
+local display_error = ErrorText.display
 
 local READER_BOOK_FIELDS = {
     "book_id", "title", "author", "psvts", "pclts", "token", "reader_url",

@@ -1,3 +1,4 @@
+local ErrorText = require("weread.lib.error_text")
 local I18n = require("weread.lib.i18n")
 local logger = require("weread.lib.logger")
 local time = require("ui/time")
@@ -20,14 +21,8 @@ function PluginUtil.log_error(err)
     return text
 end
 
-function PluginUtil.display_error(err)
-    local text = tostring(err)
-    text = text:match("^[^\r\n]+") or text
-    if #text > 300 then
-        return text:sub(1, 300) .. "..."
-    end
-    return text
-end
+-- First line of a caught error for a dialog, without Lua source positions.
+PluginUtil.display_error = ErrorText.display
 
 function PluginUtil.file_exists(path)
     if type(path) ~= "string" or path == "" then
