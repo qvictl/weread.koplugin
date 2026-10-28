@@ -107,7 +107,17 @@ local function make_host()
     function host:showTransientInfo(text) self.transients[#self.transients + 1] = text end
     function host:showBusy(text) self.busy[#self.busy + 1] = text end
     function host:closeBusy() self.closed_busy = self.closed_busy + 1 end
-    function host:runOnlineTask(name, fn) self.tasks[#self.tasks + 1] = name; fn() end
+    function host:runOnlineTask(name, fn, delay, options)
+        self.tasks[#self.tasks + 1] = name
+        self.task_delay, self.task_options = delay, options
+        fn()
+    end
+    function host:_runNetworkRequest(text, _label, task, success, failure)
+        self:showBusy(text)
+        local ok, value = pcall(task)
+        self:closeBusy()
+        if ok then success(value) else failure(value, false) end
+    end
     function host:showInputDialog(dialog) self.inputs[#self.inputs + 1] = dialog end
     function host:refreshLoginMenu() self.refreshed = self.refreshed + 1 end
     function host:onWeReadAccountChanged() self.account_changed = self.account_changed + 1 end
@@ -391,7 +401,7 @@ do
     expect(run_scheduled(0.5) == 1, "poll started")
     local polls = requests_to(login.client, "getLoginInfo")
     expect(#polls == 1 and polls[1].timeout[1] == 2 and polls[1].timeout[2] == 3,
-        "without fork support the poll runs inline with a short timeout")
+        "failed dedicated worker uses a short dismissable worker request")
     expect(ui.scheduled[1].delay == 1.5, "a pending inline poll is rescheduled")
 
     -- User dismisses the QR dialog: the session is cancelled.
@@ -416,7 +426,7 @@ do
         "callbacks of a cancelled session neither show nor poll")
 end
 
--- Inline poll: expiry, retries and errors -------------------------------------
+-- Fallback poll: expiry, retries and errors -------------------------------------
 
 do
     local function inline(routes)
@@ -464,7 +474,7 @@ do
         return { succeed = true }, 200, {}
     end } })
     racing:_poll("U", racing.generation)
-    expect(#racing.host.infos == 0 and #ui.scheduled == 0 and #racing.host.busy == 0,
+    expect(#racing.host.infos == 0 and #ui.scheduled == 0 and #racing.host.busy == 1,
         "a result for a cancelled session is ignored")
 
     -- The OTP is forwarded by the inline poll.
@@ -875,8 +885,211 @@ do
         login:_show_qr("U", login.generation)
         run_scheduled()
         local polls = requests_to(login.client, "getLoginInfo")
-        expect(#polls == 1 and polls[1].timeout[1] == 2, "QR flow falls back to inline polling")
+        expect(#polls == 1 and polls[1].timeout[1] == 2, "QR flow falls back to a short dismissable worker request")
     end
+end
+
+-- A deferred delivery lets the UI cancel or switch accounts after the
+-- worker returns, before its data is applied. Workers never persist auth.
+do
+    local good = { succeed = true, webLoginVid = "new", accessToken = "token" }
+    local function deferred()
+        reset_ui()
+        local l = new_login()
+        l.settings.account = { user_vid = "old" }
+        function l.settings:get(key, default) return self[key] or default end
+        function l.host:_runNetworkRequest(_text, _label, task, success, failure)
+            self.worker_task, self.success, self.failure = task, success, failure
+        end
+        return l
+    end
+    local l = deferred()
+    l:start()
+    expect(#l.client.requests == 0, "start defers HTTP to the network worker")
+    expect(l.host.task_delay == 0.1 and l.host.task_options.link_only == true,
+        "QR worker startup checks link state without synchronous DNS")
+    local result = l.host.worker_task()
+    expect(l.login_cookies == nil, "worker begin cannot mutate parent cookies")
+    l:cancel()
+    l.host.success(result)
+    expect(l.login_cookies == nil and not l.qr_dialog, "cancelled begin cannot revive QR state")
+    l = deferred()
+    l:_complete(good, l.generation)
+    result = l.host.worker_task()
+    expect(#l.settings.saved == 0 and l.host.account_changed == 0,
+        "completion worker cannot save auth or notify account changes")
+    l:cancel()
+    l.host.success(result)
+    expect(#l.settings.saved == 0 and #l.host.infos == 0, "late cancelled completion cannot log in")
+    l = deferred()
+    l:_complete(good, l.generation)
+    result = l.host.worker_task()
+    l.settings.account = { user_vid = "other" }
+    l.host.success(result)
+    expect(#l.settings.saved == 0 and l.host.refreshed == 0, "account switch rejects stale credentials")
+    expect(l.generation == 1 and l.started_at == nil and l.login_cookies == nil and l.session_account == nil,
+        "account mismatch cancels the generation and cleans up stale session state")
+    l = deferred()
+    l:_complete(good, l.generation)
+    result = l.host.worker_task()
+    l.settings.cookies = { wr_ticket = "rotated" }
+    l.host.success(result)
+    expect(#l.settings.saved == 1 and l.host.account_changed == 1,
+        "same-account credential rotation permits QR completion")
+    l = deferred()
+    l:_show_otp("U", l.generation)
+    local dialog = l.host.inputs[1]
+    dialog.typed = "0000"
+    dialog.buttons[1][2].callback()
+    expect(#l.client.requests == 0, "OTP verification defers HTTP to the worker")
+    l:cancel()
+    l.host.success({ value = { logicCode = "OTP_NOT_MATCH" }, cookies = {} })
+    expect(#l.host.inputs == 1, "late OTP result cannot reopen cancelled dialog")
+    l = deferred()
+    l:start()
+    result = l.host.worker_task()
+    l.host.success(result)
+    l.settings.account = { user_vid = "changed-between-stages" }
+    local previous = l.host.worker_task
+    l:_complete(good, l.generation)
+    expect(l.host.worker_task == previous and #l.settings.saved == 0,
+        "account switch between QR stages invalidates the entire session")
+    expect(l.started_at == nil and l.qr_dialog == nil and l.session_account == nil,
+        "account switch between QR stages closes the abandoned QR dialog")
+
+    l = deferred()
+    l.started_at = os.time()
+    l:_poll("U", l.generation)
+    expect(#l.client.requests == 0 and type(l.host.worker_task) == "function",
+        "fallback poll defers HTTP when the dedicated poll worker cannot start")
+
+    l = deferred()
+    l:start()
+    local generation = l.generation
+    l.host.failure(nil, true)
+    expect(l.generation == generation + 1 and #l.host.infos == 0,
+        "worker cancellation invalidates QR session silently")
+end
+
+do
+    reset_ui()
+    local l = new_login()
+    function l.host:_runNetworkRequest(_text, _label, _task, _success, failure)
+        failure("Skill is unavailable\nstack traceback:\n\tprivate/worker.lua:1", false)
+    end
+    l:_complete({ succeed = true, webLoginVid = "new", accessToken = "token" }, l.generation)
+    expect(contains(l.host.infos[1], "Skill is unavailable"), "worker error keeps its useful message")
+    expect(not contains(l.host.infos[1], "stack traceback") and not contains(l.host.infos[1], "private/worker"),
+        "worker errors do not expose traceback implementation details in the UI")
+end
+
+do
+    reset_ui()
+    local l = new_login()
+    l.started_at = os.time()
+    l.login_cookies = { wr_fp = "synthetic" }
+    l.qr_dialog = { kind = "qr" }
+    function l.host:runOnlineTask() return false end
+    l:_poll("U", l.generation)
+    expect(l.generation == 1 and l.started_at == nil and l.qr_dialog == nil and l.login_cookies == nil,
+        "offline worker startup ends the fallback session instead of leaving a dead QR dialog")
+    expect(#l.client.requests == 0, "offline fallback sends no HTTP")
+end
+
+for _, failure_at in ipairs({ "flush", "account notification" }) do
+    reset_ui()
+    local l = new_login()
+    l.settings.account = { user_vid = "old" }
+    function l.settings:get(key, default) return self[key] or default end
+    function l.settings:update_auth(credentials)
+        self.account = credentials.account
+        if failure_at == "flush" then error("storage flush failed") end
+    end
+    if failure_at == "account notification" then
+        function l.host:onWeReadAccountChanged() error("account notification failed") end
+    end
+    -- Mirror the real common helper: errors from parent delivery return
+    -- through on_failure after the settings account ID may have changed.
+    function l.host:_runNetworkRequest(_text, _label, task, success, failure)
+        local ok, value = pcall(task)
+        if not ok then failure(value, false); return end
+        local delivered, err = pcall(success, value)
+        if not delivered then failure(err, false) end
+    end
+    l:_complete({ succeed = true, webLoginVid = "new", accessToken = "token" }, l.generation)
+    expect(l.settings.account.user_vid == "new", failure_at .. " occurs after account mutation")
+    expect(contains(l.host.infos[1], failure_at .. " failed"), failure_at .. " failure is never silently discarded")
+    expect(l.host.refreshed == 0 and l.generation == 1, failure_at .. " failure ends the session without success UI")
+end
+
+-- Missing worker capability and temporary spawn failures are explicit,
+-- non-blocking failures; a later retry can start a fresh login session.
+for _, reason in ipairs({ "Network subprocess is unavailable.", "Could not start network subprocess." }) do
+    reset_ui()
+    local l = new_login()
+    local original = l.host._runNetworkRequest
+    function l.host:_runNetworkRequest(_text, _label, _task, _success, failure)
+        failure(reason, false)
+    end
+    l:start()
+    expect(#l.client.requests == 0, reason .. " never runs HTTP on the UI")
+    expect(l.started_at == nil and l.login_cookies == nil and l.generation == 2 and l.qr_dialog == nil,
+        reason .. " cleans up the started session and invalidates it")
+    expect(contains(l.host.infos[1], reason), reason .. " remains visible to the user")
+    l.host._runNetworkRequest = original
+    l:start()
+    expect(l.qr_dialog ~= nil, reason .. " permits a fresh retry after resources recover")
+end
+
+-- Exercise the real common network boundary, with the production mock-endpoint
+-- shortcut absent: link checks must never enter the synchronous DNS probe.
+do
+    local names = { "ui/bidi", "ui/widget/confirmbox", "ui/widget/infomessage", "ui/widget/menu",
+        "weread.lib.plugin_util", "ui/network/manager", "weread.ui.common" }
+    local saved = {}
+    for _, name in ipairs(names) do saved[name] = { value = package.loaded[name] } end
+    local ok, err = pcall(function()
+        package.loaded["weread.ui.common"] = nil
+        for _, name in ipairs({ "ui/bidi", "ui/widget/confirmbox", "ui/widget/infomessage", "ui/widget/menu" }) do
+            package.loaded[name] = {}
+        end
+        package.loaded["weread.lib.plugin_util"] = {
+            tr = function(text) return text end, T = function(text) return text end,
+            log_error = tostring, display_error = tostring, unpack_args = unpack,
+        }
+        local dns, links = 0, 0
+        package.loaded["ui/network/manager"] = {
+            isConnected = function() links = links + 1; return true end,
+            isOnline = function() dns = dns + 1; error("UI DNS must not run") end,
+        }
+        local Common = require("weread.ui.common")
+        for _, stage in ipairs({ "start", "otp", "complete", "poll" }) do
+            reset_ui()
+            local l = new_login()
+            l.host.runOnlineTask = Common.runOnlineTask
+            l.host.isNetworkOnline = Common.isNetworkOnline
+            l.host.isNetworkConnected = Common.isNetworkConnected
+            if stage == "start" then l:start()
+            elseif stage == "complete" then
+                l:_complete({ succeed = true, webLoginVid = "new", accessToken = "token" }, l.generation)
+            elseif stage == "poll" then
+                l.started_at = os.time()
+                l:_poll("U", l.generation)
+            else
+                l:_show_otp("U", l.generation)
+                local dialog = l.host.inputs[1]
+                dialog.typed = "0000"
+                dialog.buttons[1][2].callback()
+            end
+            expect(#l.client.requests == 0, stage .. " waits for scheduled worker startup")
+            expect(run_scheduled(0.1) == 1, stage .. " starts after the UI paints")
+            expect(dns == 0, stage .. " never invokes synchronous isOnline DNS")
+        end
+        expect(links >= 4, "all four QR request entries use the real link-state check")
+    end)
+    for _, name in ipairs(names) do package.loaded[name] = saved[name].value end
+    reset_ui()
+    if not ok then error(err, 0) end
 end
 
 print("qr_login_flow_spec: " .. checks .. " checks passed")
