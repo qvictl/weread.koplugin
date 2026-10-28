@@ -146,7 +146,8 @@ class MockServer(ThreadingHTTPServer):
     def route(self, method, target, data):
         url = urlsplit(target)
         path = url.path
-        if url.hostname not in {"weread.qq.com", "i.weread.qq.com"}:
+        if url.hostname not in {"weread.qq.com", "i.weread.qq.com"} and not (
+                url.hostname == "mmbiz.qpic.cn" and path == "/mock/illustration.png"):
             raise LookupError("host is not implemented")
         query = parse_qs(url.query)
         api = data.get("api_name", "") if path == "/api/agent/gateway" else ""
@@ -230,6 +231,12 @@ class MockServer(ThreadingHTTPServer):
             return 200, dict(review=review(), comments=[
                 dict(commentId=f"mock-comment-{i}", content=f"合成回复 {i}", author={"nick": "测试读者"}, createTime=1700000000)
                 for i in range(1, 3)], commentsHasMore=0)
+        if path == "/web/mp/content" and method == "GET":
+            if query.get("reviewId", [""])[0] != "mock-mp-article":
+                raise ValueError("unknown synthetic MP article")
+            return 200, ('<html><body><div id="js_content"><p>Synthetic article body.</p>'
+                         '<img src="https://mmbiz.qpic.cn/mock/illustration.png"/>'
+                         '</div><script></script></body></html>')
         if path == "/web/mp/articles" and method == "GET":
             if book_id != "MP_WXS_900000":
                 raise ValueError("unknown synthetic public account")

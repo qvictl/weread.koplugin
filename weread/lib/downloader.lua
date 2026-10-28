@@ -422,6 +422,9 @@ function Downloader:_ensureProgressDialog(dl)
                     else
                         dl.cancelled = true
                         dl.cancel_reason = dl.cancel_reason or "cancelled"
+                        if dl.mp_article and dl.worker_handle and self.background_worker then
+                            self.background_worker:cancel(dl.worker_handle, "cancelled")
+                        end
                     end
                     if dl.progress_dialog then
                         dl.progress_dialog:close()
@@ -846,6 +849,8 @@ function Downloader:start(book, chapters, suffix, options)
             fallback = 0,
         },
         single_chapter = options.single_chapter == true,
+        mp_article = options.mp_article == true,
+        account_id = tostring((self.settings.get and self.settings:get("account", {}) or {}).user_vid or ""),
         separate_chapters = options.separate_chapters == true,
         include_annotations = false,
         open_on_complete = options.open_on_complete == true,
@@ -871,6 +876,26 @@ function Downloader:start(book, chapters, suffix, options)
         if not called then
             logger.warn("download start callback failed:", log_error(start_err))
         end
+    end
+    if dl.mp_article then
+        if self.is_connected and not self.is_connected() then
+            self:_notifyCompletion(dl, false, "offline")
+            self:_finishJob(dl)
+            self.show_info(_("No network connection. Please connect Wi-Fi and try again."))
+            return false
+        end
+        dl.stage_title = T(_("Downloading article: %1"), chapters[1] and chapters[1].title or "")
+        self:_ensureProgressDialog(dl)
+        self:_scheduleGuarded(dl, function()
+            if self._active_job ~= dl then return end
+            if dl.cancelled then
+                self:_notifyCompletion(dl, false, "cancelled")
+                self:_finishJob(dl)
+                return
+            end
+            require("weread.lib.mp_article_download").start(self, dl)
+        end)
+        return true
     end
     if dl.prefetch then
         notifyStart()

@@ -583,6 +583,20 @@ ok, err = pcall(Content.create_download_workspace, { cache_dir = file_blocker },
 expect(not ok and tostring(err):find("could not create directory", 1, true),
     "workspace creation under a regular file did not fail")
 
+-- A preparation failure after the first subdirectory exists must not leave
+-- untracked staging behind for a book that has never been persisted.
+local failed_workspace
+util_stub.makePath = function(path)
+    if path:match("/images$") then return nil, "injected image directory failure" end
+    mkdir(path)
+    failed_workspace = path:match("^(.*)/incoming$") or failed_workspace
+    return true
+end
+ok, err = pcall(Content.create_download_workspace, settings, { book_id = "failed-stage" })
+util_stub.makePath = nil
+expect(not ok and tostring(err):find("injected image directory failure", 1, true)
+    and failed_workspace and not exists(failed_workspace), "partial workspace preparation was not cleaned")
+
 expect(Content.cleanup_download_workspace(nil) == true,
     "cleaning up no workspace was not a no-op")
 local outside = root .. "/precious"
