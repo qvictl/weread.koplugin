@@ -16,7 +16,7 @@ from mock_weread import (BIG_BOOK_ID, BIG_CHAPTER_COUNT, BOOK_ID, BOOKS, CHAPTER
 class MockTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.server = MockServer(0)
+        cls.server = MockServer(0, now=lambda: 1710343800)
         cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
         cls.thread.start()
         cls.base = f"http://127.0.0.1:{cls.server.server_port}"
@@ -54,7 +54,11 @@ class MockTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(data["totalReadTime"], 7200)
         self.assertEqual(sum(data["readTimes"].values()), 7200)
-        self.assertEqual(data["baseTime"], 1790784000)  # 2026-10-01, Beijing midnight
+        self.assertEqual(data["baseTime"], 1709222400)  # Current injected month: March 2024
+        self.assertEqual(self.gateway("/readdata/detail", mode="weekly")[1]["baseTime"], 1710086400)
+        self.assertEqual(self.gateway("/readdata/detail", mode="annually")[1]["baseTime"], 1704038400)
+        self.assertEqual(self.gateway("/readdata/detail", mode="monthly", baseTime=1790784000)[1]["baseTime"],
+                         1790784000)  # Explicit period overrides the injected clock
         self.assertEqual(self.gateway("/readdata/detail", mode="weekly", baseTime=1790784000)[1]["baseTime"],
                          1790524800)  # Monday 2026-09-28, Beijing midnight
         self.assertEqual(self.gateway("/readdata/detail", mode="annually", baseTime=1790784000)[1]["baseTime"],

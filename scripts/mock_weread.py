@@ -126,6 +126,7 @@ class MockServer(ThreadingHTTPServer):
         super().__init__((bind, port), Handler)
         self.lock = threading.Lock()
         self.log_path = log_path
+        self.now = now or time.time
         self.events = deque(maxlen=500)
         self.progress = {}
         self.control = dict(delay=0, match="", status=503, times=0, drop=False,
@@ -195,7 +196,7 @@ class MockServer(ThreadingHTTPServer):
                 if data.get("mode") not in {"weekly", "monthly", "annually", "overall"}:
                     raise ValueError("unknown statistics mode")
                 # Synthetic fields already consumed by ReadStats.normalize.
-                start = datetime.fromtimestamp(float(data.get("baseTime") or 1790784000),
+                start = datetime.fromtimestamp(float(data.get("baseTime") or self.now()),
                                                timezone(timedelta(hours=8))).replace(
                                                    hour=0, minute=0, second=0, microsecond=0)
                 if data["mode"] == "weekly":
