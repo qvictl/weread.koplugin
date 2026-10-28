@@ -297,6 +297,30 @@ end
 
 BookStore.resolved_dir = resolved_dir
 
+-- Preserve the UI's existing cache while a one-off import touches many books.
+-- load() returns private copies; releasing these entries cannot discard edits
+-- held by callers. A previously unparsed entry keeps its original JSON bytes.
+local weak_cache_identity = { __mode = "v" }
+
+function BookStore.cache_mark(settings)
+    local mark = {}
+    for path, entry in pairs(rawget(settings, "_book_file_cache") or {}) do
+        mark[path] = setmetatable({ entry = entry, had_value = entry.value ~= nil }, weak_cache_identity)
+    end
+    return mark
+end
+
+function BookStore.release_cache_since(settings, mark)
+    for path, entry in pairs(rawget(settings, "_book_file_cache") or {}) do
+        local previous = mark[path]
+        if not previous then
+            settings._book_file_cache[path] = nil
+        elseif previous.entry == entry and not previous.had_value then
+            entry.value = nil
+        end
+    end
+end
+
 function BookStore.load(settings, book_id, index)
     local cache = file_cache(settings)
     local book = {}

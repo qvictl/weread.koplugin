@@ -252,31 +252,32 @@ end
 function M:loadReadStats(mode, base_time, old_view)
     self:showBusy(_("Loading reading statistics..."))
     self:runOnlineTask(_("Reading statistics"), function()
-        local ok, data = pcall(function()
+        self:_runNetworkRequest(_("Loading reading statistics..."), _("Reading statistics"), function()
             return ReadStats.fetch(self.client, mode, base_time)
+        end, function(data)
+            self:closeBusy()
+            if old_view then
+                UIManager:close(old_view)
+            end
+            local view
+            view = ReadStatsView.show(data, {
+                on_prev = function()
+                    self:loadReadStats(mode, data.prev_base_time, view)
+                end,
+                on_next = function()
+                    self:loadReadStats(mode, data.next_base_time, view)
+                end,
+                on_switch = function(new_mode)
+                    self:loadReadStats(new_mode, nil, view)
+                end,
+            })
+        end, function(err, cancelled)
+            self:closeBusy()
+            if cancelled then return end
+            logger.err("load reading statistics failed:", log_error(err))
+            self:showInfo(T(_("%1 failed:\n%2"), _("Reading statistics"), display_error(err)))
         end)
-        self:closeBusy()
-        if not ok then
-            logger.err("load reading statistics failed:", log_error(data))
-            self:showInfo(T(_("%1 failed:\n%2"), _("Reading statistics"), display_error(data)))
-            return
-        end
-        if old_view then
-            UIManager:close(old_view)
-        end
-        local view
-        view = ReadStatsView.show(data, {
-            on_prev = function()
-                self:loadReadStats(mode, data.prev_base_time, view)
-            end,
-            on_next = function()
-                self:loadReadStats(mode, data.next_base_time, view)
-            end,
-            on_switch = function(new_mode)
-                self:loadReadStats(new_mode, nil, view)
-            end,
-        })
-    end)
+    end, 0.1, { link_only = true })
 end
 
 return M
