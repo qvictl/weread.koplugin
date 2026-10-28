@@ -32,7 +32,7 @@
 - 如果 AI 明显误判，在对话里回复理由后 Resolve，再评论 `@coderabbitai review` 请它重新审查最新提交。
   PR 作者不能用 `@coderabbitai approve` / `@coderabbitai resolve` 让 CodeRabbit 批准或关闭自己 PR 上的问题
   （`.coderabbit.yaml` 中 `allow_author_approval: false`：本仓库的 agent 都以所有者账号提交 PR）。
-- 所有审查对话（AI 或人）都未解决时，网关不会批准（第 3 项）。
+- 只要还有任何一个未解决的审查对话（AI 或人），网关就不会批准（第 3 项）。
 
 ## 自动批准与自动合并的条件
 
@@ -118,7 +118,8 @@
   `REVIEW_GATE_MERGE_TOKEN`。它只存放在 environment `review-gate` 中，该 environment 只允许 `main` 部署：
   只有默认分支上运行的 `automerge` 作业读得到，PR 分支上（被修改过的）工作流读不到。未配置时网关只批准，合并由人完成。
 - **局限（写权限是信任边界）**：对本仓库有写权限的人可以在自己的分支上新增工作流，用该分支运行时的 `GITHUB_TOKEN`
-  以 github-actions[bot] 身份批准 PR（仓库允许 Actions 批准 PR 时）。默认分支检出只保护网关脚本，挡不住这条路。
+  以 github-actions[bot] 身份批准 PR（仓库允许 Actions 批准 PR 时），也能以同一身份伪造网关的评论（包括
+  `human-approved` 的提交绑定记录）。默认分支检出只保护网关脚本，挡不住这条路。
   缓解：网关每次运行（以及每 15 分钟的定时任务）都会撤销所有不带网关标记的 github-actions 批准，但两次运行之间存在时间窗口；
   fork 来的 PR 拿到的是只读 token，不受影响。因此写权限只授予可信的人和 agent。
 - CodeRabbit 使用 PR 分支上的 `.coderabbit.yaml`：PR 可以借此削弱对自己的审查，所以 `.coderabbit.yaml`、`.gemini/**`
@@ -132,7 +133,9 @@
   （`workflow_run`）、第三方 check suite 完成（`check_suite`），以及每 15 分钟一次的定时兜底
   （GitHub Actions 没有“审查对话已解决”的触发器，由定时任务补上）。也可以在 Actions 页面手动运行 *Review gate*，填 PR 号或留空评估全部。
 - 定时任务很轻：每个打开的 PR 只读一次评论列表，只有可能在没有事件的情况下发生变化的 PR 才完整评估（head 变了、
-  只被未解决对话阻塞、已批准、或超过 6 小时未刷新）；同一个 PR 的新事件会取消旧的运行。
+  只被 AI 审查和/或未解决对话阻塞、已批准），其余 PR 只在每天 UTC 00/06/12/18 点第一个定时运行中完整刷新；
+  同一个 PR 的新事件会取消旧的运行。因此不带网关标记的 github-actions 批准最迟在下一次评估该 PR 时被撤销
+  （任何 PR 事件、检查完成，或上述刷新时段）。
 - 每个 PR 只有一条置顶评论（以 `<!-- review-gate -->` 开头），逐项列出条件和阻塞原因；内容不变时不会重复编辑。
 - 只评估目标分支为 `main` 的打开的 PR。
 - 仓库变量 `REVIEW_GATE_DRY_RUN=true` 时只报告、不批准、不撤销、不合并（紧急关闭开关）。
@@ -165,8 +168,12 @@ gh secret set REVIEW_GATE_MERGE_TOKEN -R $R --env review-gate
   if grep -qx REVIEW_GATE_MERGE_TOKEN <<<"$names"; then gh secret delete REVIEW_GATE_MERGE_TOKEN -R $R; fi
   names=$(gh api --paginate repos/$R/actions/secrets --jq '.secrets[].name')
   if grep -qx REVIEW_GATE_MERGE_TOKEN <<<"$names"; then echo 'repository-level token still present' >&2; exit 1; fi
-  gh api -X PATCH repos/$R/actions/variables/REVIEW_GATE_AUTOMERGE -f value=on \
-    || gh api -X POST repos/$R/actions/variables -f name=REVIEW_GATE_AUTOMERGE -f value=on )
+  vars=$(gh api --paginate repos/$R/actions/variables --jq '.variables[].name')
+  if grep -qx REVIEW_GATE_AUTOMERGE <<<"$vars"; then
+    gh api -X PATCH repos/$R/actions/variables/REVIEW_GATE_AUTOMERGE -f value=on
+  else
+    gh api -X POST repos/$R/actions/variables -f name=REVIEW_GATE_AUTOMERGE -f value=on
+  fi )
 
 # 3. main 需要 1 个批准；新提交使旧批准失效；不要求 CODEOWNERS
 gh api -X PATCH repos/$R/branches/main/protection/required_pull_request_reviews \
@@ -205,9 +212,18 @@ gh api repos/$R --jq '{allow_auto_merge}'
     -F require_code_owner_reviews=false -F require_last_push_approval=false )
 ```
 
-紧急情况（网关或 AI 应用故障且必须合并）：先设 `REVIEW_GATE_DRY_RUN=true`
-（`gh api -X PATCH repos/$R/actions/variables/REVIEW_GATE_DRY_RUN -f value=true || gh api -X POST repos/$R/actions/variables -f name=REVIEW_GATE_DRY_RUN -f value=true`），
-再按上面的命令回退到 0 个批准；处理完后恢复，并在 PR 中记录原因。
+紧急情况（网关或 AI 应用故障且必须合并）：先设 `REVIEW_GATE_DRY_RUN=true`，再按上面的命令回退到 0 个批准；
+处理完后恢复（删除该变量或设为 `false`），并在 PR 中记录原因。
+
+```sh
+( set -euo pipefail
+  vars=$(gh api --paginate repos/$R/actions/variables --jq '.variables[].name')
+  if grep -qx REVIEW_GATE_DRY_RUN <<<"$vars"; then
+    gh api -X PATCH repos/$R/actions/variables/REVIEW_GATE_DRY_RUN -f value=true
+  else
+    gh api -X POST repos/$R/actions/variables -f name=REVIEW_GATE_DRY_RUN -f value=true
+  fi )
+```
 
 ---
 
