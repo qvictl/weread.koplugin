@@ -67,7 +67,7 @@ local function merge_response_cookies(cookies, headers)
 end
 
 local function error_text(err)
-    local text = tostring(err):gsub("[%c]+", " ")
+    local text = tostring(err):gsub("\n?stack traceback:.*$", ""):gsub("[%c]+", " ")
     if #text > 300 then
         return text:sub(1, 300) .. "..."
     end
@@ -363,9 +363,13 @@ end
 function QRLogin:_run_protocol_request(busy_text, generation, task, on_success, on_failure)
     local original_account = self:_account_id()
     local function valid()
+        if generation ~= self.generation then return false end
         local current = self:_account_id()
-        return generation == self.generation and current == original_account
-            and (self.session_account == nil or self.session_account == current)
+        if current ~= original_account or (self.session_account ~= nil and self.session_account ~= current) then
+            self:cancel()
+            return false
+        end
+        return true
     end
     self.host:runOnlineTask(_("QR login"), function()
         if not valid() then return end

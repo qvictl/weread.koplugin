@@ -65,6 +65,8 @@ return function(H)
                 H.mock_control({ qr_mode = "otp", qr_delay = 0, match = case.path,
                     delay = 1.5, times = 0 })
                 local prior = H.mock_state().started_counts[case.path] or 0
+                local function finished(event) return event.path == case.path end
+                local finished_before = #H.mock_requests(finished)
                 local running, last, gap = true, H.now_ms(), 0
                 local function beat()
                     if not running then return end
@@ -89,7 +91,9 @@ return function(H)
                     local elapsed = H.now_ms() - t0
                     H.metric(case.name .. "_cancel_ms", elapsed)
                     H.check(elapsed < 800, case.name .. " cancellation stays responsive", tostring(elapsed))
-                    H.sleep(1.7)
+                    H.wait_until(case.name .. " cancelled request completed at the mock", function()
+                        return #H.mock_requests(finished) > finished_before
+                    end, 10)
                     H.check(not case.done(), case.name .. " late cancelled response cannot restore UI/auth")
                     H.equal(account(), "", case.name .. " cancellation saves no account")
                 else
@@ -161,6 +165,8 @@ return function(H)
             return getmetatable(H.input_window()) ~= TrapWidget
         end, 10)
         H.equal(account(), "900002", "account switch survives old response")
+        H.check(plugin.qr_login.started_at == nil and plugin.qr_login.login_cookies == nil,
+            "account mismatch clears the abandoned login session")
         H.equal(H.call(function() return plugin.settings:get("api_key", "") end), "mock-other-key",
             "old completion cannot overwrite the newer account key")
         H.mock_control({ match = "", delay = 0, times = 0 })

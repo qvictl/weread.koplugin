@@ -927,6 +927,8 @@ do
     l.settings.account = { user_vid = "other" }
     l.host.success(result)
     expect(#l.settings.saved == 0 and l.host.refreshed == 0, "account switch rejects stale credentials")
+    expect(l.generation == 1 and l.started_at == nil and l.login_cookies == nil and l.session_account == nil,
+        "account mismatch cancels the generation and cleans up stale session state")
     l = deferred()
     l:_complete(good, l.generation)
     result = l.host.worker_task()
@@ -952,6 +954,8 @@ do
     l:_complete(good, l.generation)
     expect(l.host.worker_task == previous and #l.settings.saved == 0,
         "account switch between QR stages invalidates the entire session")
+    expect(l.started_at == nil and l.qr_dialog == nil and l.session_account == nil,
+        "account switch between QR stages closes the abandoned QR dialog")
 
     l = deferred()
     l.started_at = os.time()
@@ -965,6 +969,18 @@ do
     l.host.failure(nil, true)
     expect(l.generation == generation + 1 and #l.host.infos == 0,
         "worker cancellation invalidates QR session silently")
+end
+
+do
+    reset_ui()
+    local l = new_login()
+    function l.host:_runNetworkRequest(_text, _label, _task, _success, failure)
+        failure("Skill is unavailable\nstack traceback:\n\tprivate/worker.lua:1", false)
+    end
+    l:_complete({ succeed = true, webLoginVid = "new", accessToken = "token" }, l.generation)
+    expect(contains(l.host.infos[1], "Skill is unavailable"), "worker error keeps its useful message")
+    expect(not contains(l.host.infos[1], "stack traceback") and not contains(l.host.infos[1], "private/worker"),
+        "worker errors do not expose traceback implementation details in the UI")
 end
 
 -- Exercise the real common network boundary, with the production mock-endpoint
