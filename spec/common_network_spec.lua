@@ -122,6 +122,7 @@ package.loaded["ui/trapper"] = {
         if mode == "cancel" then return false end
         if mode == "fork_error" then return false, "fork failed" end
         if mode == "start_failed" or mode == "read_failed" then return false, nil, mode end
+        if mode == "unknown_failure" then return false, nil, "worker_failed" end
         if mode == "invalid" then return true, "garbage" end
         in_child = true
         local value = task()
@@ -131,7 +132,7 @@ package.loaded["ui/trapper"] = {
     end,
 }
 for _, current in ipairs({ "success", "task_error", "cancel", "fork_error", "invalid", "auth_error", "ui_error",
-    "ticket_rotated", "account_changed", "start_failed", "read_failed" }) do
+    "ticket_rotated", "account_changed", "start_failed", "read_failed", "unknown_failure" }) do
     mode, account.user_vid = current, "original"
     local results, failures, cancelled, reason, failure_message = 0, 0, false, nil, nil
     host:_runNetworkRequest("Loading", "Load", function()
@@ -156,6 +157,8 @@ for _, current in ipairs({ "success", "task_error", "cancel", "fork_error", "inv
         eq(failure_message, "Could not start network subprocess.", "explicit launch failure is reported")
     elseif current == "read_failed" then
         eq(failure_message, "Could not read network subprocess result.", "explicit result I/O failure is reported")
+    elseif current == "unknown_failure" then
+        eq(failure_message, "worker_failed", "unrecognized explicit reason is not mistaken for cancellation")
     end
 end
 eq(merged, 3, "successful worker credentials merged before task/UI error delivery")
