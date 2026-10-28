@@ -46,7 +46,7 @@ class MockTests(unittest.TestCase):
 
     def setUp(self):
         self.request("/__control", dict(delay=0, match="", status=503, times=0, drop=False,
-                                        empty_shelf=False, empty_annotations=False, shelf_idless_entry=False,
+                                        empty_shelf=False, empty_annotations=False, shelf_idless_entry=False, hold_response=False,
                                         qr_mode="succeed", qr_delay=0))
 
     def test_synthetic_mp_article_list(self):
@@ -92,6 +92,33 @@ class MockTests(unittest.TestCase):
         self.request("/web/book/read", dict(b=weread_e(BOOK_ID), c=weread_e(2), ci=2, co=120, pr=25))
         _, progress = self.gateway("/book/getprogress", bookId=BOOK_ID)
         self.assertEqual(progress["book"]["chapterOffset"], 120)
+
+    def test_explicit_response_gate(self):
+        endpoint = "/book/getprogress"
+        before = self.request("/__state")[1]["started_counts"].get(endpoint, 0)
+        self.assertEqual(self.request("/__control", dict(match=endpoint, hold_response=True))[0], 200)
+        results, done = [], threading.Event()
+
+        def fetch():
+            try:
+                results.append(self.gateway(endpoint, bookId=BOOK_ID))
+            finally:
+                done.set()
+
+        thread = threading.Thread(target=fetch)
+        thread.start()
+        try:
+            deadline = time.monotonic() + 2
+            while self.request("/__state")[1]["started_counts"].get(endpoint, 0) == before:
+                self.assertLess(time.monotonic(), deadline, "request never reached gate")
+                done.wait(0.01)
+            self.assertFalse(done.is_set(), "held response finished before explicit release")
+        finally:
+            self.request("/__control", dict(hold_response=False))
+            thread.join(timeout=3)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(results[0][0], 200)
+        self.assertEqual(self.request("/__control", dict(hold_response=1))[0], 400)
 
     def test_fault_once_delay_and_recovery(self):
         self.request("/__control", dict(match="/book/info", times=1, status=503, delay=0.02))

@@ -2,6 +2,12 @@
 -- @timeout 60
 return function(H)
     local plugin, book, chapters, state = nil, nil, nil, {}
+    local function with_response_gate(action)
+        H.mock_control({ match = "/web/book/chapter/e_0", delay = 0, times = 0, hold_response = true })
+        local ok, err = xpcall(action, debug.traceback)
+        H.mock_control({ hold_response = false })
+        if not ok then error(err, 0) end
+    end
     H.step("setup a real chapter worker", function()
         plugin = H.wait_until("plugin attached", function() return H.plugin() end, 20)
         book, chapters = H.call(function()
@@ -13,23 +19,28 @@ return function(H)
     end)
     H.step("queued QR completion must discard old-account prefetch metadata", function()
         local requests_before = H.mock_state().started_counts["/web/book/chapter/e_0"] or 0
-        H.mock_control({ match = "/web/book/chapter/e_0", delay = 1.5, times = 0 })
-        H.call(function()
-            plugin.settings:delete_book("900001")
-            plugin.settings:set("account", { user_vid = "900099" })
-            plugin.downloader:start(book, {chapters[2]}, "chapter", {
-                prefetch = true, single_chapter = true, include_annotations = false,
-                silent_completion = true, offer_read = false,
-                on_complete = function(ok, value) state.done, state.ok, state.value = true, ok, value end,
-            })
-        end)
-        H.wait_until("chapter request reached synthetic service", function()
-            return (H.mock_state().started_counts["/web/book/chapter/e_0"] or 0) > requests_before
-        end, 5)
-        H.call(function()
-            plugin.qr_login:_complete({ succeed = true, webLoginVid = "900000",
-                accessToken = "mock-access-token", refreshToken = "mock-refresh-token" },
-                plugin.qr_login.generation)
+        with_response_gate(function()
+            H.call(function()
+                plugin.settings:delete_book("900001")
+                plugin.settings:set("account", { user_vid = "900099" })
+                plugin.downloader:start(book, {chapters[2]}, "chapter", {
+                    prefetch = true, single_chapter = true, include_annotations = false,
+                    silent_completion = true, offer_read = false,
+                    on_complete = function(ok, value) state.done, state.ok, state.value = true, ok, value end,
+                })
+            end)
+            H.wait_until("chapter request reached synthetic service", function()
+                return (H.mock_state().started_counts["/web/book/chapter/e_0"] or 0) > requests_before
+            end, 5)
+            H.call(function()
+                plugin.qr_login:_complete({ succeed = true, webLoginVid = "900000",
+                    accessToken = "mock-access-token", refreshToken = "mock-refresh-token" },
+                    plugin.qr_login.generation)
+            end)
+            H.wait_until("queued QR credentials committed before releasing the old response", function()
+                return plugin.settings:get("account", {}).user_vid == "900000"
+            end, 10)
+            H.check(not state.done, "old worker response remains pending until account change commits")
         end)
         H.wait_until("new login and completed prefetch", function()
             return state.done and plugin.settings:get("account", {}).user_vid == "900000"
@@ -45,19 +56,21 @@ return function(H)
         state = {}
         H.close_dialogs()
         local requests_before = H.mock_state().started_counts["/web/book/chapter/e_0"] or 0
-        H.mock_control({ match = "/web/book/chapter/e_0", delay = 1.5, times = 0 })
-        H.call(function()
-            plugin.downloader:start(book, {chapters[3]}, "chapter", {
-                prefetch = true, single_chapter = true, include_annotations = false,
-                silent_completion = true, offer_read = false,
-                on_complete = function(ok, value) state.done, state.ok, state.value = true, ok, value end,
-            })
-        end)
-        H.wait_until("same-account chapter request reached synthetic service", function()
-            return (H.mock_state().started_counts["/web/book/chapter/e_0"] or 0) > requests_before
-        end, 5)
-        H.call(function()
-            plugin.settings:update_auth({ wr_ticket = "same-account-rotated-ticket" })
+        with_response_gate(function()
+            H.call(function()
+                plugin.downloader:start(book, {chapters[3]}, "chapter", {
+                    prefetch = true, single_chapter = true, include_annotations = false,
+                    silent_completion = true, offer_read = false,
+                    on_complete = function(ok, value) state.done, state.ok, state.value = true, ok, value end,
+                })
+            end)
+            H.wait_until("same-account chapter request reached synthetic service", function()
+                return (H.mock_state().started_counts["/web/book/chapter/e_0"] or 0) > requests_before
+            end, 5)
+            H.call(function()
+                plugin.settings:update_auth({ wr_ticket = "same-account-rotated-ticket" })
+            end)
+            H.check(not state.done, "worker response remains pending until ticket rotation commits")
         end)
         H.wait_until("same-account prefetch saved", function() return state.done end, 20)
         H.check(state.ok, "same-account rotation must accept the downloaded chapter", tostring(state.value))
