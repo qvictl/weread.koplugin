@@ -99,10 +99,10 @@ function Content.save_catalog_cache(client, settings, book, chapters)
         return false, err
     end
     local write_ok, write_err = file:write(encoded)
-    file:close()
-    if not write_ok then
+    local closed, close_err = file:close()
+    if not write_ok or not closed then
         os.remove(tmp_path)
-        return false, write_err
+        return false, write_err or close_err
     end
     local rename_ok, rename_err = os.rename(tmp_path, path)
     if not rename_ok then
@@ -110,6 +110,17 @@ function Content.save_catalog_cache(client, settings, book, chapters)
         return false, rename_err
     end
     book.cache_dir = dir
+    return true, path
+end
+
+-- The worker encoded/wrote this file in a book-local workspace; publication
+-- is one same-filesystem rename in the parent after its account check.
+function Content.commit_catalog_cache(settings, book, source_path)
+    local path = Content.catalog_cache_path(settings, book)
+    if not path then return false, "missing book id" end
+    local ok, err = os.rename(source_path, path)
+    if not ok then return false, err end
+    book.cache_dir = path:match("^(.*)/[^/]+$")
     return true, path
 end
 

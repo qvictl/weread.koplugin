@@ -49,7 +49,7 @@ package.preload["weread.lib.plugin_util"] = function()
             end))
         end,
         log_error = function(err) return "log:" .. tostring(err) end,
-        display_error = function(err) return "shown:" .. tostring(err) end,
+        display_error = function(err) return "shown:" .. tostring(err):match("^[^\r\n]+") end,
     }
 end
 
@@ -85,6 +85,7 @@ local function make_host(config)
     host.showInfo = function(_self, text) host.info = text end
     host.showBusy = function(_self, text) event("busy", text) end
     host.closeBusy = function() event("close_busy") end
+    host._runNetworkRequest = require("spec.helpers.immediate_network_request")
     host.runOnlineTask = function(_self, label, task)
         event("online", label)
         task()

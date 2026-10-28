@@ -1007,21 +1007,22 @@ function M:showBookReviews(book)
         end
         self:showBusy(_("Loading book reviews..."))
         self:runOnlineTask(_("Book reviews"), function()
-            local ok, result = pcall(function()
+            self:_runNetworkRequest(_("Loading book reviews..."), _("Book reviews"), function()
                 local list_type = mode == "latest" and 3 or 1
                 return BookReviews.normalize_list(
                     self.client:get_book_reviews(book_id, list_type, 20)
                 )
+            end, function(result)
+                self:closeBusy()
+                session.cache[mode] = result
+                showResult(result)
+            end, function(err, cancelled)
+                self:closeBusy()
+                if cancelled then return end
+                logger.err("load book reviews failed:", log_error(err))
+                self:showInfo(T(_("%1 failed:\n%2"), _("Book reviews"), display_error(err)))
             end)
-            self:closeBusy()
-            if not ok then
-                logger.err("load book reviews failed:", log_error(result))
-                self:showInfo(T(_("%1 failed:\n%2"), _("Book reviews"), display_error(result)))
-                return
-            end
-            session.cache[mode] = result
-            showResult(result)
-        end)
+        end, 0.1, { link_only = true })
     end
 
     loadReviews("recommended", nil)
@@ -1213,34 +1214,71 @@ function M:loadChapters(book, callback, force_refresh)
     end
     self:runOnlineTask(_("Loading chapter list..."), function()
         self:showBusy(_("Loading chapter list..."))
-        local ok, chapters_or_err = pcall(function()
-            Content.ensure_reader_state(self.client, book)
-            return Content.fetch_catalog(self.client, book)
-        end)
-        self:closeBusy()
-        if not ok then
-            logger.err("load chapters failed:", log_error(chapters_or_err))
-            self:showInfo(T(_("Load chapters failed:\n%1"), display_error(chapters_or_err)))
-            return
+        local cache_book = { book_id = book.book_id or book.bookId,
+            cache_dir = Content.book_resolved_dir(self.settings, book.book_id or book.bookId, book) }
+        local prepared, workspace = pcall(Content.create_download_workspace, self.settings, cache_book)
+        local prepare_error
+        if not prepared then prepare_error, workspace = workspace, nil end
+        local function cleanup()
+            if workspace then Content.cleanup_download_workspace(workspace); workspace = nil end
         end
-        local cache_ok, cache_err = Content.save_catalog_cache(
-            self.client, self.settings, book, chapters_or_err)
-        if not cache_ok then
-            logger.warn("save chapter catalog cache failed:", log_error(cache_err))
-        end
-        local book_id = book.book_id or book.bookId
-        if book_id then
-            if self.library_db then
-                if self.library_db:putChapters(book_id, chapters_or_err) then
-                    mark_catalog_persisted(chapters_or_err, book_id)
+        self:_runNetworkRequest(_("Loading chapter list..."), _("Loading chapter list..."), function()
+            local state = Content.ensure_reader_state(self.client, book)
+            local chapters = Content.fetch_catalog(self.client, book)
+            local saved, cache_error, cache_path
+            if workspace then
+                if not cache_book.book_id then
+                    cache_book.book_id = book.book_id or state.book_id or book.bookId
+                    -- A reader URL can reveal the ID only in this child. Its
+                    -- final directory must exist before the parent can rename.
+                    local ready, err = require("util").makePath(Content.book_resolved_dir(
+                        self.settings, cache_book.book_id, book))
+                    if not ready then cache_error = err or "could not create catalog directory" end
                 end
-                self.library_db:putBook(book)
+                local staged = { book_id = cache_book.book_id, cache_dir = workspace.path }
+                if not cache_error then
+                    saved, cache_error = Content.save_catalog_cache(self.client, self.settings, staged, chapters)
+                    if saved then cache_path = Content.catalog_cache_path(self.settings, staged) end
+                end
+            else
+                cache_error = prepare_error
             end
-            BookRecords.put(self.settings, book_id, book)
-            self.settings:flush()
-        end
-        callback(chapters_or_err)
-    end)
+            return { state = state, reader_url = book.reader_url, chapters = chapters,
+                cache_path = cache_path, cache_error = not saved and cache_error or nil }
+        end, function(result)
+            self:closeBusy()
+            local state, chapters = result.state, result.chapters
+            book.book_id = book.book_id or state.book_id or book.bookId
+            book.title, book.author = book.title or state.title, book.author or state.author
+            book.psvts, book.pclts, book.token = state.psvts, state.pclts, state.token
+            book.reader_url, book.chapters = result.reader_url, chapters
+            require("weread.lib.reader_state").apply_to_book(book, state)
+            local cache_ok, cache_err = false, result.cache_error
+            if result.cache_path then
+                cache_ok, cache_err = Content.commit_catalog_cache(self.settings, book, result.cache_path)
+            end
+            cleanup()
+            if not cache_ok then logger.warn("save chapter catalog cache failed:", log_error(cache_err)) end
+            local book_id = book.book_id or book.bookId
+            if book_id then
+                if self.library_db then
+                    if self.library_db:putChapters(book_id, chapters) then
+                        mark_catalog_persisted(chapters, book_id)
+                    end
+                    self.library_db:putBook(book)
+                end
+                BookRecords.put(self.settings, book_id, book)
+                self.settings:flush()
+            end
+            callback(chapters)
+        end, function(err, cancelled)
+            cleanup()
+            self:closeBusy()
+            if cancelled then return end
+            logger.err("load chapters failed:", log_error(err))
+            self:showInfo(T(_("Load chapters failed:\n%1"), display_error(err)))
+        end)
+    end, 0.1, { link_only = true })
 end
 
 function M:showChapterList(book, on_close)

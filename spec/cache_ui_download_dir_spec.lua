@@ -100,6 +100,7 @@ local infos, busy, refreshes = {}, {}, {}
 local online = true
 local shelf_calls, shelf_result, shelf_error = 0, nil, nil
 local host = {
+    _runNetworkRequest = require("spec.helpers.immediate_network_request"),
     settings = settings,
     client = {
         get_shelf = function()

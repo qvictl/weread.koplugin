@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import base64
 from collections import deque
+from datetime import datetime, timedelta, timezone
 import hashlib
 import ipaddress
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -117,7 +118,7 @@ class DropConnection(Exception):
 class MockServer(ThreadingHTTPServer):
     daemon_threads = True
 
-    def __init__(self, port=8765, log_path=None, bind="127.0.0.1"):
+    def __init__(self, port=8765, log_path=None, bind="127.0.0.1", now=None):
         address = ipaddress.IPv4Address(bind)
         if bind != "0.0.0.0" and not any(address in ipaddress.IPv4Network(network) for network in
                                           ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "127.0.0.0/8")):
@@ -125,6 +126,7 @@ class MockServer(ThreadingHTTPServer):
         super().__init__((bind, port), Handler)
         self.lock = threading.Lock()
         self.log_path = log_path
+        self.now = now or time.time
         self.events = deque(maxlen=500)
         self.started_counts = {}
         self.progress = {}
@@ -194,6 +196,22 @@ class MockServer(ThreadingHTTPServer):
                                                       if keyword in b["title"] or keyword in b["author"]])])
             if api == "/book/getprogress":
                 return 200, self.get_progress(book_id)
+            if api == "/readdata/detail":
+                if data.get("mode") not in {"weekly", "monthly", "annually", "overall"}:
+                    raise ValueError("unknown statistics mode")
+                # Synthetic fields already consumed by ReadStats.normalize.
+                start = datetime.fromtimestamp(float(data.get("baseTime") or self.now()),
+                                               timezone(timedelta(hours=8))).replace(
+                                                   hour=0, minute=0, second=0, microsecond=0)
+                if data["mode"] == "weekly":
+                    start -= timedelta(days=start.weekday())
+                elif data["mode"] == "monthly":
+                    start = start.replace(day=1)
+                elif data["mode"] in {"annually", "overall"}:
+                    start = start.replace(month=1, day=1)
+                base = 0 if data["mode"] == "overall" else int(start.timestamp())
+                return 200, dict(baseTime=base, totalReadTime=7200, readDays=3,
+                                 dayAverageReadTime=2400, readTimes={str(int(start.timestamp())): 7200})
             if api == "/review/list":
                 return 200, dict(reviewsCnt=1, reviewsHasMore=0, reviews=[dict(review=review())])
             if api in {"/book/underlines", "/book/readreviews"}:

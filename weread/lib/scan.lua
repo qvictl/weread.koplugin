@@ -32,6 +32,8 @@ end
 --   is_mp    function(book_id) -> true for MP (public account) ids
 --   dry_run  when true, only count what would change
 --   now      timestamp used for updated_at on new records
+--   checkpoint optional cooperative yield/cancellation callback
+--   on_change optional callback after one changed record is ready
 -- Returns added, updated.
 function Scan.scan_root(opts)
     local fs, books, allowed = opts.fs, opts.books, opts.allowed
@@ -41,6 +43,7 @@ function Scan.scan_root(opts)
         return 0, 0
     end
     for entry in iter, dir_obj do
+        if opts.checkpoint then opts.checkpoint() end
         if entry ~= "." and entry ~= ".." then
             local dir = opts.root .. "/" .. entry
             local attr = fs.attributes(dir)
@@ -52,6 +55,7 @@ function Scan.scan_root(opts)
                 local ok2, fiter, fobj = pcall(fs.dir, dir)
                 if ok2 then
                     for f in fiter, fobj do
+                        if opts.checkpoint then opts.checkpoint() end
                         if f ~= "." and f ~= ".." then
                             local fattr = fs.attributes(dir .. "/" .. f)
                             if fattr and fattr.mode == "file" then
@@ -124,6 +128,7 @@ function Scan.scan_root(opts)
                             -- read as cached.
                             if type(record.cached_chapters) == "table" then
                                 for uid, path in pairs(record.cached_chapters) do
+                                    if opts.checkpoint then opts.checkpoint() end
                                     if not file_exists(fs, path) then
                                         local name = type(path) == "string" and path:match("[^/]+$")
                                         local candidate = name and (dir .. "/" .. name)
@@ -142,6 +147,7 @@ function Scan.scan_root(opts)
                                 updated = updated + 1
                             end
                             books[book_id] = record
+                            if opts.on_change then opts.on_change(book_id, record) end
                         end
                     end
                 end

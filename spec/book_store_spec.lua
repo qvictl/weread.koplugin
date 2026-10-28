@@ -116,6 +116,40 @@ expect(loaded.title == "Metadata only"
     and loaded.progress == nil and loaded.mp_articles == nil,
     "removed split state reappeared after reload")
 
+-- A scan releases only newly warmed data. Existing parsed UI entries and
+-- caller-owned unsaved changes remain intact.
+local warm = { content = "kept", value = { title = "UI" } }
+local cold = { content = "cold" }
+settings._book_file_cache = { warm = warm, cold = cold }
+local mark = BookStore.cache_mark(settings)
+local private = BookStore.load(settings, "book/42", index)
+private.title = "Unsaved UI edit"
+cold.value = { cached_chapters = { ["1"] = "old path" } }
+settings._book_file_cache.new = { content = "new" }
+BookStore.release_cache_since(settings, mark)
+expect(settings._book_file_cache.new == nil, "scan-only entries retained")
+expect(settings._book_file_cache.warm == warm and warm.value.title == "UI", "existing UI cache changed")
+expect(cold.value == nil and cold.content == "cold", "previously cold entry retained decoded paths")
+expect(private.title == "Unsaved UI edit", "release discarded caller-owned changes")
+expect(BookStore.load(settings, "book/42", index).title == "Metadata only", "release lost persisted data")
+
+-- Marks must not extend the lifetime of old bytes/decoded payloads after
+-- save replaces an existing parsed or unparsed file entry.
+local parsed = { content = string.rep("old JSON", 1000), value = { cached_chapters = { "old path" } } }
+local unparsed = { content = string.rep("cold JSON", 1000) }
+local old_refs = setmetatable({ parsed, unparsed, parsed.value }, { __mode = "v" })
+settings._book_file_cache = { parsed = parsed, unparsed = unparsed }
+local rewrite_mark = BookStore.cache_mark(settings)
+local replacement = { content = "new JSON", value = { title = "newly parsed after rewrite" } }
+settings._book_file_cache.parsed, settings._book_file_cache.unparsed = replacement, replacement
+parsed, unparsed = nil, nil -- luacheck: ignore 311
+collectgarbage("collect")
+expect(old_refs[1] == nil and old_refs[2] == nil and old_refs[3] == nil,
+    "cache mark retained replaced entry payloads")
+BookStore.release_cache_since(settings, rewrite_mark)
+expect(replacement.value.title == "newly parsed after rewrite",
+    "release confused a replacement with the original cold entry")
+
 os.remove(index.cache_dir .. "/metadata.json")
 os.remove(index.cache_dir)
 os.remove(root)

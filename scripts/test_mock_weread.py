@@ -16,7 +16,7 @@ from mock_weread import (BIG_BOOK_ID, BIG_CHAPTER_COUNT, BOOK_ID, BOOKS, CHAPTER
 class MockTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.server = MockServer(0)
+        cls.server = MockServer(0, now=lambda: 1710343800)
         cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
         cls.thread.start()
         cls.base = f"http://127.0.0.1:{cls.server.server_port}"
@@ -48,6 +48,25 @@ class MockTests(unittest.TestCase):
         self.request("/__control", dict(delay=0, match="", status=503, times=0, drop=False,
                                         empty_shelf=False, empty_annotations=False, shelf_idless_entry=False,
                                         qr_mode="succeed", qr_delay=0))
+
+    def test_read_statistics_view_fixture(self):
+        status, data = self.gateway("/readdata/detail", mode="monthly")
+        self.assertEqual(status, 200)
+        self.assertEqual(data["totalReadTime"], 7200)
+        self.assertEqual(sum(data["readTimes"].values()), 7200)
+        self.assertEqual(data["baseTime"], 1709222400)  # Current injected month: March 2024
+        self.assertEqual(self.gateway("/readdata/detail", mode="weekly")[1]["baseTime"], 1710086400)
+        self.assertEqual(self.gateway("/readdata/detail", mode="annually")[1]["baseTime"], 1704038400)
+        self.assertEqual(self.gateway("/readdata/detail", mode="monthly", baseTime=1790784000)[1]["baseTime"],
+                         1790784000)  # Explicit period overrides the injected clock
+        self.assertEqual(self.gateway("/readdata/detail", mode="weekly", baseTime=1790784000)[1]["baseTime"],
+                         1790524800)  # Monday 2026-09-28, Beijing midnight
+        self.assertEqual(self.gateway("/readdata/detail", mode="annually", baseTime=1790784000)[1]["baseTime"],
+                         1767196800)  # 2026-01-01, Beijing midnight
+        _, overall = self.gateway("/readdata/detail", mode="overall")
+        self.assertEqual(overall["baseTime"], 0)
+        self.assertEqual(overall["readTimes"], {"1704038400": 7200})  # Injected current year: 2024
+        self.assertEqual(self.gateway("/readdata/detail", mode="invalid")[0], 400)
 
     def test_synthetic_mp_content_and_bounded_image_host(self):
         status, html = self.request("/web/mp/content?reviewId=mock-mp-article")

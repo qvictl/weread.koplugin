@@ -266,7 +266,7 @@ expect(not exists(root .. "/cache/rename-blocked/catalog.json.tmp"),
 -- A short write (disk full) is reported and the temporary file removed.
 local original_open = io.open
 -- luacheck: push ignore 122
-io.open = function(path, mode)
+io.open = function(path, mode) -- luacheck: ignore 122
     local file, open_err = original_open(path, mode)
     if not file or path:sub(-4) ~= ".tmp" then return file, open_err end
     return {
@@ -618,6 +618,40 @@ expect(cleaned == nil and clean_err == "device busy" and is_dir(job.path),
 ffi_util_stub.purgeDir = purge_dir
 expect(Content.cleanup_download_workspace(job) == true and not is_dir(job.path),
     "job workspace was not removed")
+
+-- Worker catalog publication preserves the old destination until commit.
+local catalog_book = { book_id = "staged-catalog" }
+local catalog_client = { json_encode = function() return "new catalog bytes" end }
+local catalog_workspace = Content.create_download_workspace(settings, catalog_book)
+local destination = Content.catalog_cache_path(settings, catalog_book)
+write_raw(destination, "old catalog bytes")
+local staged = { book_id = catalog_book.book_id, cache_dir = catalog_workspace.path }
+expect(Content.save_catalog_cache(catalog_client, settings, staged, {}) == true,
+    "worker could not stage catalog")
+local staged_path = Content.catalog_cache_path(settings, staged)
+expect(read_file(destination) == "old catalog bytes", "staging overwrote published catalog")
+local rename = os.rename
+os.rename = function() return nil, "injected rename failure" end -- luacheck: ignore 122
+local committed, commit_err = Content.commit_catalog_cache(settings, catalog_book, staged_path)
+os.rename = rename -- luacheck: ignore 122
+expect(not committed and commit_err == "injected rename failure"
+    and read_file(destination) == "old catalog bytes", "failed commit lost published catalog")
+expect(Content.commit_catalog_cache(settings, catalog_book, staged_path) == true
+    and read_file(destination) == "new catalog bytes" and not exists(staged_path),
+    "successful commit did not publish staged bytes")
+expect(Content.commit_catalog_cache(settings, {}, staged_path) == false, "missing book id was accepted")
+local open = io.open
+io.open = function(path, mode) -- luacheck: ignore 122
+    if path == destination .. ".tmp" and mode == "wb" then
+        return { write = function() return true end, close = function() return nil, "close failure" end }
+    end
+    return open(path, mode)
+end
+local close_ok, close_err = Content.save_catalog_cache(catalog_client, settings, catalog_book, {})
+io.open = open -- luacheck: ignore 122
+expect(not close_ok and close_err == "close failure" and read_file(destination) == "new catalog bytes"
+    and not exists(destination .. ".tmp"), "close failure published or left temporary catalog")
+expect(Content.cleanup_download_workspace(catalog_workspace) == true, "catalog stage cleanup failed")
 
 -- Startup recovery ------------------------------------------------------------
 local dir_a = root .. "/recover-a"
