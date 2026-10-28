@@ -20,12 +20,6 @@ function Cookie.merge(cookies, updates)
     return merged
 end
 
--- Set-Cookie attributes (case-insensitive); any other name=value starts a cookie.
-local ATTRIBUTES = {
-    expires = true, ["max-age"] = true, domain = true, path = true,
-    samesite = true, secure = true, httponly = true, priority = true, partitioned = true,
-}
-
 local ALLOWED = {
     ptcz = true,
     RK = true,
@@ -46,10 +40,15 @@ local function days_from_civil(y, m, d)
     return era * 146097 + doe - 719468
 end
 
--- "Wed, 21 Oct 2026 07:28:00 GMT" (also "21-Oct-2026") -> UTC epoch seconds.
+-- HTTP dates -> UTC epoch seconds: IMF-fixdate "Wed, 21 Oct 2026 07:28:00 GMT",
+-- RFC 850 "Wednesday, 21-Oct-26 07:28:00 GMT" and asctime "Wed Oct 21 07:28:00 2026".
 function Cookie.parse_http_date(text)
-    local d, mon, y, hh, mm, ss = tostring(text or ""):match(
+    text = tostring(text or "")
+    local d, mon, y, hh, mm, ss = text:match(
         "(%d%d?)[ %-](%a%a%a)%a*[ %-](%d%d%d?%d?)%s+(%d%d?):(%d%d):(%d%d)")
+    if not d then
+        mon, d, hh, mm, ss, y = text:match("(%a%a%a)%s+(%d%d?)%s+(%d%d?):(%d%d):(%d%d)%s+(%d%d%d%d)")
+    end
     local month = mon and MONTHS[mon:lower()]
     if not month then return nil end
     y = tonumber(y)
@@ -61,12 +60,24 @@ end
 -- Splits one Set-Cookie value (LuaSocket joins repeated headers with ", ")
 -- into { name, value, max_age, expires } records.
 local function parse_set_cookie(header)
+    -- Within one cookie, attributes follow ";"; LuaSocket joins repeated
+    -- Set-Cookie headers with ",". So a segment after ";" is always an
+    -- attribute (known or not, e.g. "Comment=x"), and one after "," starts a
+    -- new cookie unless it continues an Expires date ("Wed, 21 Oct ...").
     local cookies, current, last_attr = {}, nil, nil
-    for segment in tostring(header):gmatch("[^;,\r\n]+") do
-        segment = segment:match("^%s*(.-)%s*$")
+    local text = tostring(header)
+    local pos, delimiter = 1, ","
+    while pos <= #text + 1 do
+        local stop = text:find("[;,\r\n]", pos) or (#text + 1)
+        local segment = text:sub(pos, stop - 1):match("^%s*(.-)%s*$")
         local name, value = segment:match("^([^=%s]+)%s*=%s*(.*)$")
         local attr = name and name:lower()
-        if name and not ATTRIBUTES[attr] then
+        if segment == "" then -- luacheck: ignore 542
+            -- Empty segment (";;" or trailing ","): keep the previous context.
+        elseif delimiter == "," and not name and last_attr == "expires" and current then
+            current.expires = current.expires .. ", " .. segment
+            last_attr = nil
+        elseif delimiter == "," and name then
             current = { name = name, value = value }
             cookies[#cookies + 1] = current
             last_attr = nil
@@ -76,13 +87,12 @@ local function parse_set_cookie(header)
         elseif current and attr == "expires" then
             current.expires = value
             last_attr = attr
-        elseif current and not name and last_attr == "expires" then
-            -- "Expires=Wed, 21 Oct ..." was split at its comma.
-            current.expires = current.expires .. ", " .. segment
-            last_attr = nil
         else
             last_attr = attr
         end
+        delimiter = text:sub(stop, stop)
+        if delimiter == "\r" or delimiter == "\n" then delimiter = "," end
+        pos = stop + 1
     end
     return cookies
 end

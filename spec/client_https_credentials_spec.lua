@@ -116,6 +116,28 @@ for _, url in ipairs({ "http://weread.qq.com/web/a", "HTTP://I.WEREAD.QQ.COM/api
     expect(#merged == 0, "Set-Cookie over http was stored for " .. url)
 end
 
+-- The host ends at "/", "?" or "#": query or fragment text that looks like
+-- a WeRead host never earns the cookie.
+for _, url in ipairs({ "https://attacker.example?x=.weread.qq.com", "https://attacker.example#.weread.qq.com",
+        "https://weread.qq.com.attacker.example/?a=b" }) do
+    reset()
+    responses[1] = { code = 200, body = "ok", headers = { ["set-cookie"] = "wr_skey=XXX-stolen; Path=/" } }
+    client:request({ url = url })
+    expect(requests[1].headers.Cookie == nil and #merged == 0, "cookie gate passed for " .. url)
+end
+reset()
+responses[1] = { code = 302, body = "", headers = { location = "https://attacker.example?u=.weread.qq.com" } }
+responses[2] = { code = 200, body = "ok" }
+client:request_follow({ url = "https://weread.qq.com/web/open-redirect" })
+expect(requests[2].headers.Cookie == nil, "redirect to a look-alike query URL carried the cookie")
+
+-- A relative Location resolves against the path, not a "/" inside the query.
+reset()
+responses[1] = { code = 302, body = "", headers = { location = "next" } }
+responses[2] = { code = 200, body = "ok" }
+client:request_follow({ url = "https://weread.qq.com/web/dir/page?return=/a/b" })
+expect(requests[2].url == "https://weread.qq.com/web/dir/next", "relative redirect used the query: " .. requests[2].url)
+
 -- Explicit credential headers (QR login passes Cookie / X-Skey itself) are
 -- dropped for non-https URLs and kept for https ones.
 reset()

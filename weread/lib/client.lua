@@ -181,7 +181,9 @@ local function strip_credential_headers(headers)
 end
 
 local function is_weread_url(url)
-    local authority = tostring(url or ""):match("^https?://([^/]+)")
+    -- The authority ends at the first "/", "?" or "#": query text such as
+    -- "?x=.weread.qq.com" must never pass for a WeRead host.
+    local authority = tostring(url or ""):match("^https?://([^/?#]+)")
     if not authority then
         return false
     end
@@ -196,19 +198,22 @@ local function absolute_url(base_url, location)
     if location:match("^https?://") then
         return location
     end
-    local scheme, host = tostring(base_url or ""):match("^(https?)://([^/]+)")
+    local scheme, host = tostring(base_url or ""):match("^(https?)://([^/?#]+)")
     if not scheme then
         return location
     end
     if location:sub(1, 1) == "/" then
         return scheme .. "://" .. host .. location
     end
-    local prefix = base_url:match("^(https?://.*/)") or (scheme .. "://" .. host .. "/")
+    -- Resolve against the path only; a "/" in the query is not a directory.
+    local base_path = base_url:match("^[^?#]*")
+    local prefix = base_path:match("^(https?://[^/?#]+/.*/)") or base_path:match("^(https?://[^/?#]+/)")
+        or (scheme .. "://" .. host .. "/")
     return prefix .. location
 end
 
 local function url_origin(url)
-    local scheme, authority = tostring(url or ""):match("^(https?)://([^/]+)")
+    local scheme, authority = tostring(url or ""):match("^(https?)://([^/?#]+)")
     if not scheme then
         return nil
     end

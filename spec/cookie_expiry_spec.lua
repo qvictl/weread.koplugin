@@ -38,6 +38,16 @@ expect(c.wr_skey == "kept", "unparseable Expires deleted the cookie")
 c = merge({ wr_skey = "old" }, "wr_skey=; Path=/")
 expect(c.wr_skey == nil, "empty value did not delete")
 
+-- asctime dates, and attributes unknown to the parser stay on their cookie.
+expect(Cookie.parse_http_date("Thu Jan  1 00:00:00 1970") == 0, "asctime date")
+expect(Cookie.parse_http_date("Wed Oct 21 07:28:00 2026") == 1792567680, "asctime date with a 2-digit day")
+c = merge({ wr_skey = "old" }, "wr_skey=gone; Expires=Thu Jan  1 00:00:00 1970")
+expect(c.wr_skey == nil, "past asctime Expires did not delete")
+c = merge({ wr_skey = "old" }, "wr_skey=new; Comment=ignored; Max-Age=0")
+expect(c.wr_skey == nil and c.Comment == nil, "unknown attribute split the cookie from its Max-Age")
+c = merge({ wr_skey = "old" }, "wr_skey=new; wr_vid=attr; Path=/")
+expect(c.wr_skey == "new" and c.wr_vid == nil, "an attribute after ';' was stored as a cookie")
+
 -- LuaSocket joins repeated Set-Cookie headers with ", ".
 c = merge({ wr_skey = "a", wr_vid = "1", wr_name = "n" },
     "wr_skey=; Path=/, wr_vid=2; Max-Age=0, wr_name=x; Expires=Thu, 01 Jan 1970 00:00:00 GMT, "

@@ -117,6 +117,12 @@ class MockTests(unittest.TestCase):
         self.assertEqual([(e["scheme"], e["status"], e["cookie"]) for e in events],
                          [("https", 302, False), ("http", 200, False)])
         self.assertEqual(self.request("/__control", dict(downgrade_path=1))[0], 400)
+        # Positive control for the cookie flag: a request that carries one.
+        with self.opener.open(Request(self.base + "/__proxy?url=" + urllib.parse.quote(plain, safe=""),
+                                      headers={"Cookie": "wr_vid=XXX-synthetic"}), timeout=3) as response:
+            self.assertEqual(response.status, 200)
+        last = self.request("/__state")[1]["requests"][-1]
+        self.assertEqual((last["scheme"], last["cookie"]), ("http", True))
 
     def test_drop_closes_the_connection_without_a_response(self):
         self.request("/__control", dict(match="/api/userInfo", times=1, drop=True))
