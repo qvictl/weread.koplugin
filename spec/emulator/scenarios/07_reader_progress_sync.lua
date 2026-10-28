@@ -226,6 +226,17 @@ return function(H)
         H.call(function()
             local sync = plugin.progress_sync
             local goto_fraction = sync.goto_fraction
+            local notify = sync.notify
+            sync.notify = function(kind, payload)
+                local result = notify(kind, payload)
+                if kind == "remote_applied" then
+                    sync.notify = notify
+                    -- The old 150 ms cleanup was scheduled after this notice,
+                    -- not when goto_fraction returned before capture/persist/UI.
+                    jump.window_ms = H.now_ms()
+                end
+                return result
+            end
             sync.goto_fraction = function(fraction)
                 sync.goto_fraction = goto_fraction
                 local ok, err = goto_fraction(fraction)
@@ -249,8 +260,9 @@ return function(H)
         H.wait_until("page turned right after the cloud jump", function()
             return jump.turned_page ~= nil
         end, 10)
-        local gap = jump.turn_ms - jump.ms
-        H.metric("turn_after_jump_ms", gap)
+        local gap = jump.turn_ms - jump.window_ms
+        H.metric("turn_after_jump_ms", jump.turn_ms - jump.ms)
+        H.metric("turn_after_notice_ms", gap)
         H.check(gap < 150, "page turned inside the old 150 ms echo window", tostring(gap))
         H.check(jump.turned_page > jump.page, "page turn moved forward",
             tostring(jump.page), "->", tostring(jump.turned_page))
