@@ -4,6 +4,7 @@
 return function(H)
     local UIManager = require("ui/uimanager")
     local TrapWidget = require("ui/widget/trapwidget")
+    local ffiutil = require("ffi/util")
     local plugin, max_gap
     local book = { book_id = "MP_WXS_900000", title = "合成公众号" }
     H.step("delayed article list", function()
@@ -34,11 +35,21 @@ return function(H)
         local prior = #H.mock_requests(function(event) return event.path == "/web/mp/articles" end)
         local started_prior = H.mock_state().started_counts["/web/mp/articles"] or 0
         H.mock_control({ match = "/web/mp/articles", delay = 1.5, times = 0 })
-        H.call(function() plugin:fetchMPArticles(book) end)
+        local worker_pid
+        local launch = ffiutil.runInSubProcess
+        H.call(function()
+            ffiutil.runInSubProcess = function(...)
+                local pid, fd = launch(...)
+                worker_pid = pid
+                return pid, fd
+            end
+            plugin:fetchMPArticles(book)
+        end)
         H.wait_until("dismissable article request", function()
-            return getmetatable(H.input_window()) == TrapWidget
+            return worker_pid and getmetatable(H.input_window()) == TrapWidget
                 and (H.mock_state().started_counts["/web/mp/articles"] or 0) > started_prior
         end, 5)
+        H.call(function() ffiutil.runInSubProcess = launch end)
         local started = H.now_ms()
         H.tap_at(580, 20)
         H.wait_until("article request dismissed", function() return H.input_window() == previous end, 5)
@@ -49,7 +60,10 @@ return function(H)
         H.wait_until("delayed service finished the cancelled request", function()
             return #H.mock_requests(function(event) return event.path == "/web/mp/articles" end) > prior
         end, 5)
-        H.equal(H.input_window(), previous, "late response does not reopen article list")
+        H.wait_until("cancelled Trapper worker has actually exited", function()
+            return ffiutil.isSubProcessDone(worker_pid)
+        end, 5)
+        H.equal(H.input_window(), previous, "completed cancellation does not reopen article list")
         local current = H.call(function() return plugin.settings:get_book(book.book_id).mp_articles_time end)
         H.equal(current, saved, "cancelled response does not update parent article cache")
         H.mock_control({ match = "", delay = 0, times = 0 })
