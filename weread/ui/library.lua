@@ -1270,9 +1270,19 @@ function M:loadChapters(book, callback, force_refresh)
             local chapters = Content.fetch_catalog(self.client, book)
             local saved, cache_error, cache_path
             if workspace then
+                if not cache_book.book_id then
+                    cache_book.book_id = book.book_id or state.book_id or book.bookId
+                    -- A reader URL can reveal the ID only in this child. Its
+                    -- final directory must exist before the parent can rename.
+                    local ready, err = require("util").makePath(Content.book_resolved_dir(
+                        self.settings, cache_book.book_id, book))
+                    if not ready then cache_error = err or "could not create catalog directory" end
+                end
                 local staged = { book_id = cache_book.book_id, cache_dir = workspace.path }
-                saved, cache_error = Content.save_catalog_cache(self.client, self.settings, staged, chapters)
-                if saved then cache_path = Content.catalog_cache_path(self.settings, staged) end
+                if not cache_error then
+                    saved, cache_error = Content.save_catalog_cache(self.client, self.settings, staged, chapters)
+                    if saved then cache_path = Content.catalog_cache_path(self.settings, staged) end
+                end
             else
                 cache_error = prepare_error
             end

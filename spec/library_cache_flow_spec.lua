@@ -2,7 +2,9 @@ package.path = "./?.lua;" .. package.path
 
 local existing_paths = {}
 local catalog_save_count = 0
+local staged_id, committed_id, target_directory
 local function empty_module() return {} end
+package.preload["util"] = function() return { makePath = function(path) target_directory = path; return true end } end
 package.preload["weread.lib.book_reviews"] = function()
     return { format_date = function() return "" end }
 end
@@ -38,7 +40,7 @@ package.preload["weread.lib.content"] = function()
         book_resolved_dir = function(_settings, id, book) return book.cache_dir or "/cache/" .. tostring(id) end,
         create_download_workspace = function(_settings, book) return { path = "/stage/" .. tostring(book.book_id) } end,
         cleanup_download_workspace = function() return true end,
-        commit_catalog_cache = function(_settings, book) book.cache_dir = "/cache/" .. tostring(book.book_id) return true end,
+        commit_catalog_cache = function(_settings, book) committed_id = book.book_id; book.cache_dir = "/cache/" .. tostring(book.book_id) return true end,
         ensure_reader_state = function(_client, book)
             book.reader_url = "https://weread.qq.com/web/reader/synthetic"
             return { book_id = "42", psvts = "synthetic-session", token = "synthetic-token",
@@ -47,7 +49,8 @@ package.preload["weread.lib.content"] = function()
         end,
         fetch_catalog = function() return fetched_chapters end,
         catalog_cache_path = function() return "/cache/42/catalog.json" end,
-        save_catalog_cache = function()
+        save_catalog_cache = function(_client, _settings, staged)
+            staged_id = staged.book_id
             catalog_save_count = catalog_save_count + 1
             return true
         end,
@@ -135,6 +138,12 @@ expect(refreshed_book.psvts == "synthetic-session" and refreshed_book.token == "
         and refreshed_book.chapters == fetched_chapters and refreshed_book.reported_local == false,
     "catalog response did not apply the fresh reader session in the parent")
 
+local url_only = { reader_url = "https://weread.qq.com/web/reader/synthetic" }
+host:loadChapters(url_only, function(chapters) callback_chapters = chapters end, true)
+expect(url_only.book_id == "42" and staged_id == "42" and committed_id == "42"
+    and target_directory == "/cache/42" and callback_chapters == fetched_chapters,
+    "reader-url-only input did not stage/publish under the resolved book ID")
+
 db_chapters = { { chapterUid = 8, title = "Database chapter" } }
 callback_chapters = nil
 local db_book = { book_id = "42", title = "Database catalog" }
@@ -143,7 +152,7 @@ host:loadChapters(db_book, function(chapters)
 end)
 expect(callback_chapters == db_chapters and db_book.chapters == db_chapters,
     "SQLite chapter hit was not returned")
-expect(catalog_save_count == 2,
+expect(catalog_save_count == 3,
     "SQLite chapter hit did not backfill missing catalog.json")
 
 local partial = {

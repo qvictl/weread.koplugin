@@ -706,10 +706,16 @@ local function scan_account(settings)
     return type(account) == "table" and tostring(account.user_vid or "") or ""
 end
 
+function M:refuseWhileScanning()
+    if not self._cache_import then return false end
+    self:showInfo(_("A local cache scan is already running."))
+    return true
+end
+
 -- Import one record at a time and yield by elapsed work, not per file. The
 -- lazy lookup avoids retaining a second copy of every book/chapter record.
 function M:scanLocalCacheAsync(root, allowed, dry_run, on_done, on_error)
-    if self._cache_import then return false end
+    if self:refuseWhileScanning() then return false end
     local scan = {}
     local cache_mark = BookStore.cache_mark(self.settings)
     self._cache_import = scan
@@ -803,11 +809,13 @@ function M:fetchShelfAllowedMap()
 end
 
 function M:confirmScanLocalCache()
+    if self:refuseWhileScanning() then return end
     if not self.settings:is_api_configured() then
         self:showInfo(_("Scanning requires the official API key to match folders against your WeRead shelf."))
         return
     end
     self:runOnlineTask(_("Scan and match local books"), function()
+        if self:refuseWhileScanning() then return end
         self:showBusy(_("Scanning local cache..."))
         self:_runNetworkRequest(_("Scanning local cache..."), _("Scan and match local books"), function()
             return self:fetchShelfAllowedMap()
@@ -834,11 +842,13 @@ end
 -- or network the scan is silently skipped; it can be run later from Cache
 -- management.
 function M:offerScanNewDir(new_dir, base_message)
+    if self:refuseWhileScanning() then return end
     if not self.settings:is_api_configured() or not self:isNetworkConnected() then
         self:showInfo(base_message)
         return
     end
     self:runOnlineTask(_("Scan and match local books"), function()
+        if self:refuseWhileScanning() then return end
         self:_runNetworkRequest(_("Scanning local cache..."), _("Scan and match local books"), function()
             return self:fetchShelfAllowedMap()
         end, function(allowed)
@@ -851,6 +861,7 @@ function M:offerScanNewDir(new_dir, base_message)
                         tostring(pending_added), tostring(pending_updated)),
                     ok_text = _("Import"),
                     ok_callback = function()
+                        if self:refuseWhileScanning() then return end
                         if scan_account(self.settings) ~= original_account then return end
                         self:scanLocalCacheAsync(new_dir, allowed, false, function(added, updated)
                             self:closeBusy()

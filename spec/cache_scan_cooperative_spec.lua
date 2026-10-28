@@ -6,7 +6,7 @@ local function expect(value, message)
     assert(value, message)
 end
 local now, queue, account, writes, records = 0, {}, "one", {}, {}
-local confirmation
+local confirmation, notices = nil, 0
 local flushes, db_failure = 0, false
 local function empty() return {} end
 for _, key in ipairs({"ui/widget/buttondialog", "ui/widget/confirmbox", "ui/widget/pathchooser"}) do
@@ -55,12 +55,15 @@ local host = setmetatable({ settings = {
     get_books = function() error("must not materialize whole library") end,
     flush = function() flushes = flushes + 1 end,
 }, library_db = { putBook = function() if db_failure then return false end return true end },
+    showInfo = function() notices = notices + 1 end,
     showBusy = function(self) self.busy = true end }, { __index = Cache })
 local done, failure, cancelled
 local function finish(added, updated) done = { added, updated }; host.busy = nil end
 local function fail(err, cancel) failure, cancelled, host.busy = err, cancel, nil end
 host:scanLocalCacheAsync("/root", allowed, false, finish, fail)
 expect(not done and #queue == 1, "first elapsed slice must yield")
+host:confirmScanLocalCache()
+expect(notices == 1 and host.busy and #queue == 1, "concurrent command replaced busy state or hid rejection")
 local slices = 0
 while #queue > 0 do
     local task = table.remove(queue, 1)
@@ -98,6 +101,10 @@ end
 account = "one"
 host:offerScanNewDir("/root", "base")
 expect(confirmation and confirmation.ok_callback, "import confirmation not shown")
+host._cache_import = {}
+confirmation.ok_callback()
+expect(imports == 0 and notices == 2, "concurrent confirmation import was silently discarded")
+host._cache_import = nil
 account = "two"
 confirmation.ok_callback()
 expect(imports == 0, "old shelf confirmation imported into new account")

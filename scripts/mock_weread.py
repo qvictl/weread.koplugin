@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import base64
 from collections import deque
+from datetime import datetime, timedelta, timezone
 import hashlib
 import ipaddress
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -194,8 +195,18 @@ class MockServer(ThreadingHTTPServer):
                 if data.get("mode") not in {"weekly", "monthly", "annually", "overall"}:
                     raise ValueError("unknown statistics mode")
                 # Synthetic fields already consumed by ReadStats.normalize.
-                return 200, dict(baseTime=1790784000, totalReadTime=7200, readDays=3,
-                                 dayAverageReadTime=2400, readTimes={"1790784000": 7200})
+                start = datetime.fromtimestamp(float(data.get("baseTime") or 1790784000),
+                                               timezone(timedelta(hours=8))).replace(
+                                                   hour=0, minute=0, second=0, microsecond=0)
+                if data["mode"] == "weekly":
+                    start -= timedelta(days=start.weekday())
+                elif data["mode"] == "monthly":
+                    start = start.replace(day=1)
+                elif data["mode"] == "annually":
+                    start = start.replace(month=1, day=1)
+                base = 0 if data["mode"] == "overall" else int(start.timestamp())
+                return 200, dict(baseTime=base, totalReadTime=7200, readDays=3,
+                                 dayAverageReadTime=2400, readTimes={str(base): 7200})
             if api == "/review/list":
                 return 200, dict(reviewsCnt=1, reviewsHasMore=0, reviews=[dict(review=review())])
             if api in {"/book/underlines", "/book/readreviews"}:

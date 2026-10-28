@@ -1,6 +1,7 @@
 local I18n = {}
 
 local zh = {
+    ["A local cache scan is already running."] = "本地缓存扫描正在进行中。",
     ["Network subprocess is unavailable."] = "当前环境无法启动网络子进程。",
     ["Could not start network subprocess."] = "无法启动网络子进程。",
     ["Could not read network subprocess result."] = "无法读取网络子进程的结果。",
