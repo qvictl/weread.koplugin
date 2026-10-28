@@ -138,6 +138,7 @@ python3 scripts/mock_weread.py --port 8765 \
 | `delay` | 匹配请求的响应延迟，0–60 秒；超过 Client 超时可测超时分支 |
 | `status` | 注入的 HTTP 错误码，400–599 |
 | `times` | 失败次数；0 关闭失败、1 仅下一次、-1 持续失败 |
+| `drop` | 为 `true` 时注入的失败不返回任何 HTTP 响应，直接断开连接（模拟连接被关闭），布尔值 |
 | `empty_shelf` / `empty_annotations` | 返回空书架 / 空划线想法，布尔值 |
 
 例如让每个章节的首个分片慢 2 秒，便于在真实进度框点击取消：
