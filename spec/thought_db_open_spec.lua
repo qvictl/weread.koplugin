@@ -8,7 +8,7 @@ local modules = { "weread.lib.thought_db", "weread.lib.logger", "util", "lua-ljs
 local saved = {}
 for _, name in ipairs(modules) do
     saved[name] = { loaded = package.loaded[name], preload = package.preload[name] }
-    package.loaded[name] = nil
+    package.loaded[name], package.preload[name] = nil, nil
 end
 
 local checks = 0
