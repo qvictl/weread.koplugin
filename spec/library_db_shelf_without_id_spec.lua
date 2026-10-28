@@ -40,7 +40,9 @@ local ok, err = pcall(function()
     expect(not db:cacheShelf({ { bookId = "b3", title = "Three" }, { bookId = "bad", broken = unencodable } }, {}),
         "an unencodable entry did not fail the shelf write")
     shelf = db:getShelf()
-    expect(#shelf == 2 and shelf[1].bookId == "b1", "a failed write replaced the previous snapshot")
+    expect(#shelf == 2 and shelf[1].bookId == "b1" and shelf[1].title == "One"
+        and shelf[2].book_id == "b2" and shelf[2].title == "Two",
+        "a failed write replaced the previous snapshot")
 end)
 pcall(db.close, db)
 os.remove(path); os.remove(path .. "-wal"); os.remove(path .. "-shm")
