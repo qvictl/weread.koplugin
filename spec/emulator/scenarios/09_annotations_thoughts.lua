@@ -14,6 +14,38 @@ local THOUGHT = "这是一条合成想法"
 return function(H)
     local tr = H.tr
 
+    H.step("thought database creates missing parents and survives reopening", function()
+        H.call(function()
+            local ThoughtDB = require("weread.lib.thought_db")
+            local lfs = require("libs/libkoreader-lfs")
+            local root = H.env.evidence .. "/thought-db-parent"
+            local book_dir = root .. "/nested/book"
+            H.equal(lfs.attributes(root), nil, "thought database parent initially absent")
+            local db = ThoughtDB.open(book_dir)
+            H.check(db, "thought database opens with missing parents")
+            H.check(ThoughtDB.putReviews(db, 1, {
+                { range = "0-10", pageReviews = {
+                    { review = { abstract = QUOTE, content = THOUGHT, author = { name = "Synthetic reader" } } },
+                } },
+            }), "thoughts are saved in the new directory")
+            ThoughtDB.close(db)
+            db = ThoughtDB.open(book_dir)
+            H.check(db, "thought database reopens in an existing directory")
+            local items = ThoughtDB.getReviewItems(db, 1, "0-10")
+            ThoughtDB.close(db)
+            H.equal(#items, 1, "thought survives closing and reopening")
+            H.equal(items[1].content, THOUGHT, "reopened thought content")
+
+            local blocker = root .. "/file"
+            local file = assert(io.open(blocker, "w"))
+            file:write("synthetic directory collision")
+            file:close()
+            H.equal(ThoughtDB.open(blocker .. "/book"), nil, "file parent is rejected")
+            H.equal(ThoughtDB.open(blocker), nil, "file as book directory is rejected")
+            H.equal(lfs.attributes(blocker, "mode"), "file", "failed open preserves the existing file")
+        end)
+    end)
+
     local function tap_exact(label, timeout)
         return H.tap_exact(label, timeout)
     end
