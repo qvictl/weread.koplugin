@@ -91,6 +91,8 @@ eq(unavailable_failures, 1, "unavailable worker cleans up exactly once")
 -- Shared short requests execute only the task in the worker and deliver UI
 -- results/credential updates in the parent, including cancellation cleanup.
 local in_child, encoded, mode, merged = false, nil, "success", 0
+local account = { user_vid = "original" }
+host.settings = { get = function(_self, key) if key == "account" then return account end end }
 package.loaded["ffi/util"] = { runInSubProcess = function() end }
 package.loaded["json"] = {
     encode = function(value) encoded = value return "reply" end,
@@ -110,6 +112,7 @@ package.loaded["weread.lib.worker_settings"] = {
         eq(fingerprint, "original-auth", "auth fingerprint preserved")
         eq(auth.cookies, "renewed", "worker auth returned")
         if mode == "auth_error" then error("auth save failed") end
+        if mode == "ticket_rotated" then return false end
         merged = merged + 1
     end,
 }
@@ -122,12 +125,14 @@ package.loaded["ui/trapper"] = {
         in_child = true
         local value = task()
         in_child = false
+        if mode == "account_changed" then account.user_vid = "replacement" end
         return true, value
     end,
 }
-for _, current in ipairs({ "success", "task_error", "cancel", "fork_error", "invalid", "auth_error", "ui_error" }) do
-    mode = current
-    local results, failures, cancelled = 0, 0, false
+for _, current in ipairs({ "success", "task_error", "cancel", "fork_error", "invalid", "auth_error", "ui_error",
+    "ticket_rotated", "account_changed" }) do
+    mode, account.user_vid = current, "original"
+    local results, failures, cancelled, reason = 0, 0, false, nil
     host:_runNetworkRequest("Loading", "Load", function()
         eq(in_child, true, "network task runs in worker")
         if mode == "task_error" then error("HTTP 503") end
@@ -137,13 +142,15 @@ for _, current in ipairs({ "success", "task_error", "cancel", "fork_error", "inv
         eq(result.books, 3, "task result delivered")
         if mode == "ui_error" then error("UI update failed") end
         results = results + 1
-    end, function(_err, was_cancelled)
+    end, function(_err, was_cancelled, why)
         eq(in_child, false, "failure cleanup runs in parent")
-        failures, cancelled = failures + 1, was_cancelled
+        failures, cancelled, reason = failures + 1, was_cancelled, why
     end)
-    eq(results, current == "success" and 1 or 0, current .. " success delivery")
-    eq(failures, current == "success" and 0 or 1, current .. " failure cleanup exactly once")
-    eq(cancelled, current == "cancel", current .. " cancellation distinguished")
+    local succeeds = current == "success" or current == "ticket_rotated"
+    eq(results, succeeds and 1 or 0, current .. " success delivery")
+    eq(failures, succeeds and 0 or 1, current .. " failure cleanup exactly once")
+    eq(cancelled, current == "cancel" or current == "account_changed", current .. " cancellation distinguished")
+    eq(reason, current == "account_changed" and "account_changed" or nil, current .. " discard reason")
 end
 eq(merged, 3, "successful worker credentials merged before task/UI error delivery")
 

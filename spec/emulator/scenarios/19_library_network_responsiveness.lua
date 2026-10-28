@@ -95,4 +95,28 @@ return function(H)
         H.mock_control({ match = "", delay = 0, times = 0 })
         H.call(function() plugin:closeWeReadUI() end)
     end)
+    H.step("queued QR completion cannot write an old shelf into the new account", function()
+        H.mock_control({ match = "/shelf/sync", delay = 1.5, times = 0 })
+        H.call(function()
+            -- The mock QR protocol signs in as 900000. Empty that account's
+            -- shelf first, then start the delayed request as another account.
+            plugin.library_db:cacheShelf({}, {})
+            plugin.settings:set("account", { user_vid = "900099" })
+            plugin:refreshBookshelf()
+            UIManager:scheduleIn(0.35, function()
+                plugin.qr_login:_complete({ succeed = true, webLoginVid = "900000",
+                    accessToken = "mock-access-token", refreshToken = "mock-refresh-token" },
+                    plugin.qr_login.generation)
+            end)
+        end)
+        H.wait_until("real mock QR completion and old request finish", function()
+            return plugin.settings:get("account", {}).user_vid == "900000"
+                and not plugin.shelf_refreshing
+        end, 10)
+        local shelf = H.call(function() return plugin.library_db:getShelf() end)
+        H.equal(#shelf, 0, "old request must not populate the new account's shelf")
+        H.equal(plugin.shelf_view, nil, "old request must not reopen a shelf after account switch")
+        H.mock_control({ match = "", delay = 0, times = 0 })
+        H.close_dialogs()
+    end)
 end
