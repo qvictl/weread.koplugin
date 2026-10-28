@@ -15,13 +15,14 @@ early_access: false
 
 reviews:
   profile: assertive
-  # Request changes for blocking findings, approve once they are resolved and
-  # the latest commit is reviewed (the current name of the former
-  # `request_changes_workflow` setting).
+  # No approvals and no "Request changes" from CodeRabbit (the former
+  # `request_changes_workflow`): an app approval counts toward the required
+  # approval of `main` and would bypass the review gate, which must be the
+  # only approver (REVIEW_POLICY.md). CodeRabbit's findings block through
+  # their unresolved review threads; the gate counts its "Review completed"
+  # check as the AI review of the head commit.
   auto_approvals:
-    enabled: true
-    # Every agent opens PRs with the owner's account: PR authors must not be
-    # able to make CodeRabbit approve or resolve their own PR by command.
+    enabled: false
     allow_author_approval: false
   high_level_summary: true
   high_level_summary_in_walkthrough: true

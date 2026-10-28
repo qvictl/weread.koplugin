@@ -15,7 +15,7 @@
 
 | 审查者 | 角色 | 配置 |
 |---|---|---|
-| [CodeRabbit](https://github.com/apps/coderabbitai) | 主审查。每次推送都会增量审查；发现阻断性问题时 **Request changes**，问题解决且最新提交审查通过后自动 **Approve** | [`.coderabbit.yaml`](.coderabbit.yaml) |
+| [CodeRabbit](https://github.com/apps/coderabbitai) | 主审查。每次推送都会增量审查；意见以审查对话的形式给出（未解决即阻塞，第 3 项）。**不批准、不 Request changes**：应用的批准同样满足 `main` 的“需要 1 个批准”，会绕过网关，所以只有网关批准 | [`.coderabbit.yaml`](.coderabbit.yaml) |
 | [Gemini Code Assist](https://github.com/apps/gemini-code-assist) | 第二意见。PR 打开时审查；之后的推送需评论 `/gemini review` 才会重新审查 | [`.gemini/config.yaml`](.gemini/config.yaml)、[`.gemini/styleguide.md`](.gemini/styleguide.md) |
 | 维护者（admin / maintain） | 敏感改动、超大改动、首次贡献者、上游同步和所有发布的最终决定者 | `human-approved` 标签 |
 
@@ -30,8 +30,11 @@
   或在对话里写明理由**（为什么不是问题、为什么不在本 PR 修），之后才能把对话标为已解决。不能不回复就直接 Resolve。
 - 重构建议、可读性、风格类评论（“Nitpick”、“Refactor suggestion”、MEDIUM / LOW）：可以采纳，也可以简短说明后解决。
 - 如果 AI 明显误判，在对话里回复理由后 Resolve，再评论 `@coderabbitai review` 请它重新审查最新提交。
-  PR 作者不能用 `@coderabbitai approve` / `@coderabbitai resolve` 让 CodeRabbit 批准或关闭自己 PR 上的问题
-  （`.coderabbit.yaml` 中 `allow_author_approval: false`：本仓库的 agent 都以所有者账号提交 PR）。
+- CodeRabbit 的自动批准（原 `request_changes_workflow`）已关闭，`allow_author_approval: false`。因为 CodeRabbit 读取
+  PR 分支上的 `.coderabbit.yaml`，PR 仍可能把它打开：网关在条件不满足时会撤销任何机器人（CodeRabbit 等）的批准，
+  只保留人的批准。撤销是异步的（审查事件 → relay → 网关，通常一两分钟），这段时间里机器人的批准能满足分支保护：
+  这是已知的残余风险——只有网关会开启自动合并，所有者手动合并前应看一眼置顶评论。要彻底消除，可把 *Review gate*
+  改成条件不满足时失败并设为必需检查（代价是每个被阻塞的 PR 都显示一个失败的检查）。
 - 只要还有任何一个未解决的审查对话（AI 或人），网关就不会批准（第 3 项）。
 
 ## 自动批准与自动合并的条件

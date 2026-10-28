@@ -230,7 +230,7 @@ class Facts:
     pr: Dict[str, Any]
     owner_login: str
     default_branch: str
-    allow_auto_merge: bool
+    allow_auto_merge: Optional[bool]  # None: not visible to the token
     required_checks: List[Dict[str, Any]]
     required_checks_error: Optional[str]
     check_runs: List[Dict[str, Any]]
@@ -316,7 +316,7 @@ def collect(gh: GitHub, repo: str, number: int, repo_info: Optional[Dict[str, An
 
     facts = Facts(
         repo=repo, pr=pr, owner_login=repo_info["owner"]["login"],
-        default_branch=repo_info["default_branch"], allow_auto_merge=bool(repo_info.get("allow_auto_merge")),
+        default_branch=repo_info["default_branch"], allow_auto_merge=repo_info.get("allow_auto_merge"),
         required_checks=required, required_checks_error=required_error, check_runs=check_runs,
         statuses=statuses, reviews=reviews, threads=threads, files=files, ai_activity=ai_activity,
         auto_merge=auto_merge, pr_node_id=node_id, sticky=sticky)
@@ -488,7 +488,9 @@ def check_ai(facts: Facts) -> Condition:
         if not mine:
             continue
         seen.add(label)
-        if any(r.get("commit_id") == head and r.get("state") != "DISMISSED" for r in mine) and label not in reviewed_head:
+        # A dismissed review of the head still proves it was reviewed (the gate
+        # itself dismisses bot approvals while its conditions fail).
+        if any(r.get("commit_id") == head for r in mine) and label not in reviewed_head:
             reviewed_head.append(label)
         decisive = [r for r in mine if r.get("state") in ("APPROVED", "CHANGES_REQUESTED")]
         if decisive:
@@ -755,6 +757,14 @@ def apply(gh: GitHub, merge_gh: Optional[GitHub], facts: Facts, verdict: Verdict
             to_dismiss.append((review, "审查网关：这条批准不是网关做出的"))
     has_valid = any(r.get("commit_id") == head and APPROVAL_MARKER in (r.get("body") or "")
                     for r in approvals if r not in [d[0] for d in to_dismiss])
+    # Apps with write access (CodeRabbit) count toward the required approval
+    # too: while the gate's conditions do not hold, only humans may approve.
+    if not verdict.ok:
+        for review in facts.reviews:
+            login = (review.get("user") or {}).get("login", "")
+            if (review.get("state") == "APPROVED" and login != GATE_LOGIN
+                    and (login in AI_REVIEWERS or (review.get("user") or {}).get("type") == "Bot")):
+                to_dismiss.append((review, "审查网关：条件未满足时，机器人（%s）的批准不能代替网关的批准" % login))
 
     def run(desc: str, fn: Callable[[], Any]) -> bool:
         if dry_run:
@@ -794,13 +804,14 @@ def apply(gh: GitHub, merge_gh: Optional[GitHub], facts: Facts, verdict: Verdict
             verdict.notes.append("自动合并已由 @%s 开启（%s）" % (
                 (facts.auto_merge.get("enabledBy") or {}).get("login", "?"),
                 str(facts.auto_merge.get("mergeMethod", "?")).lower()))
-    elif not facts.allow_auto_merge:
+    elif merge_gh is None and not defer_automerge:
+        verdict.notes.append("自动合并未启用（需要 `REVIEW_GATE_MERGE_TOKEN`，见 REVIEW_POLICY.md 启用步骤）：已批准，需手动合并")
+    elif facts.allow_auto_merge is False:
+        # Only known with a token that can see repository settings; otherwise
+        # the enable call below reports it.
         verdict.notes.append("仓库未开启 *Allow auto-merge*：已批准，需手动合并（启用步骤见 REVIEW_POLICY.md）")
-    elif merge_gh is None:
-        if defer_automerge:
-            verdict.defer_automerge = True
-        else:
-            verdict.notes.append("自动合并未启用（需要 `REVIEW_GATE_MERGE_TOKEN`，见 REVIEW_POLICY.md 启用步骤）：已批准，需手动合并")
+    elif merge_gh is None:  # defer_automerge: the automerge job holds the token
+        verdict.defer_automerge = True
     elif facts.pr_node_id and dry_run:
         actions.append("（演练）开启自动合并（%s）" % verdict.merge_method.lower())
     elif facts.pr_node_id:
