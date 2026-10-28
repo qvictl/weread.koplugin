@@ -150,6 +150,72 @@ function M:runOnlineTask(label, callback, delay, options)
     return true
 end
 
+-- Short user-triggered requests (book search, chapter catalog) run in a
+-- dismissable subprocess, like chapter downloads: blocking HTTP on the UI
+-- thread freezes taps and repaints for the whole request. on_success runs in
+-- the parent with the task's result; failures are reported with error_label.
+-- Refuse to run network tasks when the runtime cannot provide a worker.
+function M:_runNetworkRequest(busy_text, error_label, task, on_success, on_failure)
+    local function account_id()
+        local settings = self.settings
+        local account = settings and settings.get and settings:get("account", {})
+        return type(account) == "table" and tostring(account.user_vid or "") or ""
+    end
+    local original_account = account_id()
+    local function report(err)
+        if on_failure then return on_failure(err, false) end
+        logger.warn("annotation request failed:", tostring(error_label), tostring(err))
+        self:showInfo(T(_("%1 failed:\n%2"), error_label, display_error(err)))
+    end
+    local function deliver(value)
+        local ok, err = xpcall(on_success, debug.traceback, value)
+        if not ok then report(err) end
+    end
+    local ok_ffi, ffiutil = pcall(require, "ffi/util")
+    local ok_trapper, Trapper = pcall(require, "ui/trapper")
+    if not (ok_ffi and type(ffiutil) == "table" and type(ffiutil.runInSubProcess) == "function"
+        and ok_trapper and type(Trapper) == "table" and type(Trapper.wrap) == "function"
+        and type(Trapper.dismissableRunInSubprocess) == "function") then
+        return report(_("Network subprocess is unavailable."))
+    end
+    local ok_json, Json = pcall(require, "json")
+    if not ok_json then Json = require("rapidjson") end
+    local WorkerSettings = require("weread.lib.worker_settings")
+    Trapper:wrap(function()
+        local fingerprint = WorkerSettings.fingerprint(self.settings)
+        local completed, encoded, failure_reason = Trapper:dismissableRunInSubprocess(function()
+            local auth_result = WorkerSettings.capture(self.settings)
+            local ok, value = xpcall(task, debug.traceback)
+            return Json.encode({ ok = ok, value = value, auth = auth_result() })
+        end, busy_text, true)
+        -- A queued QR completion can switch accounts while the UI loop keeps
+        -- running. Cookie/ticket renewal within the same account is harmless.
+        if account_id() ~= original_account then
+            if on_failure then on_failure(nil, true, "account_changed") end
+            return
+        end
+        if not completed then
+            -- Dismissed by the user (the child was killed), or fork failed.
+            if encoded ~= nil then report(encoded)
+            elseif failure_reason == "start_failed" then report(_("Could not start network subprocess."))
+            elseif failure_reason == "read_failed" then report(_("Could not read network subprocess result."))
+            elseif failure_reason then report(tostring(failure_reason))
+            elseif on_failure then on_failure(nil, true) end
+            return
+        end
+        local decoded, result = pcall(Json.decode, encoded or "")
+        if not decoded or type(result) ~= "table" then
+            return report("no result from the request subprocess")
+        end
+        if result.auth then
+            local merged, merge_err = pcall(WorkerSettings.merge, self.settings, fingerprint, result.auth)
+            if not merged then return report(merge_err) end
+        end
+        if not result.ok then return report(result.value) end
+        deliver(result.value)
+    end)
+end
+
 function M:runNetworkAction(label, action)
     self:runOnlineTask(label, function()
         local ok, result = pcall(action)

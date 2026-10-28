@@ -7,6 +7,10 @@
 package.path = "./?.lua;" .. package.path
 local helper = require("spec.helpers.annotation_test_store")
 
+for _, name in ipairs({ "ui/bidi", "ui/widget/infomessage", "ui/widget/menu", "ui/widget/confirmbox" }) do
+    package.preload[name] = function() return {} end
+end
+
 local checks = 0
 local function expect(value, message)
     checks = checks + 1
@@ -49,6 +53,7 @@ package.preload["weread.lib.plugin_util"] = function()
             end))
         end,
         reader_open_perf = function() return 0 end,
+        display_error = function(err) return tostring(err):match("^[^\r\n]+") or tostring(err) end,
     }
 end
 

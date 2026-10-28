@@ -51,6 +51,7 @@ end
 package.preload["weread.lib.plugin_util"] = function()
     return {
         reader_open_perf = function() return 0 end,
+        display_error = tostring,
         tr = function(s) return s end,
         T = function(s, ...)
             local v = { ... }
@@ -104,6 +105,9 @@ package.preload["weread.lib.annotation_store"] = function()
     end }
 end
 
+for _, name in ipairs({ "ui/bidi", "ui/widget/infomessage", "ui/widget/menu" }) do
+    package.preload[name] = function() return {} end
+end
 local Controller = require("weread.ui.annotation_sync_controller")
 
 -- Minimal in-memory store with the methods the controller touches.
@@ -415,19 +419,14 @@ do
         "a stale worker completion cleared the current request")
 end
 
--- Request runner without fork support runs inline and reports errors.
+-- Missing worker support reports a failure without touching the network.
 do
     package.loaded["ffi/util"], package.loaded["ui/trapper"] = nil, nil
     local host = new_host()
-    local got
-    host:_runAnnotationRequest("busy", "Load", function() return 7 end, function(value) got = value end)
-    expect(got == 7, "the inline request did not deliver its result")
-    host:_runAnnotationRequest("busy", "Load", function() error("HTTP 503", 0) end, function() got = "x" end)
-    expect(got == 7 and host.notices[1]:find("Load failed", 1, true) and host.notices[1]:find("HTTP 503", 1, true),
-        "an inline request error was not reported")
-    host:_runAnnotationRequest("busy", "Load", function() return 1 end, function() error("callback broke") end)
-    expect(#host.notices == 2 and host.notices[2]:find("callback broke", 1, true),
-        "a failing success callback was not reported")
+    local ran = false
+    host:_runAnnotationRequest("busy", "Load", function() ran = true end, function() ran = true end)
+    expect(not ran and host.notices[1]:find("Network subprocess is unavailable", 1, true),
+        "unavailable subprocess executed a network task inline or hid the failure")
 end
 
 -- Request runner with a subprocess: dismissal, garbage and worker errors.

@@ -202,6 +202,8 @@ for _, module in ipairs({ Library, Common }) do
         if host[key] == nil then host[key] = value end
     end
 end
+host._runNetworkRequest = require("spec.helpers.immediate_network_request")
+
 local real = {}
 for _, name in ipairs({ "showBookMenu", "showMPAccount", "refreshBookRecord", "openBookForReading" }) do
     real[name] = host[name]
@@ -272,10 +274,10 @@ expect(has(last_message(), "Book info failed") and has(last_message(), "No netwo
 host:refreshBookRecord(book)
 expect(#captured == 2, "manual offline refresh re-opened the page")
 net.connected = true
-net.online = false
+net.online, net.connected = false, false
 host:refreshBookRecord(book, nil, { automatic = true })
-expect(#captured == 3 and #scheduled == 0, "refresh without internet did not fall back to the page")
-net.online = true
+expect(#captured == 3 and #scheduled == 0, "disconnected refresh did not fall back to the page")
+net.online, net.connected = true, true
 
 function client.get_book_info(_self, id)
     record_call("info", id)
@@ -312,6 +314,24 @@ book.title = "Stale"
 host:refreshBookRecord(book, left_page)
 drain()
 expect(#captured == 6 and book.title == "Fresh", "refresh re-opened a page the user had left")
+local original_info, cancel_notices = host.showInfo, 0
+host.showInfo = function() cancel_notices = cancel_notices + 1 end
+host.cancel_network_request = true
+host:refreshBookRecord(book, old_page)
+drain()
+expect(#captured == 6 and cancel_notices == 0 and host.busy_message == nil,
+    "manual refresh cancellation opened a new view, reported an error or kept busy state")
+host:refreshBookRecord(book, nil, { automatic = true })
+drain()
+expect(#captured == 7 and captured[7][2] == book and cancel_notices == 0 and host.busy_message == nil,
+    "automatic refresh cancellation did not show the cached book without an error")
+host.network_cancel_reason = "account_changed"
+host:refreshBookRecord(book, nil, { automatic = true })
+drain()
+expect(#captured == 7 and cancel_notices == 0 and host.busy_message == nil,
+    "discarded account response reopened the previous account's cached book")
+host.network_cancel_reason = nil
+host.cancel_network_request, host.showInfo = false, original_info
 restore()
 
 -- 3. The detail page: legacy catalog import, status and metadata rows,

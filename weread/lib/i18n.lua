@@ -1,6 +1,9 @@
 local I18n = {}
 
 local zh = {
+    ["Network subprocess is unavailable."] = "当前环境无法启动网络子进程。",
+    ["Could not start network subprocess."] = "无法启动网络子进程。",
+    ["Could not read network subprocess result."] = "无法读取网络子进程的结果。",
     ["Get thoughts (%1 chapters)"] = "获取想法（%1章）",
     ["Continue matching · %1/%2 chapters, %3 underlines"] = "继续匹配 · %1/%2 章，%3 条划线",
     ["Underlines and thoughts management"] = "划线和想法管理",

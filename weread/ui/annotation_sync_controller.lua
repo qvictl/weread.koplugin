@@ -655,56 +655,10 @@ function M:_runAnnotationJob(context, options)
     UIManager:scheduleIn(0.1, safe_step)
 end
 
-local function display_error(err)
-    if PluginUtil.display_error then return PluginUtil.display_error(err) end
-    return tostring(err):match("^[^\r\n]+") or tostring(err)
-end
-
--- Short user-triggered requests (book search, chapter catalog) run in a
--- dismissable subprocess, like chapter downloads: blocking HTTP on the UI
--- thread freezes taps and repaints for the whole request. on_success runs in
--- the parent with the task's result; failures are reported with error_label.
--- Falls back to an in-process call where KOReader cannot fork.
-function M:_runAnnotationRequest(busy_text, error_label, task, on_success)
-    local function report(err)
-        logger.warn("annotation request failed:", tostring(error_label), tostring(err))
-        self:showInfo(T(_("%1 failed:\n%2"), error_label, display_error(err)))
-    end
-    local function deliver(value)
-        local ok, err = xpcall(on_success, debug.traceback, value)
-        if not ok then report(err) end
-    end
-    local ok_ffi, ffiutil = pcall(require, "ffi/util")
-    local ok_trapper, Trapper = pcall(require, "ui/trapper")
-    if not (ok_ffi and type(ffiutil) == "table" and type(ffiutil.runInSubProcess) == "function"
-        and ok_trapper and Trapper) then
-        local ok, value = xpcall(task, debug.traceback)
-        if not ok then return report(value) end
-        return deliver(value)
-    end
-    local ok_json, Json = pcall(require, "json")
-    if not ok_json then Json = require("rapidjson") end
-    local WorkerSettings = require("weread.lib.worker_settings")
-    Trapper:wrap(function()
-        local fingerprint = WorkerSettings.fingerprint(self.settings)
-        local completed, encoded = Trapper:dismissableRunInSubprocess(function()
-            local auth_result = WorkerSettings.capture(self.settings)
-            local ok, value = xpcall(task, debug.traceback)
-            return Json.encode({ ok = ok, value = value, auth = auth_result() })
-        end, busy_text, true)
-        if not completed then
-            -- Dismissed by the user (the child was killed), or fork failed.
-            if encoded ~= nil then report(encoded) end
-            return
-        end
-        local decoded, result = pcall(Json.decode, encoded or "")
-        if not decoded or type(result) ~= "table" then
-            return report("no result from the request subprocess")
-        end
-        if result.auth then WorkerSettings.merge(self.settings, fingerprint, result.auth) end
-        if not result.ok then return report(result.value) end
-        deliver(result.value)
-    end)
+-- Retain the annotation entry point while sharing the request boundary with
+-- ordinary library actions. UI callbacks always run in the parent.
+function M:_runAnnotationRequest(...)
+    return require("weread.ui.common")._runNetworkRequest(self, ...)
 end
 
 -- Prepare the annotation context; when the chapter catalog must be fetched,

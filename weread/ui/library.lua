@@ -204,46 +204,47 @@ function M:refreshBookshelf(old_view, view_options)
     end
     self:showBusy(_("Loading bookshelf..."))
     local started = self:runOnlineTask(_("Bookshelf"), function()
-        local ok, result = pcall(function()
+        self:_runNetworkRequest(_("Loading bookshelf..."), _("Bookshelf"), function()
             return self.client:get_shelf()
-        end)
-        done()
-        if not ok then
-            logger.err("load bookshelf failed:", log_error(result))
+        end, function(result)
+            done()
+            local all_books = type(result) == "table"
+                and type(result.books) == "table"
+                and result.books
+                or {}
+            local archives = type(result) == "table" and type(result.archive) == "table" and result.archive or {}
+            if self.library_db then self.library_db:cacheShelf(all_books, archives) end
+            if old_view and not UIManager:isWidgetShown(old_view) then
+                -- The user left the shelf while it refreshed: keep the new
+                -- snapshot for the next visit instead of re-opening the shelf.
+                self:applyShelfSnapshot(all_books, archives)
+                return
+            end
+            local old_group_key = self.shelf_group_key
+            self:applyShelfSnapshot(all_books, archives)
+            local next_options = {}
+            for key, value in pairs(view_options or {}) do next_options[key] = value end
+            next_options.prepared_shelf = nil
+            if old_group_key ~= self.shelf_group_key then
+                next_options.page, next_options.scroll_offset = 1, nil
+            end
+            if old_view then UIManager:close(old_view) end
+            self:showShelfView(
+                view_options and view_options.mode or self.shelf_view_mode or "books",
+                view_options and view_options.keyword or nil,
+                nil,
+                next_options
+            )
+        end, function(err, cancelled)
+            done()
+            if cancelled then return end
+            logger.err("load bookshelf failed:", log_error(err))
             self:showInfo(T(
                 _("Load bookshelf failed:\n%1\n\nIf other account features still work, use Search to find and download books."),
-                display_error(result)
+                display_error(err)
             ))
-            return
-        end
-        local all_books = type(result) == "table"
-            and type(result.books) == "table"
-            and result.books
-            or {}
-        local archives = type(result) == "table" and type(result.archive) == "table" and result.archive or {}
-        if self.library_db then self.library_db:cacheShelf(all_books, archives) end
-        if old_view and not UIManager:isWidgetShown(old_view) then
-            -- The user left the shelf while it refreshed: keep the new
-            -- snapshot for the next visit instead of re-opening the shelf.
-            self:applyShelfSnapshot(all_books, archives)
-            return
-        end
-        local old_group_key = self.shelf_group_key
-        self:applyShelfSnapshot(all_books, archives)
-        local next_options = {}
-        for key, value in pairs(view_options or {}) do next_options[key] = value end
-        next_options.prepared_shelf = nil
-        if old_group_key ~= self.shelf_group_key then
-            next_options.page, next_options.scroll_offset = 1, nil
-        end
-        if old_view then UIManager:close(old_view) end
-        self:showShelfView(
-            view_options and view_options.mode or self.shelf_view_mode or "books",
-            view_options and view_options.keyword or nil,
-            nil,
-            next_options
-        )
-    end)
+        end)
+    end, 0.1, { link_only = true })
     if started == false then done() end
 end
 
@@ -721,52 +722,65 @@ function M:refreshBookRecord(book, old_view, options)
         return
     end
     self:showBusy(_("Loading book info..."))
-    local started = self:runOnlineTask(_("Book info"), function()
-        local ok, err = pcall(function()
-            local info = self.client:get_book_info(book_id)
-            if info then
-                for key, value in pairs(info) do
-                    if value ~= nil then book[key] = value end
-                end
-                book.categoryName = info.categoryName or info.category or book.categoryName
-            end
-            local progress_result = self.client:get_progress(book_id)
-            if progress_result and progress_result.book then
-                local remote = progress_result.book
-                book.progress = remote.progress or book.progress or 0
-                book.chapter_uid = remote.chapterUid or remote.chapterId
-                    or remote.chapter_uid or book.chapter_uid
-                book.chapter_idx = tonumber(remote.chapterIdx or remote.chapterIndex
-                    or remote.chapter_idx) or tonumber(book.chapter_idx)
-                book.chapter_offset = tonumber(remote.chapterOffset or remote.chapterPos
-                    or remote.offset) or tonumber(book.chapter_offset) or 0
-                -- This is the cloud's position, not one this device reported.
-                book.reported_local = false
-            end
-            book.book_id = book_id
-            book._library_account_key = self.library_db
-                and self.library_db:accountKey() or nil
-            book.detail_updated_at = os.time()
-            BookRecords.put(self.settings, book_id, book)
-            self.settings:flush()
-            if self.library_db then self.library_db:putBook(book) end
-        end)
+    local function failed(err, cancelled, reason)
         self:closeBusy()
-        if not ok then
-            logger.err("load book info failed:", log_error(err))
-            if options.automatic then self:showBookMenu(book) end
-            self:showInfo(T(_("%1 failed:\n%2"), _("Book info"), display_error(err)))
+        if cancelled then
+            if options.automatic and reason ~= "account_changed" then self:showBookMenu(book) end
             return
         end
-        if old_view then
-            -- The user left the page while it refreshed: keep the data,
-            -- do not bring the page back over whatever is shown now.
-            if not UIManager:isWidgetShown(old_view) then return end
-            UIManager:close(old_view)
-        end
-        self:showBookMenu(book)
-        self:showTransientInfo(_("Book information updated."), 2)
-    end)
+        logger.err("load book info failed:", log_error(err))
+        if options.automatic then self:showBookMenu(book) end
+        self:showInfo(T(_("%1 failed:\n%2"), _("Book info"), display_error(err)))
+    end
+    local started = self:runOnlineTask(_("Book info"), function()
+        self:_runNetworkRequest(_("Loading book info..."), _("Book info"), function()
+            return { info = self.client:get_book_info(book_id),
+                progress = self.client:get_progress(book_id) }
+        end, function(result)
+            local ok, err = pcall(function()
+                local info = result.info
+                if info then
+                    for key, value in pairs(info) do
+                        if value ~= nil then book[key] = value end
+                    end
+                    book.categoryName = info.categoryName or info.category or book.categoryName
+                end
+                local progress_result = result.progress
+                if progress_result and progress_result.book then
+                    local remote = progress_result.book
+                    book.progress = remote.progress or book.progress or 0
+                    book.chapter_uid = remote.chapterUid or remote.chapterId
+                        or remote.chapter_uid or book.chapter_uid
+                    book.chapter_idx = tonumber(remote.chapterIdx or remote.chapterIndex
+                        or remote.chapter_idx) or tonumber(book.chapter_idx)
+                    book.chapter_offset = tonumber(remote.chapterOffset or remote.chapterPos
+                        or remote.offset) or tonumber(book.chapter_offset) or 0
+                    -- This is the cloud's position, not one this device reported.
+                    book.reported_local = false
+                end
+                book.book_id = book_id
+                book._library_account_key = self.library_db
+                    and self.library_db:accountKey() or nil
+                book.detail_updated_at = os.time()
+                BookRecords.put(self.settings, book_id, book)
+                self.settings:flush()
+                if self.library_db then self.library_db:putBook(book) end
+            end)
+            self:closeBusy()
+            if not ok then
+                failed(err)
+                return
+            end
+            if old_view then
+                -- The user left the page while it refreshed: keep the data,
+                -- do not bring the page back over whatever is shown now.
+                if not UIManager:isWidgetShown(old_view) then return end
+                UIManager:close(old_view)
+            end
+            self:showBookMenu(book)
+            self:showTransientInfo(_("Book information updated."), 2)
+        end, failed)
+    end, 0.1, { link_only = true })
     if started == false and options.automatic then self:showBookMenu(book) end
 end
 
@@ -1698,33 +1712,33 @@ function M:searchWithUI(keyword)
         return
     end
     self:runOnlineTask(_("Search"), function()
-        local ok, result = pcall(function()
+        self:_runNetworkRequest(_("Search"), _("Search"), function()
             return self.client:gateway("/store/search", {
                 keyword = keyword,
                 count = 10,
             })
-        end)
-        if not ok then
-            logger.err("search failed:", log_error(result))
-            self:showInfo(T(_("Search failed:\n%1"), display_error(result)))
-            return
-        end
-        local items = {}
-        for group_index, group in ipairs(result.results or {}) do
-            for book_index, entry in ipairs(group.books or {}) do
-                local book = entry.bookInfo or entry
-                table.insert(items, {
-                    text = book.title or book.bookId or _("Untitled"),
-                    post_text = book.author or "",
-                    mandatory = book.category or "",
-                    callback = self:safeCallback(book.title or book.bookId or _("Untitled"), function()
-                        self:showBookRecord(book)
-                    end),
-                })
+        end, function(result)
+            local items = {}
+            for group_index, group in ipairs(result.results or {}) do
+                for book_index, entry in ipairs(group.books or {}) do
+                    local book = entry.bookInfo or entry
+                    table.insert(items, {
+                        text = book.title or book.bookId or _("Untitled"),
+                        post_text = book.author or "",
+                        mandatory = book.category or "",
+                        callback = self:safeCallback(book.title or book.bookId or _("Untitled"), function()
+                            self:showBookRecord(book)
+                        end),
+                    })
+                end
             end
-        end
-        self:showTrackedList(T(_("Search: %1"), keyword), items, _("No search results."))
-    end)
+            self:showTrackedList(T(_("Search: %1"), keyword), items, _("No search results."))
+        end, function(err, cancelled)
+            if cancelled then return end
+            logger.err("search failed:", log_error(err))
+            self:showInfo(T(_("Search failed:\n%1"), display_error(err)))
+        end)
+    end, 0.1, { link_only = true })
 end
 
 function M:showPasteReaderURL()

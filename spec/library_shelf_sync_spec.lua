@@ -190,6 +190,8 @@ for _, module in ipairs({ Library, Common }) do
         if host[key] == nil then host[key] = value end
     end
 end
+host._runNetworkRequest = require("spec.helpers.immediate_network_request")
+
 
 -- 1. First open without a cached shelf and without a login: no request,
 -- no lock left behind, the QR login is offered.
@@ -205,7 +207,7 @@ expect(qr_starts == 1, "logged-out shelf open did not start the QR login")
 -- 2. Logged in but offline: the online check fails, the busy message is
 -- closed, nothing is deferred and the lock is released at once.
 login.api = true
-net.online = false
+net.online, net.connected = false, false
 host:showBookshelf()
 local busy = last_of("info")
 expect(#scheduled == 0, "offline shelf open queued deferred work")
@@ -222,7 +224,7 @@ expect(busy_closed, "offline shelf open never closed its busy message")
 
 -- 3. Back online: the request runs deferred, off the caller's stack, and
 -- the result is cached, split into books/public accounts and shown.
-net.online = true
+net.online, net.connected = true, true
 host:showBookshelf()
 expect(host.shelf_refreshing == true and host.busy_message ~= nil and client.shelf_calls == 0,
     "online shelf open ran the request synchronously")
@@ -290,12 +292,12 @@ expect(host.shelf_refreshing == nil and host.busy_message == nil, "failed sync s
 
 -- Offline refresh from the open shelf: the refreshing state is cleared.
 client.shelf_error = nil
-net.online = false
+net.online, net.connected = false, false
 view.callbacks.on_refresh()
 expect(view.refreshing == false and host.shelf_refreshing == nil and #scheduled == 0,
     "offline refresh kept the shelf in the refreshing state")
 expect(has(last_message(), "No network connection"), "offline refresh was silent")
-net.online = true
+net.online, net.connected = true, true
 view.callbacks.on_refresh()
 drain()
 expect(client.shelf_calls == 4 and last_view() ~= view, "refresh after a failure did not recover")
@@ -433,11 +435,11 @@ expect(closed[dialog] and #scheduled == 0, "cancelled store search ran a request
 host:searchWithUI("")
 host:searchWithUI(nil)
 expect(#scheduled == 0 and #client.requests == 0, "empty store search ran a request")
-net.online = false
+net.online, net.connected = false, false
 host:searchWithUI("three body")
 expect(#scheduled == 0 and #client.requests == 0 and has(last_message(), "Search failed"),
     "offline store search did not fail fast")
-net.online = true
+net.online, net.connected = true, true
 search_results = { results = {
     { books = {
         { bookInfo = { bookId = "b1", title = "Three Body", author = "Liu", category = "SF" } },
@@ -532,5 +534,17 @@ host.showBookRecord = function(_self, book) opened_book = book end
 host:showCurrentBookDetails()
 expect(opened_book == records["7"] and opened_book.book_id == "7",
     "current book details did not open the stored record")
+
+local original_list, original_info = host.showTrackedList, host.showInfo
+local cancel_lists, cancel_notices = 0, 0
+host.showTrackedList = function() cancel_lists = cancel_lists + 1 end
+host.showInfo = function() cancel_notices = cancel_notices + 1 end
+host.cancel_network_request = true
+host:searchWithUI("cancelled")
+drain()
+expect(cancel_lists == 0 and cancel_notices == 0 and host.busy_message == nil,
+    "cancelled search opened a result/error view or kept busy state")
+host.cancel_network_request = false
+host.showTrackedList, host.showInfo = original_list, original_info
 
 print(("library_shelf_sync_spec: %d checks"):format(checks))

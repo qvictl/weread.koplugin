@@ -76,4 +76,91 @@ eq(host:runOnlineTask("lifecycle", function() end, nil, {
 }), false, "link-only task skips quietly when the link is down")
 eq(dns_lookups, 0, "still no DNS lookup")
 
+-- Unsupported runtimes fail through cleanup without executing the task.
+local ran_without_worker, unavailable_failures = false, 0
+host:_runNetworkRequest("Loading", "Load", function() ran_without_worker = true end,
+    function() error("unsupported worker delivered a result") end,
+    function(err, cancelled)
+        unavailable_failures = unavailable_failures + 1
+        eq(cancelled, false, "unavailable worker is a failure, not a dismissal")
+        eq(err, "Network subprocess is unavailable.", "unavailable worker explained")
+    end)
+eq(ran_without_worker, false, "unavailable worker never executes network on UI")
+eq(unavailable_failures, 1, "unavailable worker cleans up exactly once")
+
+-- Shared short requests execute only the task in the worker and deliver UI
+-- results/credential updates in the parent, including cancellation cleanup.
+local in_child, encoded, mode, merged = false, nil, "success", 0
+local account = { user_vid = "original" }
+host.settings = { get = function(_self, key) if key == "account" then return account end end }
+package.loaded["ffi/util"] = { runInSubProcess = function() end }
+package.loaded["json"] = {
+    encode = function(value) encoded = value return "reply" end,
+    decode = function(value)
+        if value ~= "reply" then error("invalid JSON") end
+        return encoded
+    end,
+}
+package.loaded["weread.lib.worker_settings"] = {
+    fingerprint = function() return "original-auth" end,
+    capture = function()
+        eq(in_child, true, "auth captured in worker")
+        return function() return { cookies = "renewed" } end
+    end,
+    merge = function(_settings, fingerprint, auth)
+        eq(in_child, false, "auth merged in parent")
+        eq(fingerprint, "original-auth", "auth fingerprint preserved")
+        eq(auth.cookies, "renewed", "worker auth returned")
+        if mode == "auth_error" then error("auth save failed") end
+        if mode == "ticket_rotated" then return false end
+        merged = merged + 1
+    end,
+}
+package.loaded["ui/trapper"] = {
+    wrap = function(_self, task) task() end,
+    dismissableRunInSubprocess = function(_self, task)
+        if mode == "cancel" then return false end
+        if mode == "fork_error" then return false, "fork failed" end
+        if mode == "start_failed" or mode == "read_failed" then return false, nil, mode end
+        if mode == "unknown_failure" then return false, nil, "worker_failed" end
+        if mode == "invalid" then return true, "garbage" end
+        in_child = true
+        local value = task()
+        in_child = false
+        if mode == "account_changed" then account.user_vid = "replacement" end
+        return true, value
+    end,
+}
+for _, current in ipairs({ "success", "task_error", "cancel", "fork_error", "invalid", "auth_error", "ui_error",
+    "ticket_rotated", "account_changed", "start_failed", "read_failed", "unknown_failure" }) do
+    mode, account.user_vid = current, "original"
+    local results, failures, cancelled, reason, failure_message = 0, 0, false, nil, nil
+    host:_runNetworkRequest("Loading", "Load", function()
+        eq(in_child, true, "network task runs in worker")
+        if mode == "task_error" then error("HTTP 503") end
+        return { books = 3 }
+    end, function(result)
+        eq(in_child, false, "UI callback runs in parent")
+        eq(result.books, 3, "task result delivered")
+        if mode == "ui_error" then error("UI update failed") end
+        results = results + 1
+    end, function(err, was_cancelled, why)
+        eq(in_child, false, "failure cleanup runs in parent")
+        failures, cancelled, reason, failure_message = failures + 1, was_cancelled, why, err
+    end)
+    local succeeds = current == "success" or current == "ticket_rotated"
+    eq(results, succeeds and 1 or 0, current .. " success delivery")
+    eq(failures, succeeds and 0 or 1, current .. " failure cleanup exactly once")
+    eq(cancelled, current == "cancel" or current == "account_changed", current .. " cancellation distinguished")
+    eq(reason, current == "account_changed" and "account_changed" or nil, current .. " discard reason")
+    if current == "start_failed" then
+        eq(failure_message, "Could not start network subprocess.", "explicit launch failure is reported")
+    elseif current == "read_failed" then
+        eq(failure_message, "Could not read network subprocess result.", "explicit result I/O failure is reported")
+    elseif current == "unknown_failure" then
+        eq(failure_message, "worker_failed", "unrecognized explicit reason is not mistaken for cancellation")
+    end
+end
+eq(merged, 3, "successful worker credentials merged before task/UI error delivery")
+
 print(string.format("common_network_spec: %d checks", checks))
