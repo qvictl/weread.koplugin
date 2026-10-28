@@ -983,6 +983,19 @@ do
         "worker errors do not expose traceback implementation details in the UI")
 end
 
+do
+    reset_ui()
+    local l = new_login()
+    l.started_at = os.time()
+    l.login_cookies = { wr_fp = "synthetic" }
+    l.qr_dialog = { kind = "qr" }
+    function l.host:runOnlineTask() return false end
+    l:_poll("U", l.generation)
+    expect(l.generation == 1 and l.started_at == nil and l.qr_dialog == nil and l.login_cookies == nil,
+        "offline worker startup ends the fallback session instead of leaving a dead QR dialog")
+    expect(#l.client.requests == 0, "offline fallback sends no HTTP")
+end
+
 -- Exercise the real common network boundary, with the production mock-endpoint
 -- shortcut absent: link checks must never enter the synchronous DNS probe.
 do

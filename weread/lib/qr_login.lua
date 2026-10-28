@@ -371,7 +371,7 @@ function QRLogin:_run_protocol_request(busy_text, generation, task, on_success, 
         end
         return true
     end
-    self.host:runOnlineTask(_("QR login"), function()
+    local scheduled = self.host:runOnlineTask(_("QR login"), function()
         if not valid() then return end
         local worker = setmetatable({
             client = self.client,
@@ -390,6 +390,7 @@ function QRLogin:_run_protocol_request(busy_text, generation, task, on_success, 
             on_failure(err)
         end)
     end, 0.1, { link_only = true })
+    if scheduled == false and generation == self.generation then self:cancel() end
 end
 
 function QRLogin:_close_qr_dialog(programmatic)
