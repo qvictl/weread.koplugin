@@ -134,4 +134,80 @@ return function(H)
         H.mock_control({ match = "", delay = 0, times = 0 })
     end)
 
+    for _, kind in ipairs({ "prefetch", "mp_article" }) do
+        H.step("downloader " .. kind .. " replacement retains the accepting account", function()
+            H.close_dialogs()
+            state = {}
+            local dl, held_job, first_job = plugin.downloader
+            local mp_book = { book_id = "MP_WXS_900000", title = "Synthetic account queue" }
+            local target = kind == "mp_article" and mp_book or book
+            local target_chapter = kind == "mp_article"
+                and { reviewId = "mock-mp-article", bookId = mp_book.book_id, title = "Synthetic article" }
+                or chapters[5]
+            local mp_before = H.mock_state().started_counts["/web/mp/content"] or 0
+            local original_finish, raw_finish = dl._finishJob, rawget(dl, "_finishJob")
+            local before = H.mock_state().started_counts["/web/book/chapter/e_0"] or 0
+            local ok, err = xpcall(function()
+                with_response_gate(function()
+                    H.call(function()
+                        plugin.settings:delete_book("900001")
+                        plugin.settings:delete_book(mp_book.book_id)
+                        plugin.settings:set("account", { user_vid = "900099" })
+                        dl:start(book, {chapters[4]}, "chapter", {
+                            prefetch = true, single_chapter = true, include_annotations = false,
+                            silent_completion = true, offer_read = false,
+                        })
+                        first_job = dl._active_job
+                        -- Hold only the actual cancellation's parent finish checkpoint
+                        -- so the queued QR login deterministically commits first.
+                        dl._finishJob = function(self, job)
+                            if job == first_job then held_job = job; return end
+                            return original_finish(self, job)
+                        end
+                    end)
+                    H.wait_until("first replacement target reached HTTP", function()
+                        return (H.mock_state().started_counts["/web/book/chapter/e_0"] or 0) > before
+                    end, 5)
+                    H.call(function()
+                        dl:start(target, {target_chapter}, "chapter", {
+                            prefetch = kind == "prefetch", mp_article = kind == "mp_article",
+                            single_chapter = true, include_annotations = false,
+                            silent_completion = true, offer_read = false,
+                            on_complete = function(done, value) state.done, state.ok, state.value = true, done, value end,
+                        })
+                    end)
+                    H.wait_until("cancelled worker reaches finish with replacement pending", function()
+                        return held_job and dl._pending_start and not dl.background_worker.job
+                    end, 10)
+                    H.call(function()
+                        plugin.qr_login:_complete({ succeed = true, webLoginVid = "900000",
+                            accessToken = "mock-access-token", refreshToken = "mock-refresh-token" },
+                            plugin.qr_login.generation)
+                    end)
+                    H.wait_until("QR login commits before replacement restart", function()
+                        return plugin.settings:get("account", {}).user_vid == "900000"
+                    end, 10)
+                end)
+            end, debug.traceback)
+            H.call(function()
+                dl._finishJob = raw_finish
+                if held_job and dl._active_job == held_job then original_finish(dl, held_job) end
+            end)
+            if not ok then error(err, 0) end
+            H.wait_until("replacement completes without starting another worker", function() return state.done end, 10)
+            H.check(not state.ok and state.value == "account_changed", "replacement reports account change")
+            H.equal(H.mock_state().started_counts["/web/book/chapter/e_0"] or 0, before + 1,
+                "old-account replacement must not issue HTTP using the new account")
+            H.equal(H.mock_state().started_counts["/web/mp/content"] or 0, mp_before,
+                "old-account MP replacement must not issue HTTP using the new account")
+            H.equal(plugin.settings:get_book(mp_book.book_id), nil, "MP replacement does not write BookRecords")
+            H.equal(plugin.settings:get_book("900001"), nil, "replacement does not write BookRecords")
+            H.equal(plugin.library_db:getBook("900001"), nil, "replacement does not write new-account SQLite")
+            H.check(not dl._active_job and not dl._pending_start and not dl._scheduled_start,
+                "replacement rejection releases every downloader slot")
+            H.equal(dl._standby_ref or 0, 0, "replacement rejection releases standby")
+            H.mock_control({ match = "", delay = 0, times = 0 })
+        end)
+    end
+
 end

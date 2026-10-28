@@ -316,6 +316,13 @@ function Downloader:_finishJob(dl)
         UIManager:scheduleIn(0.1, function()
             if self._scheduled_start ~= scheduled then return end
             self._scheduled_start = nil
+            if pending.options and (pending.options.prefetch or pending.options.mp_article)
+                and pending.account_id ~= account_id(self.settings) then
+                if type(pending.options.on_complete) == "function" then
+                    pcall(pending.options.on_complete, false, "account_changed")
+                end
+                return
+            end
             self:start(pending.book, pending.chapters, pending.suffix, pending.options)
         end)
     end
@@ -815,6 +822,7 @@ function Downloader:start(book, chapters, suffix, options)
                     chapters = chapters,
                     suffix = suffix,
                     options = options,
+                    account_id = account_id(self.settings),
                 }
                 return true
             end
@@ -827,6 +835,7 @@ function Downloader:start(book, chapters, suffix, options)
                 chapters = chapters,
                 suffix = suffix,
                 options = options,
+                account_id = account_id(self.settings),
             }
             return true
         end

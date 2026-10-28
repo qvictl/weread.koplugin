@@ -389,6 +389,44 @@ pending_worker.starts[1].options.on_done({ ok = false, error = task_err })
 expect(pending_dl._active_job == nil and (pending_dl._standby_ref or 0) == 0,
     "queued account rejection stranded downloader/standby")
 
+-- The downloader's replacement queue also retains identity across restart.
+for _, change in ipairs({ "before_finish", "after_finish", "ticket", "mp_before_finish", "mp_after_finish" }) do
+    scheduled = {}
+    local queued_settings, queued_worker = fake_settings(), fake_worker()
+    queued_settings:set("account", { user_vid = "one" })
+    local replacement_dl = Downloader:new{
+        settings = queued_settings, client = {}, background_worker = queued_worker,
+        require_login = function() return true end,
+        is_connected = function() return true end,
+    }
+    replacement_dl:start(book_a, { chapter_2 }, "chapter", { prefetch = true, single_chapter = true })
+    run_scheduled()
+    local queued_done, queued_ok, queued_reason = 0
+    replacement_dl:start(book_a, { chapter_3 }, "chapter", {
+        prefetch = not change:find("mp_", 1, true), mp_article = change:find("mp_", 1, true) ~= nil,
+        single_chapter = true,
+        on_complete = function(ok, reason)
+            queued_done, queued_ok, queued_reason = queued_done + 1, ok, reason
+        end,
+    })
+    expect(replacement_dl._pending_start ~= nil, change .. " replacement did not enter downloader queue")
+    if change:find("before_finish", 1, true) then queued_settings:set("account", { user_vid = "two" }) end
+    run_worker_event(queued_worker)
+    if change:find("after_finish", 1, true) then queued_settings:set("account", { user_vid = "two" }) end
+    if change == "ticket" then queued_settings:set("wr_ticket", "rotated") end
+    run_scheduled()
+    run_scheduled()
+    if change == "ticket" then
+        expect(#queued_worker.starts == 2, "same-account ticket rotation rejected replacement")
+        queued_worker.starts[2].options.on_done({ ok = false, error = "fixture_done" })
+    else
+        expect(#queued_worker.starts == 1 and queued_done == 1 and queued_ok == false
+            and queued_reason == "account_changed", change .. " restarted a stale replacement")
+    end
+    expect(replacement_dl._active_job == nil and replacement_dl._pending_start == nil and replacement_dl._scheduled_start == nil
+        and (replacement_dl._standby_ref or 0) == 0, change .. " queue rejection stranded state")
+end
+
 os.remove(downloaded_path)
 
 -- MP jobs use the same active slot and capture identity before deferred work.
