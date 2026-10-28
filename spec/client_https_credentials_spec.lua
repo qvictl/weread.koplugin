@@ -89,7 +89,7 @@ local Client = require("weread.lib.client")
 local merged = {}
 local settings = {
     get = function(_self, key, default)
-        if key == "cookies" then return { wr_skey = "secret-skey", wr_vid = "42" } end
+        if key == "cookies" then return { wr_skey = "XXX-skey", wr_vid = "42" } end
         return default
     end,
     merge_set_cookie = function(_self, value) merged[#merged + 1] = value end,
@@ -104,7 +104,7 @@ end
 reset()
 responses[1] = { code = 200, body = "ok", headers = { ["set-cookie"] = "wr_skey=new; Path=/" } }
 client:request({ url = "https://weread.qq.com/web/a" })
-expect(requests[1].headers.Cookie == "wr_skey=secret-skey; wr_vid=42", "https WeRead request lost its cookie")
+expect(requests[1].headers.Cookie == "wr_skey=XXX-skey; wr_vid=42", "https WeRead request lost its cookie")
 expect(#merged == 1, "https Set-Cookie was not stored")
 
 -- Plain http WeRead URL (any case): no cookie, no stored Set-Cookie.
@@ -121,7 +121,7 @@ end
 reset()
 responses[1] = { code = 200, body = "ok" }
 client:request({ url = "http://weread.qq.com/api/userInfo", headers = {
-    Cookie = "wr_skey=explicit", ["X-Skey"] = "token", authorization = "Bearer x", Accept = "text/plain",
+    Cookie = "wr_skey=XXX-explicit", ["X-Skey"] = "token", authorization = "Bearer x", Accept = "text/plain",
 } })
 local sent = requests[1].headers
 expect(sent.Cookie == nil and sent["X-Skey"] == nil and sent.authorization == nil,
@@ -150,7 +150,7 @@ responses[1] = { code = 301, body = "", headers = { location = "https://i.weread
 responses[2] = { code = 200, body = "done" }
 local text, code, _, _, final_url = client:request_follow({ url = "https://weread.qq.com/web/a" })
 expect(text == "done" and code == 200 and final_url == "https://i.weread.qq.com/next", "https redirect not followed")
-expect(requests[2].headers.Cookie == "wr_skey=secret-skey; wr_vid=42", "cookie not rebuilt for the https WeRead hop")
+expect(requests[2].headers.Cookie == "wr_skey=XXX-skey; wr_vid=42", "cookie not rebuilt for the https WeRead hop")
 
 -- http -> http (public, non-WeRead) is not a downgrade and still works.
 reset()
