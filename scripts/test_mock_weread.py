@@ -92,6 +92,31 @@ class MockTests(unittest.TestCase):
         self.assertEqual(self.gateway("/shelf/sync")[1]["books"], [])
         self.assertEqual(self.gateway("/book/underlines", bookId=BOOK_ID, chapterUid=1)[1]["underlines"], [])
 
+    def test_downgrade_redirect_and_request_log(self):
+        import urllib.parse
+        import urllib.request
+
+        class NoRedirect(urllib.request.HTTPRedirectHandler):
+            def redirect_request(self, *_args, **_kwargs):
+                return None  # never follow: the target is a real http URL
+
+        self.addCleanup(self.request, "/__control", dict(downgrade_path=""))
+        self.request("/__control", dict(downgrade_path="/web/book/getProgress"))
+        opener = build_opener(ProxyHandler({}), NoRedirect)
+        target = "https://weread.qq.com/web/book/getProgress?bookId=" + BOOK_ID
+        with self.assertRaises(HTTPError) as caught:
+            opener.open(self.base + "/__proxy?url=" + urllib.parse.quote(target, safe=""), timeout=3)
+        self.assertEqual(caught.exception.code, 302)
+        self.assertEqual(caught.exception.headers["Location"], "http://weread.qq.com/web/book/getProgress?bookId="
+                         + BOOK_ID)
+        plain = "http://weread.qq.com/web/book/getProgress?bookId=" + BOOK_ID
+        self.assertEqual(self.request("/__proxy?url=" + urllib.parse.quote(plain, safe=""))[0], 200,
+                         "plain http is answered (only https redirects)")
+        events = self.request("/__state")[1]["requests"][-2:]
+        self.assertEqual([(e["scheme"], e["status"], e["cookie"]) for e in events],
+                         [("https", 302, False), ("http", 200, False)])
+        self.assertEqual(self.request("/__control", dict(downgrade_path=1))[0], 400)
+
     def test_qr_login_modes(self):
         status, page = self.request("/__proxy?url=https%3A%2F%2Fweread.qq.com%2Fr%2Fweread-skills")
         self.assertEqual(status, 200)

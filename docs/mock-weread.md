@@ -139,6 +139,7 @@ python3 scripts/mock_weread.py --port 8765 \
 | `status` | 注入的 HTTP 错误码，400–599 |
 | `times` | 失败次数；0 关闭失败、1 仅下一次、-1 持续失败 |
 | `empty_shelf` / `empty_annotations` | 返回空书架 / 空划线想法，布尔值 |
+| `downgrade_path` | 该路径的 https 请求返回 302，跳转到同一 URL 的 http 版本；空字符串关闭 |
 
 例如让每个章节的首个分片慢 2 秒，便于在真实进度框点击取消：
 

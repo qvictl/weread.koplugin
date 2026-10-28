@@ -162,6 +162,24 @@ local function merge_req_opts(default_opts, user_opts)
     return result
 end
 
+local function is_https(url)
+    return tostring(url or ""):lower():match("^https://") ~= nil
+end
+
+-- Headers that carry WeRead credentials. They are only ever sent over https.
+local CREDENTIAL_HEADERS = { cookie = true, authorization = true, ["x-skey"] = true }
+
+local function strip_credential_headers(headers)
+    local dropped = 0
+    for key in pairs(headers or {}) do
+        if CREDENTIAL_HEADERS[tostring(key):lower()] then
+            headers[key] = nil
+            dropped = dropped + 1
+        end
+    end
+    return dropped
+end
+
 local function is_weread_url(url)
     local authority = tostring(url or ""):match("^https?://([^/]+)")
     if not authority then
@@ -259,7 +277,8 @@ function Client:request(opts)
         ["User-Agent"] = WeRead.USER_AGENT,
         ["Accept"] = "application/json, text/plain, */*"
     }
-    local is_handle_cookie = not opts.skip_cookie and is_weread_url(opts.url)
+    -- Stored cookies go to WeRead hosts over https only; never in clear text.
+    local is_handle_cookie = not opts.skip_cookie and is_https(opts.url) and is_weread_url(opts.url)
 
     if is_handle_cookie then
         local cookies = self.settings:get("cookies", {})
@@ -297,6 +316,9 @@ function Client:request(opts)
     -- Redirects are handled explicitly by request_follow so credentials can be
     -- rebuilt for every destination instead of being copied across origins.
     req_opts.redirect = false
+    if not is_https(opts.url) and strip_credential_headers(req_opts.headers) > 0 then
+        logger.warn("HTTP credentials dropped for a non-https request:", tostring(url_origin(opts.url)))
+    end
     local diagnostic_api = req_opts.diagnostic_api
     req_opts.diagnostic_api = nil
 
@@ -399,6 +421,13 @@ function Client:request_follow(opts, max_redirects)
         local next_url = absolute_url(url, header_value(headers, "location"))
         if not next_url then
             return text, code, headers, status, url
+        end
+        if is_https(url) and not is_https(next_url) then
+            -- A downgrade would expose the request (and any credentials of the
+            -- next hop) in clear text.
+            logger.warn("HTTP redirect downgrade refused:", tostring(url_origin(url)),
+                "->", tostring(url_origin(next_url)))
+            error("Refusing redirect from https to a non-https URL", 0)
         end
         if on_redirect then
             on_redirect(url, next_url, code)

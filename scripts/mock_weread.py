@@ -126,6 +126,8 @@ class MockServer(ThreadingHTTPServer):
         self.control = dict(delay=0, match="", status=503, times=0,
                             empty_shelf=False, empty_annotations=False,
                             qr_mode="succeed", qr_delay=1)
+        # Path whose https requests answer 302 to the same URL over plain http.
+        self.control["downgrade_path"] = ""
         self.progress_history = []
         self.github_release = None  # dict(version=..., files={name: bytes}, body=...)
         self.qr_otp_seen = False
@@ -156,6 +158,8 @@ class MockServer(ThreadingHTTPServer):
             return control["status"], dict(errcode=-1, errmsg="Injected mock failure")
 
         book_id = str(data.get("bookId") or query.get("bookId", [BOOK_ID])[0])
+        if control["downgrade_path"] and path == control["downgrade_path"] and url.scheme == "https":
+            return 302, dict(moved=True), {"Location": "http" + target[len("https"):]}
         if path.startswith(("/r/weread-skills", "/api/auth/", "/api/userInfo", "/api/skills/")):
             return self.qr_route(method, path, query, control)
         if path == "/api/agent/gateway" and method == "POST":
@@ -357,7 +361,8 @@ class Handler(BaseHTTPRequestHandler):
             parsed = urlsplit(target)
         except ValueError:
             parsed = urlsplit("")
-        self.server.record(dict(method=self.command, host=parsed.hostname, path=parsed.path,
+        self.server.record(dict(method=self.command, scheme=parsed.scheme, host=parsed.hostname, path=parsed.path,
+                                cookie=bool(self.headers.get("Cookie")),
                                 api=data.get("api_name"), book=data.get("bookId"), chapter=data.get("chapterUid"),
                                 encoded_chapter=data.get("c"), status=status))
         if isinstance(result, bytes):
@@ -397,6 +402,8 @@ class Handler(BaseHTTPRequestHandler):
                 raise ValueError("qr_mode must be succeed, otp or expire")
             if type(candidate["qr_delay"]) not in (float, int) or not 0 <= candidate["qr_delay"] <= 10:
                 raise ValueError("qr_delay must be 0..10 seconds")
+            if not isinstance(candidate["downgrade_path"], str):
+                raise ValueError("downgrade_path must be a string")
             self.server.control = candidate
 
 

@@ -102,6 +102,7 @@ Current scenarios (`python3 scripts/run_emulator_scenarios.py --list`):
 | `09_annotations_thoughts` | annotation sync, underline drawn, tap opens the thought popup, popup paging and close |
 | `10_updater` | updater against a mocked GitHub release: notes dialog, SHA-256 mismatch rejected, install with backup |
 | `11_budget_200_chapters` | 200-chapter download: peak RSS growth, Lua heap growth, late/early per-chapter time, packaging and total time budgets |
+| `12_https_credentials` | an https → http redirect from the service is refused; no request (and so no cookie) goes to plain http |
 
 Every scenario exits non-zero on failure. Evidence per scenario: `crash.log`
 (KOReader output), `requests.jsonl` (mock requests), `result.json` (steps,
