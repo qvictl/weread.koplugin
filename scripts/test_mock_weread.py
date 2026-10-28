@@ -4,7 +4,8 @@ import json
 import threading
 import time
 import unittest
-from urllib.error import HTTPError
+from http.client import RemoteDisconnected
+from urllib.error import HTTPError, URLError
 from urllib.request import ProxyHandler, Request, build_opener
 
 from fetch_weread_epub import decode_content_shards, decode_style_shard, weread_e
@@ -44,7 +45,7 @@ class MockTests(unittest.TestCase):
         return self.request("/api/agent/gateway", dict(api_name=api, **params))
 
     def setUp(self):
-        self.request("/__control", dict(delay=0, match="", status=503, times=0,
+        self.request("/__control", dict(delay=0, match="", status=503, times=0, drop=False,
                                         empty_shelf=False, empty_annotations=False,
                                         qr_mode="succeed", qr_delay=0))
 
@@ -91,6 +92,15 @@ class MockTests(unittest.TestCase):
         self.request("/__control", dict(empty_shelf=True, empty_annotations=True))
         self.assertEqual(self.gateway("/shelf/sync")[1]["books"], [])
         self.assertEqual(self.gateway("/book/underlines", bookId=BOOK_ID, chapterUid=1)[1]["underlines"], [])
+
+    def test_drop_closes_the_connection_without_a_response(self):
+        self.request("/__control", dict(match="/api/userInfo", times=1, drop=True))
+        with self.assertRaises((RemoteDisconnected, ConnectionError, URLError)):
+            self.request("/api/userInfo")
+        self.assertEqual(self.request("/api/userInfo")[0], 200, "times=1 drops only the next request")
+        events = [e for e in self.request("/__state")[1]["requests"] if e["path"] == "/api/userInfo"]
+        self.assertEqual([e["status"] for e in events][-2:], [0, 200])
+        self.assertEqual(self.request("/__control", dict(drop="yes"))[0], 400)
 
     def test_qr_login_modes(self):
         status, page = self.request("/__proxy?url=https%3A%2F%2Fweread.qq.com%2Fr%2Fweread-skills")
