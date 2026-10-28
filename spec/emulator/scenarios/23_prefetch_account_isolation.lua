@@ -1,7 +1,6 @@
 -- @title Prefetch result isolation across queued QR login completion
 -- @timeout 60
 return function(H)
-    local UIManager = require("ui/uimanager")
     local plugin, book, chapters, state = nil, nil, nil, {}
     H.step("setup a real chapter worker", function()
         plugin = H.wait_until("plugin attached", function() return H.plugin() end, 20)
@@ -13,6 +12,7 @@ return function(H)
         end)
     end)
     H.step("queued QR completion must discard old-account prefetch metadata", function()
+        local requests_before = H.mock_state().started_counts["/web/book/chapter/e_0"] or 0
         H.mock_control({ match = "/web/book/chapter/e_0", delay = 1.5, times = 0 })
         H.call(function()
             plugin.settings:delete_book("900001")
@@ -22,11 +22,14 @@ return function(H)
                 silent_completion = true, offer_read = false,
                 on_complete = function(ok, value) state.done, state.ok, state.value = true, ok, value end,
             })
-            UIManager:scheduleIn(0.35, function()
-                plugin.qr_login:_complete({ succeed = true, webLoginVid = "900000",
-                    accessToken = "mock-access-token", refreshToken = "mock-refresh-token" },
-                    plugin.qr_login.generation)
-            end)
+        end)
+        H.wait_until("chapter request reached synthetic service", function()
+            return (H.mock_state().started_counts["/web/book/chapter/e_0"] or 0) > requests_before
+        end, 5)
+        H.call(function()
+            plugin.qr_login:_complete({ succeed = true, webLoginVid = "900000",
+                accessToken = "mock-access-token", refreshToken = "mock-refresh-token" },
+                plugin.qr_login.generation)
         end)
         H.wait_until("new login and completed prefetch", function()
             return state.done and plugin.settings:get("account", {}).user_vid == "900000"
@@ -41,6 +44,7 @@ return function(H)
     H.step("same-account ticket rotation still accepts a real chapter worker", function()
         state = {}
         H.close_dialogs()
+        local requests_before = H.mock_state().started_counts["/web/book/chapter/e_0"] or 0
         H.mock_control({ match = "/web/book/chapter/e_0", delay = 1.5, times = 0 })
         H.call(function()
             plugin.downloader:start(book, {chapters[3]}, "chapter", {
@@ -48,9 +52,12 @@ return function(H)
                 silent_completion = true, offer_read = false,
                 on_complete = function(ok, value) state.done, state.ok, state.value = true, ok, value end,
             })
-            UIManager:scheduleIn(0.35, function()
-                plugin.settings:update_auth({ wr_ticket = "same-account-rotated-ticket" })
-            end)
+        end)
+        H.wait_until("same-account chapter request reached synthetic service", function()
+            return (H.mock_state().started_counts["/web/book/chapter/e_0"] or 0) > requests_before
+        end, 5)
+        H.call(function()
+            plugin.settings:update_auth({ wr_ticket = "same-account-rotated-ticket" })
         end)
         H.wait_until("same-account prefetch saved", function() return state.done end, 20)
         H.check(state.ok, "same-account rotation must accept the downloaded chapter", tostring(state.value))
