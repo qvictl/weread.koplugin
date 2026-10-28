@@ -21,6 +21,12 @@ local env = {
     evidence = os.getenv("WEREAD_TEST_EVIDENCE"),
     mock = os.getenv("WEREAD_MOCK_URL"),
     timeout = tonumber(os.getenv("WEREAD_TEST_TIMEOUT")) or 240,
+    -- Stress knob: poll every wait_until predicate this often (seconds,
+    -- e.g. 0) instead of each call's own interval. Polling on every UI tick
+    -- maximizes the chance that a predicate runs in the same tick as the
+    -- task that shows the awaited dialog - the case the tap helpers below
+    -- must survive.
+    poll_interval = tonumber(os.getenv("WEREAD_TEST_POLL_INTERVAL")),
 }
 H.env = env
 
@@ -140,13 +146,15 @@ end
 --- Polls pred (run on the UI loop) until it returns a truthy value.
 function H.wait_until(description, pred, timeout, interval)
     timeout = timeout or 20
-    interval = interval or 0.2
+    interval = env.poll_interval or interval or 0.2
     local deadline = now_ms() + timeout * 1000
     while true do
         local value = H.call(pred)
         if value then return value end
         if now_ms() > deadline then
-            error("timed out after " .. tostring(timeout) .. "s waiting for: " .. description, 0)
+            local message = "timed out after " .. tostring(timeout) .. "s waiting for: " .. description
+            H.dump_diagnostics(message)
+            error(message, 0)
         end
         H.sleep(interval)
     end
@@ -240,6 +248,17 @@ function H.top_window()
     return stack[#stack] and stack[#stack].widget or nil
 end
 
+--- The window a tap is delivered to: UIManager:sendEvent offers gestures to
+-- toasts on the way down but the top-most non-toast window consumes them.
+function H.input_window()
+    local stack = UIManager._window_stack
+    for i = #stack, 1, -1 do
+        local widget = stack[i].widget
+        if not widget.toast then return widget end
+    end
+    return nil
+end
+
 local function walk(widget, visit, seen, depth, chain)
     if type(widget) ~= "table" or seen[widget] or depth > 80 then return nil end
     seen[widget] = true
@@ -284,11 +303,20 @@ function H.texts(root)
     return out
 end
 
-local function has_dimen(widget)
-    local d = rawget(widget, "dimen")
-    return type(d) == "table" and type(d.x) == "number" and type(d.w) == "number"
-        and d.w > 0 and d.h > 0
+--- The widget's on-screen rectangle, or nil until paintTo has placed it.
+-- Button and every InputContainer create `dimen = Geom:new{w=, h=}` in init:
+-- x/y then come from Geom's class defaults (0, 0), so a dialog shown earlier
+-- in the same UI tick (not repainted yet) would "be" at the screen's top-left
+-- corner, and a tap there lands outside the dialog - a dismissable
+-- ConfirmBox simply closes. Only paintTo stores x/y in the dimen itself.
+local function painted_dimen(widget)
+    local d = type(widget) == "table" and rawget(widget, "dimen") or nil
+    if type(d) ~= "table" then return nil end
+    if type(rawget(d, "x")) ~= "number" or type(rawget(d, "y")) ~= "number" then return nil end
+    if type(d.w) ~= "number" or type(d.h) ~= "number" or d.w <= 0 or d.h <= 0 then return nil end
+    return d
 end
+H.painted_dimen = painted_dimen
 
 --- Finds the first widget whose text contains needle (plain find). Returns
 -- the widget and its nearest ancestor-or-self with a painted dimen.
@@ -299,7 +327,7 @@ function H.find_text(needle, root)
         if text and text:find(needle, 1, true) then
             hit = widget
             for i = depth, 1, -1 do
-                if has_dimen(chain[i]) then
+                if painted_dimen(chain[i]) then
                     target = chain[i]
                     break
                 end
@@ -310,6 +338,27 @@ function H.find_text(needle, root)
     return hit, target
 end
 
+--- On the UI loop: the painted rectangle of the first widget matching
+-- `match` (exact text, or predicate(widget)) inside root (default: the
+-- window that receives taps), as a copied {x, y, w, h}. Windows shown or
+-- changed earlier in this UI tick are painted first, so their positions are
+-- real rather than init-time placeholders.
+function H.find_tappable(match, root)
+    if next(UIManager._dirty) ~= nil then UIManager:forceRePaint() end
+    root = root or H.input_window()
+    if not root then return nil end
+    local is_match = type(match) == "function" and match
+        or function(widget) return rawget(widget, "text") == match end
+    local d = H.walk(function(widget, chain, depth)
+        if not is_match(widget) then return nil end
+        for i = depth, 1, -1 do
+            local dimen = painted_dimen(chain[i])
+            if dimen then return dimen end
+        end
+    end, root)
+    return d and { x = d.x, y = d.y, w = d.w, h = d.h } or nil
+end
+
 function H.has_text(needle, root)
     return H.find_text(needle, root) ~= nil
 end
@@ -318,31 +367,64 @@ function H.screen_text()
     return table.concat(H.texts(), " | ")
 end
 
---- Sends a real tap gesture through UIManager event dispatch.
-function H.tap_at(x, y)
-    return H.call(function()
-        local ges = {
-            ges = "tap",
-            pos = Geom:new{ x = x, y = y, w = 0, h = 0 },
-            time = time.now(),
-        }
-        UIManager:sendEvent(Event:new("Gesture", ges))
-        return true
-    end)
-end
-
 local function center(dimen)
     return math.floor(dimen.x + dimen.w / 2), math.floor(dimen.y + dimen.h / 2)
 end
 
---- Taps the painted element showing needle; waits for it first.
-function H.tap_text(needle, timeout)
-    local target = H.wait_until("text '" .. needle .. "' painted", function()
-        return (select(2, H.find_text(needle)))
+local function send_tap(x, y)
+    UIManager:sendEvent(Event:new("Gesture", {
+        ges = "tap",
+        pos = Geom:new{ x = x, y = y, w = 0, h = 0 },
+        time = time.now(),
+    }))
+end
+
+--- Sends a real tap gesture through UIManager event dispatch.
+function H.tap_at(x, y)
+    return H.call(function()
+        send_tap(x, y)
+        return true
+    end)
+end
+
+-- Finds and taps in one UI task: nothing can be shown on top of the target
+-- (or move it) between locating it and delivering the tap.
+local function tap_when_painted(description, find, timeout, label)
+    local tapped = H.wait_until(description, function()
+        local d = find()
+        if not d then return nil end
+        local x, y = center(d)
+        send_tap(x, y)
+        return { x = x, y = y }
     end, timeout or 15)
-    local x, y = center(target.dimen)
-    H.log("tap", needle, "@", x, y)
-    return H.tap_at(x, y)
+    H.log("tap", label, "@", tapped.x, tapped.y)
+    return true
+end
+
+--- Taps the painted element showing needle (substring) in the window that
+-- receives taps; waits for it first.
+function H.tap_text(needle, timeout)
+    return tap_when_painted("text '" .. needle .. "' painted", function()
+        return H.find_tappable(function(widget)
+            local text = widget_text(widget)
+            return text ~= nil and text:find(needle, 1, true) ~= nil
+        end)
+    end, timeout, needle)
+end
+
+--- Taps the painted widget whose text is exactly `match` (or that matches
+-- predicate(widget)); waits until it is painted in the window that receives
+-- taps, or inside root_fn() when given (polled; nil keeps waiting).
+function H.tap_exact(match, timeout, root_fn)
+    local label = type(match) == "string" and match or "<widget>"
+    return tap_when_painted("'" .. label .. "' painted and tappable", function()
+        local root
+        if root_fn then
+            root = root_fn()
+            if not root then return nil end
+        end
+        return H.find_tappable(match, root)
+    end, timeout, label)
 end
 
 --- Waits until the screen shows needle somewhere.
@@ -482,6 +564,99 @@ function H.patch_upvalue_table(fn, name, values)
     error("upvalue " .. tostring(name) .. " not found")
 end
 
+-- ------------------------------------------------------------ diagnostics
+
+local function module_names()
+    local names = {}
+    for name, value in pairs(package.loaded) do
+        if type(value) == "table" and names[value] == nil then names[value] = name end
+    end
+    return names
+end
+
+local function class_name(widget, names)
+    local class = getmetatable(widget)
+    for _i = 1, 12 do
+        if type(class) ~= "table" then break end
+        if names[class] then return names[class] end
+        class = getmetatable(class)
+    end
+    return rawget(widget, "name") or rawget(widget, "id") or "?"
+end
+
+local function short(value, limit)
+    local text = tostring(value):gsub("%s+", " ")
+    limit = limit or 60
+    return #text > limit and (text:sub(1, limit - 3) .. "...") or text
+end
+
+local function describe_function(fn)
+    if type(fn) ~= "function" then return tostring(fn) end
+    local info = debug.getinfo(fn, "S")
+    return info and (info.short_src:match("[^/]*/[^/]*$") or info.short_src) .. ":" .. tostring(info.linedefined)
+        or tostring(fn)
+end
+
+--- A snapshot of the UI state for timeouts: the window stack (top first),
+-- pending repaints, scheduled tasks and the downloader's job state.
+function H.diagnostics()
+    local lines = {}
+    local function add(...) lines[#lines + 1] = table.concat({ ... }, " ") end
+    local names = module_names()
+    local stack = UIManager._window_stack or {}
+    local dirty = 0
+    for _k in pairs(UIManager._dirty or {}) do dirty = dirty + 1 end
+    add("window stack (top first):", tostring(#stack), "windows,", tostring(dirty), "pending repaint(s)")
+    for i = #stack, 1, -1 do
+        local widget = stack[i].widget
+        local flags = {}
+        for _i, flag in ipairs({ "toast", "modal", "covers_fullscreen", "dismissable" }) do
+            if widget[flag] then flags[#flags + 1] = flag end
+        end
+        if UIManager._dirty and UIManager._dirty[widget] then flags[#flags + 1] = "dirty" end
+        local d = painted_dimen(widget)
+        local texts = H.texts(widget)
+        for j = 1, #texts do texts[j] = short(texts[j], 40) end
+        while #texts > 6 do table.remove(texts) end
+        add(string.format("  #%d %s [%s] %s texts: %s", i, class_name(widget, names), table.concat(flags, ","),
+            d and string.format("@%d,%d %dx%d", d.x, d.y, d.w, d.h) or "(not painted)",
+            table.concat(texts, " | ")))
+    end
+    local queue = UIManager._task_queue or {}
+    local now = time.now()
+    add("scheduled tasks:", tostring(#queue))
+    -- The queue is sorted latest first.
+    for i = #queue, math.max(1, #queue - 14), -1 do
+        local task = queue[i]
+        add(string.format("  in %+.0fms %s", time.to_ms(task.time - now), describe_function(task.action)))
+    end
+    local reader, fm = H.reader(), H.file_manager()
+    add("ui:", reader and ("ReaderUI " .. short(reader.document and reader.document.file or "(no document)", 120))
+        or (fm and "FileManager" or "none"))
+    local ok_rt, runtime = pcall(H.runtime)
+    local dl = ok_rt and runtime and runtime.downloader
+    if dl then
+        local job = dl._active_job
+        add("downloader:", job and string.format("active suffix=%s index=%s/%s completed=%s cancelled=%s notified=%s",
+                tostring(job.suffix), tostring(job.index), tostring(job.total), tostring(job.completed_count),
+                tostring(job.cancelled), tostring(job.completion_notified)) or "idle",
+            "scheduled_start=" .. tostring(dl._scheduled_start ~= nil),
+            "pending_start=" .. tostring(dl._pending_start ~= nil),
+            "standby_ref=" .. tostring(dl._standby_ref or 0))
+    end
+    add(string.format("lua_kb=%.0f rss_kb=%s", collectgarbage("count"), tostring(H.rss_kb())))
+    return lines
+end
+
+function H.dump_diagnostics(reason)
+    local ok, lines = pcall(H.diagnostics)
+    if not ok then lines = { "diagnostics failed: " .. tostring(lines) } end
+    H.log("DIAGNOSTICS", reason or "")
+    for _i, line in ipairs(lines) do H.log("  " .. line) end
+    result.diagnostics = result.diagnostics or {}
+    table.insert(result.diagnostics, { reason = reason, lines = lines })
+end
+
 -- ------------------------------------------------------------- startup
 
 local function start()
@@ -500,7 +675,9 @@ local function start()
         return
     end
     UIManager:scheduleIn(env.timeout, function()
-        finish(false, "scenario watchdog: exceeded " .. tostring(env.timeout) .. "s")
+        local message = "scenario watchdog: exceeded " .. tostring(env.timeout) .. "s"
+        H.dump_diagnostics(message)
+        finish(false, message)
     end)
     co = coroutine.create(function()
         -- First-run KOReader notices (e.g. "book info cache updated") would
