@@ -157,11 +157,21 @@ function M.exists(path)
     return false
 end
 
--- KOReader lfs stub that creates real directories.
+-- KOReader lfs stub that creates real directories. Like libkoreader-lfs,
+-- mkdir creates a single level and returns nil, err when the directory
+-- already exists or its parent is missing; callers create parents themselves.
 function M.lfs()
     return {
         mkdir = function(path)
-            return os.execute("mkdir -p '" .. path .. "' 2>/dev/null")
+            -- LuaJIT returns 0, or true on Lua 5.2-compatible builds.
+            local status = os.execute("mkdir '" .. path .. "' 2>/dev/null")
+            if status == 0 or status == true then return true end
+            local probe = io.open(path, "rb")
+            if probe then
+                probe:close()
+                return nil, "File exists"
+            end
+            return nil, "No such file or directory"
         end,
     }
 end

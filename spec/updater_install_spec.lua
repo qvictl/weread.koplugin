@@ -350,13 +350,23 @@ do
     server[url] = { 502, "bad gateway" }
     server[Updater.GITHUB_MIRRORS[2] .. url] = { 200, "payload" }
     local progress = {}
+    local resets = {} -- requests already sent at each "0/7" progress reset
     ok, err = updater:_http_get_with_mirrors(url, destination, function(received, total)
         progress[#progress + 1] = received .. "/" .. tostring(total)
+        if received == 0 then resets[#resets + 1] = #requests end
     end, 7)
     expect(ok == true and err == nil and read_file(destination) == "payload", "mirror download succeeded")
     expect(#requests == 3 and requests[1] == url and requests[2] == Updater.GITHUB_MIRRORS[1] .. url,
         "sources tried in order until one succeeds")
-    expect(progress[1] == "0/7" and progress[#progress] == "7/7", "progress restarts per source")
+    local zero_entries = 0
+    for _i, entry in ipairs(progress) do
+        if entry == "0/7" then zero_entries = zero_entries + 1 end
+    end
+    expect(zero_entries == #requests and #resets == #requests, "progress restarts once per source")
+    for index, sent in ipairs(resets) do
+        expect(sent == index - 1, "progress reset before source " .. index .. " is requested")
+    end
+    expect(progress[#progress] == "7/7", "progress ends at the downloaded size")
 
     settings.state.prefer_proxy = true
     reset_network()

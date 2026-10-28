@@ -22,6 +22,8 @@ local Thoughts = require("weread.lib.thoughts")
 local ThoughtDB = require("weread.lib.thought_db")
 
 local root = SQ.tempdir()
+-- Settings creates the cache root at startup; book directories go one level below.
+assert(SQ.lfs().mkdir(root .. "/cache"))
 
 local function make_settings(opts)
     opts = opts or {}

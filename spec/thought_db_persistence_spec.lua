@@ -103,7 +103,9 @@ expect(not tables.reviews, "legacy reviews table was not dropped")
 local journal = SQ.rows(db, "PRAGMA journal_mode")[1][1]
 expect(journal == "wal", "database not switched to WAL: " .. tostring(journal))
 
--- open() creates a missing book directory.
+-- open() creates a missing book directory (one level, like libkoreader-lfs
+-- mkdir; the cache root above it already exists in production).
+expect(SQ.lfs().mkdir(root .. "/nested") == true, "could not create the parent directory")
 local fresh_dir = root .. "/nested/book-b"
 local fresh = ThoughtDB.open(fresh_dir)
 expect(fresh ~= nil and SQ.exists(fresh_dir .. "/thoughts.db"), "missing book directory not created")

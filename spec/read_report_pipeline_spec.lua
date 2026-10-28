@@ -44,10 +44,13 @@ local function scripted(make_contexts, opts)
     return report, env, calls
 end
 
+-- `position = false` drops the default live position (pairs() skips nil, so
+-- `position = nil` would keep it): a time-only report.
 local function run(report, opts)
     local options = { allow_renewal = false, elapsed_seconds = 30, session_open = true,
         position = { chapter_uid = 5, chapter_offset = 10, percent = 3 } }
     for key, value in pairs(opts or {}) do options[key] = value end
+    if options.position == false then options.position = nil end
     return report:_run_pipeline("book", options)
 end
 
@@ -303,21 +306,24 @@ end)
 
 test("the gateway progress API is the fallback for the web progress", function()
     local report, env = H.new_report()
-    local book = H.ready_book(report)
+    -- The stored context differs from the default live position (chapter 5),
+    -- so the assertions tell a time-only report from a position report.
+    local book = H.ready_book(report, { chapter_uid = 8 })
     report.ensure_context = function() return book end
     env.client.web_progress = { unrelated = true }
     env.client.progress = { bookId = "book", progress = 50, chapterUid = 7,
         chapterIdx = 3, chapterOffset = 3, summary = "Chapter 7" }
 
-    local outcome = run(report, { guard = {}, position = nil })
+    local outcome = run(report, { guard = {}, position = false })
     expect(outcome.remote_check_error and contains(outcome.remote_check_error, "progress_not_found"),
         "without the API key the gateway is not asked")
-    expect(env.client.sent[1].chapter_uid == 5, "stored context sent")
+    expect(env.client.sent[1].chapter_uid == 8, "stored context sent")
 
     env.settings.is_api_configured = function() return true end
-    outcome = run(report, { guard = {}, position = nil })
+    outcome = run(report, { guard = {}, position = false })
     expect(outcome.remote and outcome.remote.chapter_uid == 7 and outcome.remote.percent == 50,
         "gateway position used")
+    expect(outcome.floor == nil, "time-only report is not a guarded position report")
     local payload = env.client.sent[2]
     expect(payload.chapter_uid == 7 and payload.progress == 50 and payload.summary == "Chapter 7",
         "time-only report re-asserts the gateway position")
