@@ -26,7 +26,13 @@ checks pass:
   scripts, mock-service contract, package and changelog checks, secret scan;
 - `integration` - the plugin running inside a real headless KOReader
   emulator against the local mock WeRead service
-  (`spec/emulator/scenarios/`), plus the pinned KOReader PluginLoader test;
+  (`spec/emulator/scenarios/`) on the
+  [qvictl/koreader](https://github.com/qvictl/koreader) fork build (rolling
+  `nightly`, in the `koreader/kobase:5.0.0-22.04` container; fails if that
+  build cannot be fetched or started), plus the pinned KOReader PluginLoader
+  test;
+- `integration-official` - the same emulator scenarios on the official
+  KOReader v2026.07.1 release, which many devices still run;
 - `tests-policy` - the test rule and the coverage gates below.
 
 Test rule: Lua code changes under `main.lua`, `weread/` or `integrations/`
@@ -77,8 +83,9 @@ See [docs/testing.md](docs/testing.md).
 `upstream` 为上游 `finlater/main` 的只读镜像，每周自动同步并向 `main` 发起合并 PR。
 
 欢迎任何 PR，无论由人还是由 AI 编写；我们以测试而非作者身份把关。合并前必须通过
-`ci`、`integration`（真实 KOReader 模拟器 + 本地 mock 服务的集成场景，以及固定版本
-PluginLoader 测试）和 `tests-policy`（修改 Lua 代码必须同时修改 `spec/` 下的测试，`feat`/`fix`
+`ci`、`integration`（在 `koreader/kobase:5.0.0-22.04` 容器中用 qvictl/koreader 分支
+构建运行真实 KOReader 模拟器 + 本地 mock 服务的集成场景，以及固定版本 PluginLoader 测试）、
+`integration-official`（同一组场景在官方 KOReader v2026.07.1 上运行）和 `tests-policy`（修改 Lua 代码必须同时修改 `spec/` 下的测试，`feat`/`fix`
 类 PR 必须新增或更新至少一个模拟器场景，并满足下面的覆盖率门禁；仅维护者可用
 `no-tests-needed` 标签豁免，且仅限文档、注释或日志措辞改动）。Bug 修复需附带修复前会失败的
 回归测试。
@@ -241,9 +248,13 @@ python3 -m py_compile scripts/*.py
 python3 scripts/test_mock_weread.py
 bash scripts/package_release.sh /tmp/weread.koplugin-release-test.zip
 bash scripts/check_secrets.sh              # needs a PCRE2-enabled ripgrep
-# Linux x86_64: the emulator scenarios CI runs as the `integration` check
-bash scripts/fetch_koreader_emulator.sh /tmp/koreader
-python3 scripts/run_emulator_scenarios.py --koreader /tmp/koreader --out /tmp/weread-emulator
+# Linux x86_64 emulator scenarios. `integration`: the qvictl/koreader fork build
+# (needs SDL 3, as in CI's koreader/kobase:5.0.0-22.04 container; see docs/testing.md)
+KOREADER_EMULATOR_SOURCE=fork bash scripts/fetch_koreader_emulator.sh /tmp/koreader
+python3 scripts/run_emulator_scenarios.py --koreader /tmp/koreader/fork/extract --out /tmp/weread-emulator
+# `integration-official`: official KOReader v2026.07.1 (needs SDL 2)
+KOREADER_EMULATOR_SOURCE=official bash scripts/fetch_koreader_emulator.sh /tmp/koreader
+python3 scripts/run_emulator_scenarios.py --koreader /tmp/koreader/official/extract --out /tmp/weread-emulator-official
 # unit diff coverage (LuaCov), the first gate of `tests-policy`
 bash scripts/run_lua_coverage.sh && python3 scripts/coverage_tools.py diff coverage/unit.report.out --base origin/main
 ```
@@ -258,9 +269,13 @@ python3 -m py_compile scripts/*.py
 python3 scripts/test_mock_weread.py
 bash scripts/package_release.sh /tmp/weread.koplugin-release-test.zip
 bash scripts/check_secrets.sh              # needs a PCRE2-enabled ripgrep
-# Linux x86_64: the emulator scenarios CI runs as the `integration` check
-bash scripts/fetch_koreader_emulator.sh /tmp/koreader
-python3 scripts/run_emulator_scenarios.py --koreader /tmp/koreader --out /tmp/weread-emulator
+# Linux x86_64 emulator scenarios. `integration`: the qvictl/koreader fork build
+# (needs SDL 3, as in CI's koreader/kobase:5.0.0-22.04 container; see docs/testing.md)
+KOREADER_EMULATOR_SOURCE=fork bash scripts/fetch_koreader_emulator.sh /tmp/koreader
+python3 scripts/run_emulator_scenarios.py --koreader /tmp/koreader/fork/extract --out /tmp/weread-emulator
+# `integration-official`: official KOReader v2026.07.1 (needs SDL 2)
+KOREADER_EMULATOR_SOURCE=official bash scripts/fetch_koreader_emulator.sh /tmp/koreader
+python3 scripts/run_emulator_scenarios.py --koreader /tmp/koreader/official/extract --out /tmp/weread-emulator-official
 # unit diff coverage (LuaCov), the first gate of `tests-policy`
 bash scripts/run_lua_coverage.sh && python3 scripts/coverage_tools.py diff coverage/unit.report.out --base origin/main
 ```

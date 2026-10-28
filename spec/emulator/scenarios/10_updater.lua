@@ -3,8 +3,9 @@
 -- @fixture github_release
 -- The real UpdaterUI + lib/updater, pointed at the mock's synthetic GitHub
 -- API (v9999.9.1, built from the candidate). Manual check shows the release
--- dialog with notes; a corrupted checksum must abort with "SHA-256
--- verification failed" and leave the plugin untouched; "Update now" then
+-- dialog with notes; a corrupted checksum must abort with the translated
+-- "SHA-256 verification failed" (the profile runs zh_CN; the English text
+-- comes from the forked worker) and leave the plugin untouched; "Update now" then
 -- installs in place (backup kept) and the restart prompt is declined.
 return function(H)
     local UIManager = require("ui/uimanager")
@@ -114,7 +115,11 @@ return function(H)
         H.call(function() ui:install(release) end)
         local failed = H.tr("Update installation failed:\n%1"):match("^([^\n]+)")
         H.wait_text(failed, 60)
-        H.check(H.has_text("SHA-256 verification failed"), "SHA-256 failure reported", H.screen_text())
+        local mismatch = H.tr("SHA-256 verification failed")
+        H.equal(mismatch, "SHA-256 校验失败", "checksum failure has a Chinese translation")
+        H.check(H.has_text(mismatch), "SHA-256 failure reported in Chinese", H.screen_text())
+        H.check(not H.has_text("verification failed"), "no untranslated English failure text",
+            H.screen_text())
         H.shot("checksum_rejected")
         H.equal(downloads(".sha256.corrupt"), 1, "corrupt checksum downloaded")
         H.equal(read_file(plugin_dir .. "/_meta.lua"), old_meta, "plugin _meta.lua untouched")

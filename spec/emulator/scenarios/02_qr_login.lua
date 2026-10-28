@@ -4,7 +4,8 @@
 -- dialog), then drives the real QRLogin flow: QRMessage on screen, the
 -- forked getLoginInfo long poll, userInfo + apikeyGet, credentials saved.
 -- Also covers the NEED_OTP path (wrong code first, then "1234") and an
--- expired QR session that must not save any credentials.
+-- expired QR session that must not save any credentials, and a userInfo
+-- request whose connection drops after the scan (retried, login completes).
 return function(H)
     local UIManager = require("ui/uimanager")
     local QRMessage = require("ui/widget/qrmessage")
@@ -195,5 +196,31 @@ return function(H)
         H.check(state.name == "" or state.name == nil, "no account saved", tostring(state.name))
         H.close_dialogs()
         H.mock_control({ qr_mode = "succeed", qr_delay = 1 })
+    end)
+
+    H.step("dropped userInfo connection is retried", function()
+        clear_account(false)
+        local function user_info_statuses()
+            local out = {}
+            for _i, event in ipairs(H.mock_requests(function(e) return e.path == "/api/userInfo" end)) do
+                out[#out + 1] = event.status
+            end
+            return out
+        end
+        local before = #user_info_statuses()
+        -- The next userInfo request gets no HTTP response at all.
+        H.mock_control({ qr_mode = "succeed", qr_delay = 1, match = "/api/userInfo", times = 1, drop = true })
+        H.call(function() plugin.qr_login:start() end)
+        wait_qr_shown()
+        H.wait_text("合成扫码用户", 30)
+        H.shot("qr_success_after_drop")
+        local statuses = user_info_statuses()
+        H.equal(statuses[before + 1], 0, "first userInfo connection dropped")
+        H.equal(statuses[before + 2], 200, "userInfo retried")
+        local state = auth()
+        H.equal(state.api_key, "mock-qr-api-key", "api key saved after the retry")
+        H.equal(state.name, "合成扫码用户", "account name after the retry")
+        H.close_dialogs()
+        H.mock_control({ match = "", times = 0, drop = false })
     end)
 end

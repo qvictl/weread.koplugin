@@ -205,7 +205,7 @@ jobs:
             echo
             git log --no-merges --format='- %h %s (%an)' "origin/main..$UP" | head -n 100
             echo
-            echo "Review the upstream changes against the fork's stability fixes, then merge with a merge commit (not squash) so upstream history stays shared. Full CI (ci, integration, tests-policy) must pass; the \`upstream-sync\` label exempts upstream code from the tests-policy rule."
+            echo "Review the upstream changes against the fork's stability fixes, then merge with a merge commit (not squash) so upstream history stays shared. Full CI (ci, integration, integration-official, tests-policy) must pass; the \`upstream-sync\` label exempts upstream code from the tests-policy rule."
           } > "$RUNNER_TEMP/pr.md"
           if [[ -n "$number" ]]; then
             gh pr edit "$number" --body-file "$RUNNER_TEMP/pr.md"
@@ -227,7 +227,8 @@ jobs:
       - name: Run CI on the sync branch
         # pull_request runs for a PR opened with GITHUB_TOKEN wait for
         # approval ("action_required") and would keep the PR blocked: approve
-        # them so ci / integration / tests-policy run as normal PR checks.
+        # them so ci / integration / integration-official / tests-policy run as
+        # normal PR checks.
         # If approval is not possible, dispatch the workflows on the branch.
         if: steps.pr.outputs.number != '' && env.USING_PAT != 'true'
         env:

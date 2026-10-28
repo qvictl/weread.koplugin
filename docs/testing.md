@@ -56,11 +56,20 @@ run independently.
 ## 3. KOReader integration / KOReader 集成测试
 
 The `Integration` workflow (`.github/workflows/integration.yml`) runs on every
-PR, on pushes to `main`, weekly, and on demand. Its aggregate `integration`
-job is a required status check for `main`. It has two parts.
+PR, on pushes to `main`, weekly, and on demand (the upstream-sync workflow
+also dispatches it for its PR branch). Two aggregate jobs are required status
+checks for `main`, and `Release` publishes only after the whole workflow
+succeeds on `main`:
 
-`Integration` 工作流在每个 PR、`main` 推送、每周定时和手动触发时运行，汇总 job
-`integration` 是 `main` 的必需检查，包含以下两部分。
+| Required check | Jobs | KOReader |
+| --- | --- | --- |
+| `integration` | `Emulator · qvictl/koreader fork build (shard 1-3/3)` + `PluginLoader (pinned KOReader)` | the [qvictl/koreader](https://github.com/qvictl/koreader) fork's emulator build (release `nightly`), in the `koreader/kobase:5.0.0-22.04` container; LuaCov coverage for `tests-policy` |
+| `integration-official` | `Emulator · official KOReader v2026.07.1 (shard 1-2/2)` | the official `koreader-linux-x86_64-v2026.07.1` release, which many devices still run; plain runner with SDL 2, no coverage |
+
+`Integration` 工作流在每个 PR、`main` 推送、每周定时和手动触发时运行（upstream-sync 也会为
+同步分支触发）。`integration`（qvictl/koreader 分支构建的模拟器场景，在
+`koreader/kobase:5.0.0-22.04` 容器中运行，并采集覆盖率；以及固定版本 PluginLoader）和
+`integration-official`（同一组场景在官方 KOReader v2026.07.1 上运行）都是 `main` 的必需检查。
 
 ### 3.1 Emulator scenarios / 模拟器场景
 
@@ -97,21 +106,43 @@ Current scenarios (`python3 scripts/run_emulator_scenarios.py --list`):
 Every scenario exits non-zero on failure. Evidence per scenario: `crash.log`
 (KOReader output), `requests.jsonl` (mock requests), `result.json` (steps,
 timings, metrics), screenshots; plus `summary.md` / `summary.json`. CI uploads
-them as `emulator-evidence-shard-*` artifacts and shows the summary table on
-the run page.
+them as `emulator-evidence-shard-*` (fork build) and
+`emulator-official-evidence-shard-*` (official build) artifacts and shows the
+summary table on the run page.
 
-KOReader build: `scripts/fetch_koreader_emulator.sh` prefers the
-`qvictl/koreader` fork's rolling emulator build (release `nightly`, asset
-`koreader-emulator-x86_64-latest.tar.xz`), the KOReader the owner's Kindle
-runs. If that asset is missing or cannot load the plugin, it falls back to the
-official `koreader-linux-x86_64-v2026.07.1.tar.xz`, so the switch happens
-automatically once the fork publishes the asset. `workflow_dispatch` can force
-`fork` or `official`.
+KOReader builds (`scripts/fetch_koreader_emulator.sh`,
+`KOREADER_EMULATOR_SOURCE=fork|official|auto`):
 
-Run locally (any Linux x86_64 machine; macOS: use a Linux VM or container):
+- `fork` (the `integration` check): the `qvictl/koreader` fork's rolling
+  emulator build, release `nightly`, asset
+  `koreader-emulator-x86_64-latest.tar.xz` (`KOREADER_FORK_RELEASE=v2026.10.q1`
+  or the workflow's `fork_release` input selects a stable fork tag instead).
+  The asset is checked against the release's `SHA256SUMS` and must pass a
+  plugin-load probe (scenario 01); otherwise the script exits non-zero and the
+  job fails - there is no fallback. The build links the system's SDL3, so it
+  runs in KOReader's `koreader/kobase:5.0.0-22.04` image (or any Linux with
+  SDL 3 installed). The job summary shows the fork version, commit and build
+  date (`build-info.json`). The fork nightly is rebuilt daily when its `main`
+  changes, so every run picks up the newest fork build.
+- `official` (the `integration-official` check): the official
+  `koreader-linux-x86_64-v2026.07.1.tar.xz`; needs SDL 2 (`libsdl2-2.0-0`).
+- `auto` (default, local convenience only; CI never uses it): `fork` if it
+  starts on this machine, otherwise `official` with a warning.
+
+Run locally (Linux x86_64; macOS: use a Linux VM or container). The fork
+build, as in CI:
 
 ```bash
-bash scripts/fetch_koreader_emulator.sh /tmp/koreader          # prints runtime=...
+docker run --rm -it -v "$PWD:/w" -w /w koreader/kobase:5.0.0-22.04 bash -c '
+  KOREADER_EMULATOR_SOURCE=fork bash scripts/fetch_koreader_emulator.sh /tmp/koreader &&
+  python3 scripts/run_emulator_scenarios.py --koreader /tmp/koreader/fork/extract \
+      --out /tmp/weread-emulator [--scenario 04_download]'
+```
+
+The official build on the host (needs `libsdl2-2.0-0`, `zip`, `unzip`):
+
+```bash
+KOREADER_EMULATOR_SOURCE=official bash scripts/fetch_koreader_emulator.sh /tmp/koreader   # prints runtime=...
 python3 scripts/run_emulator_scenarios.py --list
 python3 scripts/run_emulator_scenarios.py --koreader /tmp/koreader/official/extract/lib/koreader \
     --out /tmp/weread-emulator [--scenario 04_download]
@@ -186,7 +217,8 @@ How coverage is measured:
   `spec/emulator/luacov_patch.lua` as an early KOReader userpatch, so LuaCov
   runs inside the real app from before plugin loading, including forked
   download/login workers (per-PID stats). `@no_coverage` scenarios (timing
-  budgets) run without it. CI uploads `coverage-emulator-shard-*`;
+  budgets) run without it. CI measures it on the fork build only and uploads
+  `coverage-emulator-shard-*` (the official-build job collects no coverage);
 - the gate waits for the PR's `Integration` run, merges both and reports diff
   unit, diff combined, overall, ratchet, targets and the trend on `main`.
 
@@ -195,8 +227,8 @@ Locally (LuaCov checkout on `LUA_PATH`):
 ```bash
 export LUA_PATH="/path/to/luacov/src/?.lua;;"
 bash scripts/run_lua_coverage.sh
-python3 scripts/run_emulator_scenarios.py --koreader /tmp/koreader --out /tmp/emu \
-    --coverage --luacov-src /path/to/luacov/src
+python3 scripts/run_emulator_scenarios.py --koreader /tmp/koreader/fork/extract --out /tmp/emu \
+    --coverage --luacov-src /path/to/luacov/src   # in kobase, as above
 python3 scripts/coverage_tools.py merge --all-files --out coverage/combined.stats.out \
     coverage/unit.stats.out /tmp/emu/coverage/emulator.stats.out
 python3 scripts/coverage_tools.py report coverage/combined.stats.out coverage/combined.report.out

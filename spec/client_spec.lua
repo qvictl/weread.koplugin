@@ -426,6 +426,31 @@ ok, err = pcall(function() client:get_text("https://weread.qq.com/web/busy") end
 expect(not ok and tostring(err):find("HTTP 503,", 1, true),
     "HTTP status errors changed format: " .. tostring(err))
 
+-- HTTP failures reach the UI ("Download paused ... Last error: %1"): they are
+-- raised without a Lua source position ("weread/lib/client.lua:532: ").
+do
+    local calls = {
+        get_text = function() client:get_text("https://weread.qq.com/web/x") end,
+        post_json = function() client:post_json("https://weread.qq.com/web/x", {}) end,
+        download_to_file = function()
+            client:download_to_file("https://weread.qq.com/x.tar", download_path, {})
+        end,
+        get_public_text = function() client:get_public_text("https://mp.weixin.qq.com/s/x") end,
+        get_binary = function() client:get_binary("https://weread.qq.com/x.png") end,
+        get_mp_articles = function() client:get_mp_articles("book", 0, 10) end,
+        get_mp_content = function() client:get_mp_content("review") end,
+    }
+    for name, call in pairs(calls) do
+        for _i, response in ipairs({ { fail = "timeout" }, { body = "", code = 502 } }) do
+            responses[#responses + 1] = response
+            ok, err = pcall(call)
+            expect(not ok and tostring(err):match("^HTTP ") ~= nil
+                and not tostring(err):find("%.lua:%d+:"),
+                name .. " raised a source position: " .. tostring(err))
+        end
+    end
+end
+
 -- F10: file downloads honour the total timeout in their own sink.
 do
     local fake_now = 1000
