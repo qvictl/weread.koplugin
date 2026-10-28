@@ -26,8 +26,8 @@ local POLL_TOTAL_TIMEOUT_SECONDS = 8
 -- loop only checks that process this often (F11).
 local POLL_JOB_CHECK_SECONDS = 0.5
 local POLL_JOB_INTERVAL_SECONDS = 0.5
--- Without fork support the poll runs on the UI loop: keep each request
--- short so taps (cancel) and power-button events are not held for long.
+-- A failed dedicated poll worker retries through the dismissable worker
+-- helper. Keep each fallback request short before scheduling another poll.
 local INLINE_POLL_TIMEOUT = { 2, 3 }
 local INLINE_POLL_INTERVAL_SECONDS = 1.5
 
@@ -266,7 +266,7 @@ function QRLogin:_authenticated_get(url, cookies, web_login_vid, access_token, s
     end
 end
 
-function QRLogin:_complete_protocol(login_result, generation)
+function QRLogin:_fetch_credentials(login_result)
     if type(login_result) ~= "table" or login_result.succeed ~= true then
         error("QR login has not succeeded")
     end
@@ -320,28 +320,72 @@ function QRLogin:_complete_protocol(login_result, generation)
     if api_key == "" then
         error(_("No official API key was returned. This account has not enabled WeRead Skill.\n\nOpen WeRead app → Me → Settings → WeRead Skill → Get API Key, then scan again."))
     end
-    if generation ~= self.generation then
-        error("QR login was cancelled")
-    end
-
-    local account = {
-        name = type(user_info.name) == "string" and user_info.name or "",
-        user_vid = web_login_vid,
-        login_method = "qr",
-        login_time = os.time(),
-    }
-    self.settings:update_auth({
+    return {
         cookies = cookies,
         api_key = api_key,
         wr_ticket = "",
         wr_wrpa = "",
-        account = account,
-    }, { replace_cookies = true })
+        account = {
+            name = type(user_info.name) == "string" and user_info.name or "",
+            user_vid = web_login_vid,
+            login_method = "qr",
+            login_time = os.time(),
+        },
+    }
+end
+
+function QRLogin:_apply_credentials(credentials, generation)
+    if generation ~= self.generation then
+        error("QR login was cancelled")
+    end
+    self.settings:update_auth(credentials, { replace_cookies = true })
     if self.host.onWeReadAccountChanged then
         self.host:onWeReadAccountChanged()
     end
     self.login_cookies = nil
-    return account
+    self.session_account = nil
+    self.started_at = nil
+    return credentials.account
+end
+
+function QRLogin:_complete_protocol(login_result, generation)
+    return self:_apply_credentials(self:_fetch_credentials(login_result), generation)
+end
+
+-- Only protocol requests and parsing run in the worker. Session cookies and
+-- account credentials are returned as data and applied after both parent-side
+-- lifetime checks, before any account notification or UI update.
+function QRLogin:_account_id()
+    local account = self.settings.get and self.settings:get("account", {}) or {}
+    return tostring(account.user_vid or "")
+end
+
+function QRLogin:_run_protocol_request(busy_text, generation, task, on_success, on_failure)
+    local original_account = self:_account_id()
+    local function valid()
+        local current = self:_account_id()
+        return generation == self.generation and current == original_account
+            and (self.session_account == nil or self.session_account == current)
+    end
+    self.host:runOnlineTask(_("QR login"), function()
+        if not valid() then return end
+        local worker = setmetatable({
+            client = self.client,
+            login_cookies = deepcopy(self.login_cookies),
+        }, QRLogin)
+        self.host:_runNetworkRequest(busy_text, _("QR login"), function()
+            local value = task(worker)
+            return { value = value, cookies = worker.login_cookies }
+        end, function(result)
+            if not valid() then return end
+            self.login_cookies = result.cookies
+            on_success(result.value)
+        end, function(err, cancelled)
+            if not valid() then return end
+            if cancelled then self:cancel(); return end
+            on_failure(err)
+        end)
+    end)
 end
 
 function QRLogin:_close_qr_dialog(programmatic)
@@ -356,6 +400,7 @@ function QRLogin:_close_qr_dialog(programmatic)
 end
 
 function QRLogin:cancel()
+    self.session_account = nil
     self.generation = self.generation + 1
     self.login_cookies = nil
     self.started_at = nil
@@ -379,22 +424,19 @@ function QRLogin:start()
     -- second check here only doubled the blocking DNS lookup.
     self:cancel()
     local generation = self.generation
+    self.session_account = self:_account_id()
     self.started_at = os.time()
-    self.host:showBusy(_("Getting login QR code..."))
-    self.host:runOnlineTask(_("QR login"), function()
-        local ok, uid_or_error = pcall(function()
-            return self:_begin_protocol()
-        end)
-        self.host:closeBusy()
-        if generation ~= self.generation then
-            return
-        end
-        if not ok then
-            logger.err("get login UID failed:", error_text(uid_or_error))
-            self.host:showInfo(T(_("QR login failed:\n%1"), error_text(uid_or_error)))
-            return
-        end
-        self:_show_qr(uid_or_error, generation)
+    -- Initialize a missing fingerprint in the parent before forking.
+    local fingerprint = self.settings:get_device_fingerprint()
+    self:_run_protocol_request(_("Getting login QR code..."), generation, function(worker)
+        worker.settings = { get_device_fingerprint = function() return fingerprint end }
+        return worker:_begin_protocol()
+    end, function(uid)
+        self:_show_qr(uid, generation)
+    end, function(err)
+        logger.err("get login UID failed:", error_text(err))
+        self:cancel()
+        self.host:showInfo(T(_("QR login failed:\n%1"), error_text(err)))
     end)
 end
 
@@ -443,7 +485,8 @@ end
 -- Runs the whole getLoginInfo long-poll loop in a forked process until the
 -- server gives a final answer or the QR session expires. The UI loop only
 -- checks the pipe every POLL_JOB_CHECK_SECONDS. Returns false when the
--- platform cannot fork (or the fork fails); the caller then polls inline.
+-- platform cannot fork (or the fork fails); the caller then uses the
+-- dismissable worker helper.
 function QRLogin:_start_poll_job(uid, generation)
     local runner = self.subprocess
     if not runner then return false end
@@ -471,7 +514,7 @@ function QRLogin:_start_poll_job(uid, generation)
         runner.write_all(write_fd, encoded)
     end)
     if not ok_run or not pid then
-        logger.warn("QR login poll process unavailable, polling inline:",
+        logger.warn("QR login poll process unavailable, trying request worker:",
             tostring(ok_run and read_fd or pid))
         return false
     end
@@ -496,6 +539,10 @@ function QRLogin:_check_poll_job(job)
     self.poll_job = nil
     if not done then self:_reap(job.pid) end
     if job.generation ~= self.generation then return end
+    if self.session_account ~= nil and self.session_account ~= self:_account_id() then
+        self:cancel()
+        return
+    end
     local ok, result = pcall(self.client.json_decode, self.client, payload or "")
     if not ok or type(result) ~= "table" then
         result = { error = "login poll returned no result" }
@@ -566,28 +613,24 @@ function QRLogin:_poll(uid, generation, otp)
         return
     end
 
-    local ok, result = pcall(function()
-        return self:_poll_protocol(uid, otp or "", INLINE_POLL_TIMEOUT)
-    end)
-    if generation ~= self.generation then
-        return
-    end
-    if not ok then
-        if is_timeout_error(result) then
+    self:_run_protocol_request(_("QR login"), generation, function(worker)
+        return worker:_poll_protocol(uid, otp or "", INLINE_POLL_TIMEOUT)
+    end, function(result)
+        if result.transport_pending then
+            self:_schedule_poll(uid, generation)
+            return
+        end
+        self:_handle_login_info(uid, generation, result)
+    end, function(err)
+        if is_timeout_error(err) then
             self:_schedule_poll(uid, generation)
             return
         end
         self:_close_qr_dialog(true)
         self:cancel()
-        logger.err("login polling failed:", error_text(result))
-        self.host:showInfo(T(_("QR login failed:\n%1"), error_text(result)))
-        return
-    end
-    if result.transport_pending then
-        self:_schedule_poll(uid, generation)
-        return
-    end
-    self:_handle_login_info(uid, generation, result)
+        logger.err("login polling failed:", error_text(err))
+        self.host:showInfo(T(_("QR login failed:\n%1"), error_text(err)))
+    end)
 end
 
 function QRLogin:_handle_login_info(uid, generation, result)
@@ -653,15 +696,7 @@ function QRLogin:_show_otp(uid, generation, error_message)
                             return
                         end
                         UIManager:close(dialog)
-                        self.host:showBusy(_("Verifying login..."))
-                        self.host:runOnlineTask(_("QR login"), function()
-                            local ok, result = pcall(function()
-                                return self:_poll_protocol(uid, otp)
-                            end)
-                            self.host:closeBusy()
-                            if generation ~= self.generation then
-                                return
-                            end
+                        local function delivered(ok, result)
                             if not ok then
                                 if is_timeout_error(result) then
                                     self:_show_otp(uid, generation, _("Verification timed out. Please try again."))
@@ -687,7 +722,11 @@ function QRLogin:_show_otp(uid, generation, error_message)
                                     self.host:showInfo(T(_("QR login failed:\n%1"), message))
                                 end
                             end
-                        end)
+                        end
+                        self:_run_protocol_request(_("Verifying login..."), generation, function(worker)
+                            return worker:_poll_protocol(uid, otp)
+                        end, function(result) delivered(true, result) end,
+                            function(err) delivered(false, err) end)
                     end,
                 },
             },
@@ -697,23 +736,12 @@ function QRLogin:_show_otp(uid, generation, error_message)
 end
 
 function QRLogin:_complete(login_result, generation)
-    self.host:showBusy(_("Completing WeRead login..."))
-    self.host:runOnlineTask(_("QR login"), function()
-        local ok, account_or_error = pcall(function()
-            return self:_complete_protocol(login_result, generation)
-        end)
-        self.host:closeBusy()
-        if generation ~= self.generation then
-            return
-        end
-        if not ok then
-            logger.err("complete login failed:", error_text(account_or_error))
-            self:cancel()
-            self.host:showInfo(T(_("QR login failed:\n%1"), error_text(account_or_error)))
-            return
-        end
+    self:_run_protocol_request(_("Completing WeRead login..."), generation, function(worker)
+        return worker:_fetch_credentials(login_result)
+    end, function(credentials)
+        local account = self:_apply_credentials(credentials, generation)
 
-        local account_name = account_or_error.name
+        local account_name = account.name
         if type(account_name) ~= "string" or account_name == "" then
             account_name = _("Unknown account")
         end
@@ -725,6 +753,10 @@ function QRLogin:_complete(login_result, generation)
             _("configured"),
             _("configured")
         ))
+    end, function(err)
+        logger.err("complete login failed:", error_text(err))
+        self:cancel()
+        self.host:showInfo(T(_("QR login failed:\n%1"), error_text(err)))
     end)
 end
 
