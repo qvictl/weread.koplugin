@@ -333,7 +333,6 @@ return function(H)
     H.step("scroll mode marks the new position dirty and uploads it", function()
         local mapper = require("weread.lib.position_mapper")
         H.call(function() H.reader().view:onSetViewMode("scroll") end)
-        H.sleep(0.2)
         local scrolled_percent = H.call(function()
             local sync = H.plugin().progress_sync
             local before = sync:capture_local()
