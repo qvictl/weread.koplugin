@@ -118,7 +118,7 @@ class DropConnection(Exception):
 class MockServer(ThreadingHTTPServer):
     daemon_threads = True
 
-    def __init__(self, port=8765, log_path=None, bind="127.0.0.1"):
+    def __init__(self, port=8765, log_path=None, bind="127.0.0.1", now=None):
         address = ipaddress.IPv4Address(bind)
         if bind != "0.0.0.0" and not any(address in ipaddress.IPv4Network(network) for network in
                                           ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "127.0.0.0/8")):
