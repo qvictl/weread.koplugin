@@ -93,8 +93,8 @@ Current scenarios (`python3 scripts/run_emulator_scenarios.py --list`):
 | `09_annotations_thoughts` | annotation sync, underline drawn, tap opens the thought popup, popup paging and close |
 | `10_updater` | updater against a mocked GitHub release: notes dialog, SHA-256 mismatch rejected, install with backup |
 | `11_budget_200_chapters` | 200-chapter download: peak RSS growth, Lua heap growth, late/early per-chapter time, packaging and total time budgets |
-| `13_shelf_snapshot` | shelf synced with an entry without a book id is still stored; the second open uses the snapshot, no second `/shelf/sync` |
-| `14_queued_manual_download` | manual download queued behind a stopping prefetch is not replaced by a later prefetch and completes |
+| `14_shelf_snapshot` | shelf synced with an entry without a book id is still stored; the second open uses the snapshot, no second `/shelf/sync` |
+| `15_queued_manual_download` | manual download queued behind a stopping prefetch is not replaced by a later prefetch and completes |
 
 Every scenario exits non-zero on failure. Evidence per scenario: `crash.log`
 (KOReader output), `requests.jsonl` (mock requests), `result.json` (steps,
