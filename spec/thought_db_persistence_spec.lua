@@ -1,3 +1,4 @@
+local saved_path = package.path
 package.path = "./?.lua;./?/init.lua;" .. package.path
 
 -- Per-book thought storage (thoughts.db) against a real SQLite file: schema
@@ -12,6 +13,10 @@ local function expect(condition, message)
 end
 
 local SQ = require("spec.helpers.ljsqlite3_ffi")
+local saved_util, saved_util_loader = package.loaded["util"], package.preload["util"]
+local root
+local spec_ok, spec_err = xpcall(function()
+package.loaded["util"], package.preload["util"] = nil, nil
 
 local warnings = {}
 package.preload["weread.lib.logger"] = function()
@@ -44,7 +49,7 @@ end
 
 local ThoughtDB = require("weread.lib.thought_db")
 
-local root = SQ.tempdir()
+root = SQ.tempdir()
 local book_dir = root .. "/book-a"
 local db_path = book_dir .. "/thoughts.db"
 
@@ -287,6 +292,10 @@ expect(ThoughtDB.remove_db(book_dir) == true, "removing a missing database must 
 db = ThoughtDB.open(book_dir)
 expect(#ThoughtDB.getReviewItems(db, 101, "70-80") == 0, "removed database kept rows")
 ThoughtDB.close(db)
+end, debug.traceback)
 
+package.loaded["util"], package.preload["util"] = saved_util, saved_util_loader
+package.path = saved_path
 SQ.rmtree(root)
+if not spec_ok then error(spec_err, 0) end
 print(("thought_db_persistence_spec: %d checks"):format(checks))

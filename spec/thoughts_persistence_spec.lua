@@ -1,3 +1,4 @@
+local saved_path = package.path
 package.path = "./?.lua;./?/init.lua;" .. package.path
 
 -- Chapter thought pipeline (weread.lib.thoughts): preference / cookie gating,
@@ -11,6 +12,10 @@ local function expect(condition, message)
 end
 
 local SQ = require("spec.helpers.ljsqlite3_ffi")
+local saved_util, saved_util_loader = package.loaded["util"], package.preload["util"]
+local root
+local spec_ok, spec_err = xpcall(function()
+package.loaded["util"], package.preload["util"] = nil, nil
 package.preload["lua-ljsqlite3/init"] = function() return { open = SQ.open } end
 package.preload["libs/libkoreader-lfs"] = function() return SQ.lfs() end
 package.preload["util"] = function() return { makePath = SQ.makePath } end
@@ -22,7 +27,7 @@ end
 local Thoughts = require("weread.lib.thoughts")
 local ThoughtDB = require("weread.lib.thought_db")
 
-local root = SQ.tempdir()
+root = SQ.tempdir()
 -- Settings creates the cache root at startup; book directories go one level below.
 assert(SQ.lfs().mkdir(root .. "/cache"))
 
@@ -240,6 +245,10 @@ expect(Thoughts.merge_css("base", "extra") == "base\nextra", "CSS not appended")
 local merged = Thoughts.merge_css(nil, "extra")
 expect(merged:find("line-height", 1, true) and merged:sub(-6) == "\nextra",
     "default base CSS not used")
+end, debug.traceback)
 
+package.loaded["util"], package.preload["util"] = saved_util, saved_util_loader
+package.path = saved_path
 SQ.rmtree(root)
+if not spec_ok then error(spec_err, 0) end
 print(("thoughts_persistence_spec: %d checks"):format(checks))
