@@ -1022,45 +1022,74 @@ for _, failure_at in ipairs({ "flush", "account notification" }) do
     expect(l.host.refreshed == 0 and l.generation == 1, failure_at .. " failure ends the session without success UI")
 end
 
+-- Missing worker capability and temporary spawn failures are explicit,
+-- non-blocking failures; a later retry can start a fresh login session.
+for _, reason in ipairs({ "Network subprocess is unavailable.", "Could not start network subprocess." }) do
+    reset_ui()
+    local l = new_login()
+    local original = l.host._runNetworkRequest
+    function l.host:_runNetworkRequest(_text, _label, _task, _success, failure)
+        failure(reason, false)
+    end
+    l:start()
+    expect(#l.client.requests == 0, reason .. " never runs HTTP on the UI")
+    expect(l.started_at == nil and l.login_cookies == nil and l.generation == 2 and l.qr_dialog == nil,
+        reason .. " cleans up the started session and invalidates it")
+    expect(contains(l.host.infos[1], reason), reason .. " remains visible to the user")
+    l.host._runNetworkRequest = original
+    l:start()
+    expect(l.qr_dialog ~= nil, reason .. " permits a fresh retry after resources recover")
+end
+
 -- Exercise the real common network boundary, with the production mock-endpoint
 -- shortcut absent: link checks must never enter the synchronous DNS probe.
 do
-    for _, name in ipairs({ "ui/bidi", "ui/widget/confirmbox", "ui/widget/infomessage", "ui/widget/menu" }) do
-        package.loaded[name] = {}
-    end
-    package.loaded["weread.lib.plugin_util"] = {
-        tr = function(text) return text end, T = function(text) return text end,
-        log_error = tostring, display_error = tostring, unpack_args = unpack,
-    }
-    local dns, links = 0, 0
-    package.loaded["ui/network/manager"] = {
-        isConnected = function() links = links + 1; return true end,
-        isOnline = function() dns = dns + 1; error("UI DNS must not run") end,
-    }
-    local Common = require("weread.ui.common")
-    for _, stage in ipairs({ "start", "otp", "complete", "poll" }) do
-        reset_ui()
-        local l = new_login()
-        l.host.runOnlineTask = Common.runOnlineTask
-        l.host.isNetworkOnline = Common.isNetworkOnline
-        l.host.isNetworkConnected = Common.isNetworkConnected
-        if stage == "start" then l:start()
-        elseif stage == "complete" then
-            l:_complete({ succeed = true, webLoginVid = "new", accessToken = "token" }, l.generation)
-        elseif stage == "poll" then
-            l.started_at = os.time()
-            l:_poll("U", l.generation)
-        else
-            l:_show_otp("U", l.generation)
-            local dialog = l.host.inputs[1]
-            dialog.typed = "0000"
-            dialog.buttons[1][2].callback()
+    local names = { "ui/bidi", "ui/widget/confirmbox", "ui/widget/infomessage", "ui/widget/menu",
+        "weread.lib.plugin_util", "ui/network/manager", "weread.ui.common" }
+    local saved = {}
+    for _, name in ipairs(names) do saved[name] = { value = package.loaded[name] } end
+    local ok, err = pcall(function()
+        package.loaded["weread.ui.common"] = nil
+        for _, name in ipairs({ "ui/bidi", "ui/widget/confirmbox", "ui/widget/infomessage", "ui/widget/menu" }) do
+            package.loaded[name] = {}
         end
-        expect(#l.client.requests == 0, stage .. " waits for scheduled worker startup")
-        expect(run_scheduled(0.1) == 1, stage .. " starts after the UI paints")
-        expect(dns == 0, stage .. " never invokes synchronous isOnline DNS")
-    end
-    expect(links >= 4, "all four QR request entries use the real link-state check")
+        package.loaded["weread.lib.plugin_util"] = {
+            tr = function(text) return text end, T = function(text) return text end,
+            log_error = tostring, display_error = tostring, unpack_args = unpack,
+        }
+        local dns, links = 0, 0
+        package.loaded["ui/network/manager"] = {
+            isConnected = function() links = links + 1; return true end,
+            isOnline = function() dns = dns + 1; error("UI DNS must not run") end,
+        }
+        local Common = require("weread.ui.common")
+        for _, stage in ipairs({ "start", "otp", "complete", "poll" }) do
+            reset_ui()
+            local l = new_login()
+            l.host.runOnlineTask = Common.runOnlineTask
+            l.host.isNetworkOnline = Common.isNetworkOnline
+            l.host.isNetworkConnected = Common.isNetworkConnected
+            if stage == "start" then l:start()
+            elseif stage == "complete" then
+                l:_complete({ succeed = true, webLoginVid = "new", accessToken = "token" }, l.generation)
+            elseif stage == "poll" then
+                l.started_at = os.time()
+                l:_poll("U", l.generation)
+            else
+                l:_show_otp("U", l.generation)
+                local dialog = l.host.inputs[1]
+                dialog.typed = "0000"
+                dialog.buttons[1][2].callback()
+            end
+            expect(#l.client.requests == 0, stage .. " waits for scheduled worker startup")
+            expect(run_scheduled(0.1) == 1, stage .. " starts after the UI paints")
+            expect(dns == 0, stage .. " never invokes synchronous isOnline DNS")
+        end
+        expect(links >= 4, "all four QR request entries use the real link-state check")
+    end)
+    for _, name in ipairs(names) do package.loaded[name] = saved[name].value end
+    reset_ui()
+    if not ok then error(err, 0) end
 end
 
 print("qr_login_flow_spec: " .. checks .. " checks passed")

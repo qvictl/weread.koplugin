@@ -152,7 +152,14 @@ return function(H)
         reset()
         H.mock_control({ match = "/api/userInfo", delay = 1.5, times = 0 })
         local prior = H.mock_state().started_counts["/api/userInfo"] or 0
-        H.call(function() plugin.qr_login:_complete(good, plugin.qr_login.generation) end)
+        local generation
+        H.call(function()
+            plugin.qr_login.started_at = os.time()
+            plugin.qr_login.login_cookies = { wr_fp = plugin.settings:get_device_fingerprint() }
+            plugin.qr_login.session_account = plugin.qr_login:_account_id()
+            generation = plugin.qr_login.generation
+            plugin.qr_login:_complete(good, generation)
+        end)
         H.wait_until("completion HTTP started", function()
             return (H.mock_state().started_counts["/api/userInfo"] or 0) > prior
         end, 5)
@@ -165,7 +172,8 @@ return function(H)
             return getmetatable(H.input_window()) ~= TrapWidget
         end, 10)
         H.equal(account(), "900002", "account switch survives old response")
-        H.check(plugin.qr_login.started_at == nil and plugin.qr_login.login_cookies == nil,
+        H.check(plugin.qr_login.generation > generation and plugin.qr_login.session_account == nil
+                and plugin.qr_login.started_at == nil and plugin.qr_login.login_cookies == nil,
             "account mismatch clears the abandoned login session")
         H.equal(H.call(function() return plugin.settings:get("api_key", "") end), "mock-other-key",
             "old completion cannot overwrite the newer account key")
