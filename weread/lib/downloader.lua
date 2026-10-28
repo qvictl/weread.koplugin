@@ -59,6 +59,12 @@ local function apply_reader_book(book, updated)
     for _, key in ipairs(READER_BOOK_FIELDS) do book[key] = updated[key] end
 end
 
+local function account_id(settings)
+    if not settings or type(settings.get) ~= "function" then return "" end
+    local account = settings:get("account", {})
+    return type(account) == "table" and tostring(account.user_vid or "") or ""
+end
+
 local Downloader = {}
 Downloader.__index = Downloader
 -- Finalize pipeline (footnote rescan and transform of every chapter before
@@ -850,7 +856,6 @@ function Downloader:start(book, chapters, suffix, options)
         },
         single_chapter = options.single_chapter == true,
         mp_article = options.mp_article == true,
-        account_id = tostring((self.settings.get and self.settings:get("account", {}) or {}).user_vid or ""),
         separate_chapters = options.separate_chapters == true,
         include_annotations = false,
         open_on_complete = options.open_on_complete == true,
@@ -862,6 +867,7 @@ function Downloader:start(book, chapters, suffix, options)
         on_complete = options.on_complete,
         started_at = time.now(),
         auth_fingerprint = WorkerSettings.fingerprint(self.settings),
+        account_id = account_id(self.settings),
     }
     self._active_job = dl
 
