@@ -65,6 +65,9 @@ jobs:
     # UID (1001), so the mounted workspace and $RUNNER_TEMP stay writable.
     container:
       image: koreader/kobase:5.0.0-22.04
+    defaults:
+      run:
+        shell: bash
     timeout-minutes: 40
     strategy:
       fail-fast: false
