@@ -141,6 +141,7 @@ python3 scripts/mock_weread.py --port 8765 \
 | `drop` | 为 `true` 时注入的失败不返回任何 HTTP 响应，直接断开连接（模拟连接被关闭），布尔值 |
 | `empty_shelf` / `empty_annotations` | 返回空书架 / 空划线想法，布尔值 |
 | `downgrade_path` | 该路径的 https 请求返回 302，跳转到同一 URL 的 http 版本；空字符串关闭 |
+| `shelf_idless_entry` | 书架同步额外返回一条没有任何书籍 ID 的条目，布尔值 |
 
 例如让每个章节的首个分片慢 2 秒，便于在真实进度框点击取消：
 

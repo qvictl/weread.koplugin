@@ -128,7 +128,7 @@ class MockServer(ThreadingHTTPServer):
         self.events = deque(maxlen=500)
         self.progress = {}
         self.control = dict(delay=0, match="", status=503, times=0, drop=False,
-                            empty_shelf=False, empty_annotations=False,
+                            empty_shelf=False, empty_annotations=False, shelf_idless_entry=False,
                             qr_mode="succeed", qr_delay=1)
         # Path whose https requests answer 302 to the same URL over plain http.
         self.control["downgrade_path"] = ""
@@ -173,7 +173,12 @@ class MockServer(ThreadingHTTPServer):
                 if "bookId" not in data or not find_book(book_id):
                     raise ValueError("missing or unknown bookId")
             if api == "/shelf/sync":
-                return 200, dict(books=[] if control["empty_shelf"] else BOOKS, archive=[
+                books = [] if control["empty_shelf"] else BOOKS
+                if control["shelf_idless_entry"]:
+                    # A shelf entry without any book id (seen from the real
+                    # service); clients must skip it, not fail the snapshot.
+                    books = books + [dict(title="无编号条目", author="测试作者", type=0)]
+                return 200, dict(books=books, archive=[
                     dict(archiveId=1, name="旅途", bookIds=[b["bookId"] for b in BOOKS[:15]]),
                     dict(archiveId=2, name="待读", bookIds=[b["bookId"] for b in BOOKS[15:]]),
                     dict(archiveId=3, name="空分组", bookIds=[])])
@@ -408,7 +413,7 @@ class Handler(BaseHTTPRequestHandler):
                 raise ValueError("status must be 400..599")
             if not isinstance(candidate["match"], str):
                 raise ValueError("match must be a string")
-            for key in ("empty_shelf", "empty_annotations", "drop"):
+            for key in ("empty_shelf", "empty_annotations", "drop", "shelf_idless_entry"):
                 if type(candidate[key]) is not bool:
                     raise ValueError(key + " must be boolean")
             if candidate["qr_mode"] not in ("succeed", "otp", "expire"):

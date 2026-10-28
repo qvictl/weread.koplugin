@@ -765,6 +765,15 @@ function Downloader:start(book, chapters, suffix, options)
             return false
         end
     end
+    -- Same rule while the manual download still waits for the prefetch
+    -- worker to stop: it must not be overwritten (and silently lost).
+    local pending = self._pending_start
+    if pending and not (pending.options and pending.options.prefetch) then
+        if not options.prefetch then
+            self.show_transient(_("Another download is already in progress."), 1)
+        end
+        return false
+    end
 
     local active = self._active_job
     if active then

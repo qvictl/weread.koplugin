@@ -226,6 +226,44 @@ expect(deferred._active_job.standby_guard == true,
 expect(#deferred_worker.starts == 1,
     "deferred prefetch performs work in the subprocess runner")
 
+-- A manual download queued behind a stopping prefetch must not be replaced
+-- by a later prefetch (e.g. the next page turn) before the worker stops.
+scheduled = {}
+local queue_worker = fake_worker()
+local queued_transients = {}
+local queued = Downloader:new{
+    client = {},
+    settings = fake_settings(),
+    background_worker = queue_worker,
+    is_connected = function() return true end,
+    require_login = function() return true end,
+    run_online_task = function() return true end,
+    show_transient = function(text) queued_transients[#queued_transients + 1] = text end,
+    refresh_ui = function() end,
+    refresh_shelf = function() end,
+}
+queued:start(book_a, { chapter_2 }, "chapter", { prefetch = true, single_chapter = true })
+run_scheduled()
+local manual_results = {}
+expect(queued:start(book_a, { chapter_2, chapter_3 }, "full", {
+    on_complete = function(ok, reason) manual_results[#manual_results + 1] = { ok, reason } end,
+}), "manual download queues behind the prefetch")
+expect(not queued:start(book_a, { chapter_3 }, "chapter", {
+    prefetch = true, single_chapter = true,
+}), "prefetch must not replace a queued manual download")
+expect(#queued_transients == 0, "a refused prefetch stays silent")
+expect(not queued:start(book_a, { chapter_3 }, "chapter", { single_chapter = true }),
+    "a second manual download must not replace the queued one")
+expect(queued_transients[#queued_transients] == "Another download is already in progress.",
+    "the refused manual download tells the reader why")
+expect(queued._pending_start and queued._pending_start.suffix == "full",
+    "queued manual download survives a later prefetch")
+run_worker_event(queue_worker)
+run_scheduled()
+expect(queued._active_job and not queued._active_job.prefetch
+        and queued._active_job.suffix == "full",
+    "queued manual download starts once the prefetch stops")
+
 print(string.format(
     "downloader_prefetch_spec: %d checks, %d failure(s)", checks, failures))
 os.exit(failures == 0 and 0 or 1)

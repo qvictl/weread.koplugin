@@ -1483,6 +1483,41 @@ test("a stale persisted chapter jump is ignored", function()
     eq(f.values.books.book.pending_jump, nil, "expired jump removed")
 end)
 
+test("a failed upload records the real error text", function()
+    local f = fixture({
+        bookId = "book",
+        progress = 50,
+        chapterUid = 33,
+        chapterIdx = 3,
+        chapterOffset = 100,
+        updateTime = 10,
+    })
+    f.sync:on_reader_ready()
+    f.drain()
+    f.sync.upload_position = function() error("worker crashed", 0) end
+    f.choices[1].keep_local()
+    local shown = f.notifications[#f.notifications]
+    eq(shown and shown.code, "upload_failed", "thrown upload failure is shown")
+    eq(shown and shown.data.error, "worker crashed", "thrown error text is shown")
+    eq(f.values.books.book.last_sync_error, "worker crashed",
+        "thrown error text is recorded")
+
+    -- A rejection without an error text must not record a table address.
+    f.sync.upload_position = function() return false, { accepted = false } end
+    f.sync:sync_now()
+    f.choices[#f.choices].keep_local()
+    eq(f.values.books.book.last_sync_error, "upload_failed",
+        "missing error text falls back to upload_failed")
+
+    -- A scalar outcome (no table) is the error text itself.
+    f.sync.upload_position = function() return false, "gateway said no" end
+    f.sync:sync_now()
+    f.choices[#f.choices].keep_local()
+    eq(f.values.books.book.last_sync_error, "gateway said no", "scalar outcome is recorded as the error")
+    shown = f.notifications[#f.notifications]
+    eq(shown and shown.data.error, "gateway said no", "scalar outcome is shown")
+end)
+
 print(string.format(
     "progress_sync_spec: %d checks, %d failure(s)", checks, failures))
 os.exit(failures == 0 and 0 or 1)

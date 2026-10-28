@@ -104,6 +104,8 @@ Current scenarios (`python3 scripts/run_emulator_scenarios.py --list`):
 | `11_budget_200_chapters` | 200-chapter download: peak RSS growth, Lua heap growth, late/early per-chapter time, packaging and total time budgets |
 | `12_harness_taps` | the harness itself: taps wait for a dialog's painted position, also when it was shown in the predicate's own UI tick |
 | `13_https_credentials` | an https → http redirect from the service is refused; no request (and so no cookie) goes to plain http |
+| `14_shelf_snapshot` | shelf synced with an entry without a book id is still stored; the second open uses the snapshot, no second `/shelf/sync` |
+| `15_queued_manual_download` | manual download queued behind a stopping prefetch is not replaced by a later prefetch and completes |
 
 Every scenario exits non-zero on failure. Evidence per scenario: `crash.log`
 (KOReader output), `requests.jsonl` (mock requests), `result.json` (steps,

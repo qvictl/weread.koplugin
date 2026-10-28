@@ -23,7 +23,8 @@ local function encode(value)
     local ok, result = pcall(function()
         return json.encode and json.encode(value) or json:encode(value)
     end)
-    return ok and result or nil, ok and nil or result
+    if ok then return result, nil end
+    return nil, result
 end
 
 local function decode(value)
