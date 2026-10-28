@@ -346,6 +346,11 @@ host.requireLogin = function() return true end
 host.showBusy = function() end
 host.closeBusy = function() end
 host.showInfo = function() end
+host._runNetworkRequest = function(_self, _busy, _label, task, on_success, on_failure)
+    local ok, value = pcall(task)
+    if ok then return on_success(value) end
+    return on_failure(value, false)
+end
 host.runOnlineTask = function(_self, _label, callback) pending = callback return true end
 host.client.get_shelf = function()
     fetches = (fetches or 0) + 1

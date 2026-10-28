@@ -51,6 +51,7 @@ end
 package.preload["weread.lib.plugin_util"] = function()
     return {
         reader_open_perf = function() return 0 end,
+        display_error = tostring,
         tr = function(s) return s end,
         T = function(s, ...)
             local v = { ... }
@@ -104,6 +105,9 @@ package.preload["weread.lib.annotation_store"] = function()
     end }
 end
 
+for _, name in ipairs({ "ui/bidi", "ui/widget/infomessage", "ui/widget/menu" }) do
+    package.preload[name] = function() return {} end
+end
 local Controller = require("weread.ui.annotation_sync_controller")
 
 -- Minimal in-memory store with the methods the controller touches.

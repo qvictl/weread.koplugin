@@ -272,10 +272,10 @@ expect(has(last_message(), "Book info failed") and has(last_message(), "No netwo
 host:refreshBookRecord(book)
 expect(#captured == 2, "manual offline refresh re-opened the page")
 net.connected = true
-net.online = false
+net.online, net.connected = false, false
 host:refreshBookRecord(book, nil, { automatic = true })
-expect(#captured == 3 and #scheduled == 0, "refresh without internet did not fall back to the page")
-net.online = true
+expect(#captured == 3 and #scheduled == 0, "disconnected refresh did not fall back to the page")
+net.online, net.connected = true, true
 
 function client.get_book_info(_self, id)
     record_call("info", id)

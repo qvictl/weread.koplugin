@@ -1,0 +1,80 @@
+-- @title Bookshelf, book details and search keep the UI responsive during network waits
+-- @timeout 90
+-- @no_coverage Timing measures the real event loop, without LuaCov overhead.
+return function(H)
+    local UIManager = require("ui/uimanager")
+    local TrapWidget = require("ui/widget/trapwidget")
+    local plugin, book
+    H.step("setup", function()
+        plugin = H.wait_until("plugin attached", function() return H.plugin() end, 20)
+        book = H.call(function() return H.runtime().client:get_book_info("900001") end)
+    end)
+
+    local cases = {
+        { name = "shelf", api = "/shelf/sync",
+            start = function() plugin:refreshBookshelf() end,
+            done = function() return plugin.shelf_view and not plugin.shelf_refreshing end },
+        { name = "details", api = "/book/info",
+            start = function() plugin:refreshBookRecord(book) end,
+            done = function() return book.detail_updated_at end },
+        { name = "search", api = "/store/search",
+            start = function() plugin:searchWithUI("山谷") end,
+            done = function() return H.has_text((H.tr("Search: %1"):gsub("%%1", "山谷"))) end },
+    }
+    local gaps = {}
+    for _, case in ipairs(cases) do
+        H.step(case.name .. " network delay", function()
+            H.mock_control({ match = case.api, delay = 1.5, times = 0 })
+            local running, last, max_gap = true, H.now_ms(), 0
+            local function beat()
+                if not running then return end
+                local now = H.now_ms()
+                max_gap, last = math.max(max_gap, now - last), now
+                UIManager:scheduleIn(0.05, beat)
+            end
+            H.call(function() beat(); case.start() end)
+            H.wait_until(case.name .. " rendered", case.done, 20)
+            H.sleep(0.1)
+            running = false
+            gaps[case.name] = max_gap
+            H.metric(case.name .. "_heartbeat_gap_ms", max_gap)
+            H.mock_control({ match = "", delay = 0, times = 0 })
+            H.call(function() plugin:closeWeReadUI() end)
+            H.close_dialogs()
+        end)
+    end
+    H.step("UI budget", function()
+        for name, gap in pairs(gaps) do
+            H.check(gap < 800, name .. " request keeps the event loop responsive", tostring(gap))
+        end
+    end)
+    for _, case in ipairs(cases) do
+        H.step(case.name .. " cancellation", function()
+            book.detail_updated_at = nil
+            local prior = #H.mock_requests(function(event) return event.api == case.api end)
+            H.mock_control({ match = case.api, delay = 1.5, times = 0 })
+            H.call(case.start)
+            H.wait_until("dismissable request shown", function()
+                local top = H.input_window()
+                return top and getmetatable(top) == TrapWidget
+            end, 5)
+            H.sleep(0.2)
+            local started = H.now_ms()
+            H.tap_at(580, 20)
+            H.wait_until("request dismissed", function()
+                local top = H.input_window()
+                return not top or getmetatable(top) ~= TrapWidget
+            end, 5)
+            local elapsed = H.now_ms() - started
+            H.metric(case.name .. "_cancel_ms", elapsed)
+            H.check(elapsed < 800, "tap cancels without waiting for HTTP", tostring(elapsed))
+            H.equal(plugin.busy_message, nil, "busy message released on cancel")
+            H.equal(plugin.shelf_refreshing, nil, "shelf refresh lock released on cancel")
+            H.sleep(1.7)
+            H.check(#H.mock_requests(function(event) return event.api == case.api end) > prior,
+                "cancelled worker reached the delayed mock endpoint")
+            H.check(not case.done(), "cancelled response does not update or reopen UI")
+            H.mock_control({ match = "", delay = 0, times = 0 })
+        end)
+    end
+end

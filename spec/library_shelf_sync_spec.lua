@@ -205,7 +205,7 @@ expect(qr_starts == 1, "logged-out shelf open did not start the QR login")
 -- 2. Logged in but offline: the online check fails, the busy message is
 -- closed, nothing is deferred and the lock is released at once.
 login.api = true
-net.online = false
+net.online, net.connected = false, false
 host:showBookshelf()
 local busy = last_of("info")
 expect(#scheduled == 0, "offline shelf open queued deferred work")
@@ -222,7 +222,7 @@ expect(busy_closed, "offline shelf open never closed its busy message")
 
 -- 3. Back online: the request runs deferred, off the caller's stack, and
 -- the result is cached, split into books/public accounts and shown.
-net.online = true
+net.online, net.connected = true, true
 host:showBookshelf()
 expect(host.shelf_refreshing == true and host.busy_message ~= nil and client.shelf_calls == 0,
     "online shelf open ran the request synchronously")
@@ -290,12 +290,12 @@ expect(host.shelf_refreshing == nil and host.busy_message == nil, "failed sync s
 
 -- Offline refresh from the open shelf: the refreshing state is cleared.
 client.shelf_error = nil
-net.online = false
+net.online, net.connected = false, false
 view.callbacks.on_refresh()
 expect(view.refreshing == false and host.shelf_refreshing == nil and #scheduled == 0,
     "offline refresh kept the shelf in the refreshing state")
 expect(has(last_message(), "No network connection"), "offline refresh was silent")
-net.online = true
+net.online, net.connected = true, true
 view.callbacks.on_refresh()
 drain()
 expect(client.shelf_calls == 4 and last_view() ~= view, "refresh after a failure did not recover")
@@ -433,11 +433,11 @@ expect(closed[dialog] and #scheduled == 0, "cancelled store search ran a request
 host:searchWithUI("")
 host:searchWithUI(nil)
 expect(#scheduled == 0 and #client.requests == 0, "empty store search ran a request")
-net.online = false
+net.online, net.connected = false, false
 host:searchWithUI("three body")
 expect(#scheduled == 0 and #client.requests == 0 and has(last_message(), "Search failed"),
     "offline store search did not fail fast")
-net.online = true
+net.online, net.connected = true, true
 search_results = { results = {
     { books = {
         { bookInfo = { bookId = "b1", title = "Three Body", author = "Liu", category = "SF" } },
