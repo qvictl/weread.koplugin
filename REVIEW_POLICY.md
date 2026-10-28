@@ -158,13 +158,15 @@ gh api -X PATCH repos/$R -F allow_auto_merge=true
 echo '{"deployment_branch_policy":{"protected_branches":false,"custom_branch_policies":true}}' | gh api -X PUT repos/$R/environments/review-gate --input -
 gh api -X POST repos/$R/environments/review-gate/deployment-branch-policies -f name=main -f type=branch
 gh secret set REVIEW_GATE_MERGE_TOKEN -R $R --env review-gate
-# 不能留仓库级副本（分支上的工作流能读到）：存在就删除，删除失败或删除后仍存在就停止
-if gh api repos/$R/actions/secrets --jq '.secrets[].name' | grep -qx REVIEW_GATE_MERGE_TOKEN; then
-  gh secret delete REVIEW_GATE_MERGE_TOKEN -R $R || exit 1
-fi
-gh api repos/$R/actions/secrets --jq '.secrets[].name' | grep -qx REVIEW_GATE_MERGE_TOKEN && exit 1
-gh api -X PATCH repos/$R/actions/variables/REVIEW_GATE_AUTOMERGE -f value=on \
-  || gh api -X POST repos/$R/actions/variables -f name=REVIEW_GATE_AUTOMERGE -f value=on
+# 不能留仓库级副本（分支上的工作流能读到）。在 set -euo pipefail 的子 shell 里执行：任何 API 错误都会中止，
+# 只有确认仓库级 secret 不存在后才打开开关
+( set -euo pipefail
+  names=$(gh api --paginate repos/$R/actions/secrets --jq '.secrets[].name')
+  if grep -qx REVIEW_GATE_MERGE_TOKEN <<<"$names"; then gh secret delete REVIEW_GATE_MERGE_TOKEN -R $R; fi
+  names=$(gh api --paginate repos/$R/actions/secrets --jq '.secrets[].name')
+  if grep -qx REVIEW_GATE_MERGE_TOKEN <<<"$names"; then echo 'repository-level token still present' >&2; exit 1; fi
+  gh api -X PATCH repos/$R/actions/variables/REVIEW_GATE_AUTOMERGE -f value=on \
+    || gh api -X POST repos/$R/actions/variables -f name=REVIEW_GATE_AUTOMERGE -f value=on )
 
 # 3. main 需要 1 个批准；新提交使旧批准失效；不要求 CODEOWNERS
 gh api -X PATCH repos/$R/branches/main/protection/required_pull_request_reviews \
@@ -187,17 +189,20 @@ gh api repos/$R --jq '{allow_auto_merge}'
 所有 PR 仍需必需检查全部通过（`enforce_admins` 使管理员也不能绕过）。
 
 回退到咨询模式（批准数改回 0，网关继续报告）。先关掉所有打开 PR 上已开启的自动合并（批准数变为 0 后，
-它们会立刻按旧的批准合并），再改保护规则：
+它们会立刻按旧的批准合并），确认一个都不剩，才改保护规则（子 shell 中任何一步失败都会中止）：
 
 ```sh
-for n in $(gh api "repos/$R/pulls?state=open&per_page=100" --jq '.[].number'); do
-  id=$(gh api repos/$R/pulls/$n --jq .node_id)
-  gh api graphql -f query='mutation($id:ID!){disablePullRequestAutoMerge(input:{pullRequestId:$id}){clientMutationId}}' -f id=$id >/dev/null 2>&1 || true   # 没开自动合并的 PR 会报错，忽略
-done
-gh api graphql -f query='{repository(owner:"qvictl",name:"weread.koplugin"){pullRequests(states:OPEN,first:100){nodes{number autoMergeRequest{enabledAt}}}}}' --jq '[.data.repository.pullRequests.nodes[] | select(.autoMergeRequest)] | length'   # 必须是 0
-gh api -X PATCH repos/$R/branches/main/protection/required_pull_request_reviews \
-  -F required_approving_review_count=0 -F dismiss_stale_reviews=false \
-  -F require_code_owner_reviews=false -F require_last_push_approval=false
+( set -euo pipefail
+  # REST 列表带 auto_merge 字段；--paginate 覆盖全部打开的 PR。任何错误都会中止。
+  ids=$(gh api --paginate "repos/$R/pulls?state=open&per_page=100" --jq '.[] | select(.auto_merge != null) | .node_id')
+  for id in $ids; do
+    gh api graphql -f query='mutation($id:ID!){disablePullRequestAutoMerge(input:{pullRequestId:$id}){clientMutationId}}' -f id=$id >/dev/null
+  done
+  left=$(gh api --paginate "repos/$R/pulls?state=open&per_page=100" --jq '.[] | select(.auto_merge != null) | .number')
+  if [ -n "$left" ]; then echo "auto-merge still enabled on: $left" >&2; exit 1; fi
+  gh api -X PATCH repos/$R/branches/main/protection/required_pull_request_reviews \
+    -F required_approving_review_count=0 -F dismiss_stale_reviews=false \
+    -F require_code_owner_reviews=false -F require_last_push_approval=false )
 ```
 
 紧急情况（网关或 AI 应用故障且必须合并）：先设 `REVIEW_GATE_DRY_RUN=true`

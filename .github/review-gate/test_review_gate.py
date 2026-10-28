@@ -670,9 +670,12 @@ class OverrideTest(GateCase):
         self.label("qvictl")
         v = self.run_gate()
         self.assertTrue(v.override)
-        self.assertIn("<!-- review-gate:override head=%s -->" % HEAD, self.body)
-        # A later run (no labeled event) reads the binding from the sticky comment.
-        self.state["comments"] = [{"id": 5, "user": {"login": "github-actions[bot]"}, "body": self.body}]
+        # A later run (no labeled event) reads the binding from the gate's override record,
+        # even when the sticky comment was rewritten without it.
+        self.state["comments"] = [
+            {"id": 3, "user": {"login": "github-actions[bot]"}, "body": "<!-- review-gate:override head=%s -->" % OLD},
+            {"id": 4, "user": {"login": "github-actions[bot]"}, "body": "<!-- review-gate:override head=%s -->" % HEAD},
+            {"id": 5, "user": {"login": "github-actions[bot]"}, "body": self.body}]
         self.label_head = None
         self.assertTrue(self.run_gate().override)
         # New head (push after the label, or back to an old SHA): no longer covered.
@@ -693,7 +696,7 @@ class OverrideTest(GateCase):
         self.label("qvictl")
         self.label_head = None
         self.state["comments"] = [{"id": 4, "user": {"login": "mallory"},
-                                   "body": rg.MARKER + "\n<!-- review-gate:override head=%s -->" % HEAD}]
+                                   "body": "<!-- review-gate:override head=%s -->" % HEAD}]
         self.assertFalse(self.run_gate().override)
 
     def test_label_without_event_is_ignored(self):
@@ -832,13 +835,14 @@ class ScheduleTest(GateCase):
         self.assertTrue(self.needs(self.sticky("ai", head=OLD)))
         self.assertTrue(self.needs(self.sticky("threads")))
         self.assertTrue(self.needs(self.sticky("")))
-        self.assertFalse(self.needs(self.sticky("ai,threads")))
+        self.assertTrue(self.needs(self.sticky("ai,threads")))
+        self.assertTrue(self.needs(self.sticky("ai")))
         self.assertFalse(self.needs(self.sticky("checks,ai")))
         self.assertFalse(self.needs(self.sticky("sensitive,author")))
         slot = rg.datetime(2026, 10, 28, 12, 7, tzinfo=rg.timezone.utc)
-        self.assertTrue(rg.schedule_needs_eval(self.state["pr"], self.sticky("ai"), slot)[0])
+        self.assertTrue(rg.schedule_needs_eval(self.state["pr"], self.sticky("size"), slot)[0])
         late = rg.datetime(2026, 10, 28, 12, 22, tzinfo=rg.timezone.utc)
-        self.assertFalse(rg.schedule_needs_eval(self.state["pr"], self.sticky("ai"), late)[0])
+        self.assertFalse(rg.schedule_needs_eval(self.state["pr"], self.sticky("size"), late)[0])
 
     def test_schedule_run_only_evaluates_changed_prs(self):
         self.run_gate()  # produce a real body: OK state
@@ -886,8 +890,10 @@ class MainTest(unittest.TestCase):
                 rg.GitHub = old_cls  # type: ignore
                 os.environ.clear()
                 os.environ.update(old_env)
-        comment = next(w for w in fake.writes if w[0] == "POST" and w[1].endswith("/comments"))
-        self.assertIn("<!-- review-gate:override head=%s -->" % HEAD, comment[2]["body"])
+        posts = [w[2]["body"] for w in fake.writes if w[0] == "POST" and w[1].endswith("/comments")]
+        self.assertEqual(len(posts), 2)  # sticky comment + separate override record
+        self.assertNotIn("override head", posts[0])
+        self.assertIn("<!-- review-gate:override head=%s -->" % HEAD, posts[1])
 
     def test_main_event_mode_end_to_end(self):
         state = base_state()

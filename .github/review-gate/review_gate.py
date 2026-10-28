@@ -57,7 +57,7 @@ MARKER = "<!-- review-gate -->"
 APPROVAL_MARKER = "<!-- review-gate:approve -->"
 AUTOMERGE_STATE = "<!-- review-gate:automerge=on -->"
 # The commit a maintainer's `human-approved` was applied to (head SHA in the
-# `labeled` event's payload), carried in the gate's own sticky comment.
+# `labeled` event's payload), recorded in a separate gate comment.
 OVERRIDE_RE = re.compile(r"<!-- review-gate:override head=([0-9a-f]{40}) -->")
 STATE_RE = re.compile(r"<!-- review-gate:state head=([0-9a-f]+) blockers=([a-z,]*) -->")
 # Scheduled runs re-evaluate a PR only when it may have changed without an
@@ -321,8 +321,7 @@ def collect(gh: GitHub, repo: str, number: int, repo_info: Optional[Dict[str, An
     if OVERRIDE_LABEL in facts.labels:
         facts.override_actor, facts.override_role, facts.override_error = labeler_role(
             gh, repo, number, facts.owner_login)
-        bound = OVERRIDE_RE.search((sticky or {}).get("body", ""))
-        facts.override_head = label_head or (bound.group(1) if bound else None)
+        facts.override_head = label_head or bound_override_head(comments)
         if not facts.override_error and facts.override_head != head:
             facts.override_error = (
                 "它是在提交 `%s` 上添加的，当前 head 是 `%s`：管理员看过新改动后需移除并重新添加"
@@ -336,6 +335,19 @@ def collect(gh: GitHub, repo: str, number: int, repo_info: Optional[Dict[str, An
         except ApiError:
             facts.author_merged_prs = None
     return facts
+
+
+def bound_override_head(comments: List[Dict[str, Any]]) -> Optional[str]:
+    """Head SHA from the gate's latest override record. Records are separate
+    comments that only the run of a `labeled` event creates and nothing
+    edits, so concurrent runs updating the sticky comment cannot lose them."""
+    head = None
+    for c in comments:
+        if (c.get("user") or {}).get("login") == GATE_LOGIN:
+            m = OVERRIDE_RE.search(c.get("body", ""))
+            if m:
+                head = m.group(1)
+    return head
 
 
 def labeler_role(gh: GitHub, repo: str, number: int, owner_login: str) -> Tuple[Optional[str], Optional[str], Optional[str]]:
@@ -670,8 +682,6 @@ def render(facts: Facts, verdict: Verdict, automerge_on: bool) -> str:
     head = facts.head_sha
     keys = [c.key for c in verdict.blockers] + ([] if verdict.approvable else ["author"])
     lines = [MARKER, "<!-- review-gate:state head=%s blockers=%s -->" % (head, ",".join(keys))]
-    if facts.override_head and OVERRIDE_LABEL in facts.labels:
-        lines.append("<!-- review-gate:override head=%s -->" % facts.override_head)
     if automerge_on:
         lines.append(AUTOMERGE_STATE)
     if verdict.ok:
@@ -876,8 +886,10 @@ def schedule_needs_eval(pr: Dict[str, Any], sticky: Optional[Dict[str, Any]], no
     head, blockers = m.group(1), set(filter(None, m.group(2).split(",")))
     if head != pr["head"]["sha"]:
         return True, "head moved"
-    if blockers <= {"threads"}:
-        return True, "approved or only blocked by threads"
+    if blockers <= {"threads", "ai"}:
+        # No event fires when a thread is resolved, nor (in general) when
+        # CodeRabbit's check suite completes on a SHA that already has one.
+        return True, "approved or only blocked by AI review / threads"
     # The comment is not edited when unchanged, so its age cannot drive the
     # refresh: use fixed slots instead (one scheduled run per slot).
     if now.hour % SCHEDULE_REFRESH_HOURS == 0 and now.minute < 15:
@@ -906,6 +918,14 @@ def process(gh: GitHub, merge_gh: Optional[GitHub], repo: str, number: int, conf
     actions, automerge_on = apply(gh, merge_gh, facts, verdict, dry_run, defer_automerge=defer_automerge)
     body = render(facts, verdict, automerge_on)
     result = upsert_comment(gh, facts, body, dry_run)
+    if label_head and facts.override_actor and not dry_run:
+        try:
+            gh.request("POST", "repos/%s/issues/%d/comments" % (repo, number), {"body": (
+                "审查网关：`%s` 由 @%s 添加于提交 `%s`，只对这个提交有效；之后有新提交需重新添加。\n"
+                "<!-- review-gate:override head=%s -->"
+                % (OVERRIDE_LABEL, facts.override_actor, label_head[:10], label_head))})
+        except ApiError as err:
+            print("::warning::#%d: override record not written: %s" % (number, err))
     print("#%d %s: %s; comment %s; actions: %s" % (
         number, facts.head_sha[:10], "OK" if verdict.ok else "blocked by " + ",".join(c.key for c in verdict.blockers),
         result, "; ".join(actions) or "none"))
