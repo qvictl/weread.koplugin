@@ -17,6 +17,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -296,6 +297,25 @@ class RatchetBaselineTest(unittest.TestCase):
             shas = [r["sha"] for r in ct.read_history(site / "history.jsonl")]
             self.assertEqual(shas, ["b" * 40, "a" * 40])
             self.assertEqual(json.loads((site / "baseline.json").read_text())["unit"]["percent"], 50.0)
+
+    def test_baseline_command_older_commit_updates_history_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            report = Path(tmp) / "report.out"
+            report.write_text(luacov_report({"weread/lib/m.lua": [(1, "a()"), (0, "b()")]}), encoding="utf-8")
+            site = Path(tmp) / "site"
+            site.mkdir()
+            published = {name: f"{name} of the newer commit\n"
+                         for name in ("baseline.json", "badge.json", "badge-unit.json")}
+            for name, text in published.items():
+                (site / name).write_text(text, encoding="utf-8")
+            args = argparse.Namespace(unit=str(report), combined=str(report), sha="c" * 40, run_url="",
+                                      out_dir=str(site))
+            with mock.patch.object(ct, "is_newest_publish", return_value=False), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(ct.baseline(args), 0)
+            self.assertEqual([r["sha"] for r in ct.read_history(site / "history.jsonl")], ["c" * 40])
+            for name, text in published.items():
+                self.assertEqual((site / name).read_text(encoding="utf-8"), text, name)
 
 
 if __name__ == "__main__":

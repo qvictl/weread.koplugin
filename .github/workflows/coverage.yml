@@ -120,14 +120,15 @@ jobs:
               git -C "$site" checkout -q --orphan coverage || return 1
               git -C "$site" rm -rfq . || return 1
             fi
-            if [[ -f "$site/history.jsonl" ]] && jq -e --arg sha "$SHA" 'select(.sha == $sha)' "$site/history.jsonl" >/dev/null 2>&1; then
-              echo "Coverage for $SHA already published."
-              return 0
-            fi
+            # A re-run for an already published commit replaces its record.
             python3 scripts/coverage_tools.py baseline \
               --unit coverage/unit.report.out --combined coverage/combined.report.out \
               --sha "$SHA" --run-url "$RUN_URL" --out-dir "$site" || return 1
             git -C "$site" add -A baseline.json history.jsonl badge.json badge-unit.json README.md || return 1
+            if git -C "$site" diff --cached --quiet; then
+              echo "Coverage for $SHA unchanged."
+              return 0
+            fi
             git -C "$site" -c user.name="github-actions[bot]" \
                 -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
                 commit -q -m "coverage: ${SHA:0:8} $(record .combined.percent)% (unit $(record .unit.percent)%)" || return 1
