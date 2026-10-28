@@ -46,8 +46,11 @@ function ThoughtDB.open(book_dir)
         return nil
     end
 
-    local lfs = require("libs/libkoreader-lfs")
-    lfs.mkdir(book_dir)
+    local made, err = require("util").makePath(book_dir)
+    if not made then
+        logger.warn("thought_db directory creation failed:", book_dir, err)
+        return nil
+    end
     local db_path = book_dir .. "/thoughts.db"
 
     local ok, db = pcall(SQ3.open, db_path)

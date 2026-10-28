@@ -1,3 +1,4 @@
+local saved_path = package.path
 package.path = "./?.lua;./?/init.lua;" .. package.path
 
 -- Per-book thought storage (thoughts.db) against a real SQLite file: schema
@@ -12,6 +13,17 @@ local function expect(condition, message)
 end
 
 local SQ = require("spec.helpers.ljsqlite3_ffi")
+local module_names = {
+    "util", "weread.lib.logger", "libs/libkoreader-lfs", "lua-ljsqlite3/init",
+    "weread.lib.thought_db", "weread.lib.annotations",
+}
+local saved_modules = {}
+for _, name in ipairs(module_names) do
+    saved_modules[name] = { loaded = package.loaded[name], preload = package.preload[name] }
+end
+local root
+local spec_ok, spec_err = xpcall(function()
+for _, name in ipairs(module_names) do package.loaded[name], package.preload[name] = nil, nil end
 
 local warnings = {}
 package.preload["weread.lib.logger"] = function()
@@ -27,6 +39,7 @@ package.preload["weread.lib.logger"] = function()
     }
 end
 package.preload["libs/libkoreader-lfs"] = function() return SQ.lfs() end
+package.preload["util"] = function() return { makePath = SQ.makePath } end
 
 -- The binding module is resolved lazily on every open(); start "unavailable".
 local binding_available = false
@@ -43,7 +56,7 @@ end
 
 local ThoughtDB = require("weread.lib.thought_db")
 
-local root = SQ.tempdir()
+root = SQ.tempdir()
 local book_dir = root .. "/book-a"
 local db_path = book_dir .. "/thoughts.db"
 
@@ -103,9 +116,7 @@ expect(not tables.reviews, "legacy reviews table was not dropped")
 local journal = SQ.rows(db, "PRAGMA journal_mode")[1][1]
 expect(journal == "wal", "database not switched to WAL: " .. tostring(journal))
 
--- open() creates a missing book directory (one level, like libkoreader-lfs
--- mkdir; the cache root above it already exists in production).
-expect(SQ.lfs().mkdir(root .. "/nested") == true, "could not create the parent directory")
+-- open() creates a missing book directory and its missing parent.
 local fresh_dir = root .. "/nested/book-b"
 local fresh = ThoughtDB.open(fresh_dir)
 expect(fresh ~= nil and SQ.exists(fresh_dir .. "/thoughts.db"), "missing book directory not created")
@@ -288,6 +299,12 @@ expect(ThoughtDB.remove_db(book_dir) == true, "removing a missing database must 
 db = ThoughtDB.open(book_dir)
 expect(#ThoughtDB.getReviewItems(db, 101, "70-80") == 0, "removed database kept rows")
 ThoughtDB.close(db)
+end, debug.traceback)
 
+for _, name in ipairs(module_names) do
+    package.loaded[name], package.preload[name] = saved_modules[name].loaded, saved_modules[name].preload
+end
+package.path = saved_path
 SQ.rmtree(root)
+if not spec_ok then error(spec_err, 0) end
 print(("thought_db_persistence_spec: %d checks"):format(checks))

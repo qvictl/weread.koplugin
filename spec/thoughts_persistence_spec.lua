@@ -1,3 +1,4 @@
+local saved_path = package.path
 package.path = "./?.lua;./?/init.lua;" .. package.path
 
 -- Chapter thought pipeline (weread.lib.thoughts): preference / cookie gating,
@@ -11,8 +12,20 @@ local function expect(condition, message)
 end
 
 local SQ = require("spec.helpers.ljsqlite3_ffi")
+local module_names = {
+    "util", "weread.lib.logger", "libs/libkoreader-lfs", "lua-ljsqlite3/init",
+    "weread.lib.thoughts", "weread.lib.thought_db", "weread.lib.annotations", "weread.lib.content",
+}
+local saved_modules = {}
+for _, name in ipairs(module_names) do
+    saved_modules[name] = { loaded = package.loaded[name], preload = package.preload[name] }
+end
+local root
+local spec_ok, spec_err = xpcall(function()
+for _, name in ipairs(module_names) do package.loaded[name], package.preload[name] = nil, nil end
 package.preload["lua-ljsqlite3/init"] = function() return { open = SQ.open } end
 package.preload["libs/libkoreader-lfs"] = function() return SQ.lfs() end
+package.preload["util"] = function() return { makePath = SQ.makePath } end
 package.preload["weread.lib.logger"] = function()
     local noop = function() end
     return { dbg = noop, info = noop, warn = noop, err = noop }
@@ -21,7 +34,7 @@ end
 local Thoughts = require("weread.lib.thoughts")
 local ThoughtDB = require("weread.lib.thought_db")
 
-local root = SQ.tempdir()
+root = SQ.tempdir()
 -- Settings creates the cache root at startup; book directories go one level below.
 assert(SQ.lfs().mkdir(root .. "/cache"))
 
@@ -239,6 +252,12 @@ expect(Thoughts.merge_css("base", "extra") == "base\nextra", "CSS not appended")
 local merged = Thoughts.merge_css(nil, "extra")
 expect(merged:find("line-height", 1, true) and merged:sub(-6) == "\nextra",
     "default base CSS not used")
+end, debug.traceback)
 
+for _, name in ipairs(module_names) do
+    package.loaded[name], package.preload[name] = saved_modules[name].loaded, saved_modules[name].preload
+end
+package.path = saved_path
 SQ.rmtree(root)
+if not spec_ok then error(spec_err, 0) end
 print(("thoughts_persistence_spec: %d checks"):format(checks))
