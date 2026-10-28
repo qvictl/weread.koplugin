@@ -120,19 +120,19 @@ gh api repos/$R/branches/main/protection --jq '{approvals: .required_pull_reques
   else
     gh api -X POST repos/$R/actions/variables -f name=REVIEW_GATE_DRY_RUN -f value=true
   fi
-  active() {
+  active() {   # every request must succeed (errexit does not apply inside $(...))
     for st in queued in_progress waiting pending requested; do
-      gh api --paginate "repos/$R/actions/workflows/review-gate.yml/runs?status=$st&per_page=100" --jq '.workflow_runs[].id'
+      gh api --paginate "repos/$R/actions/workflows/review-gate.yml/runs?status=$st&per_page=100"         --jq '.workflow_runs[].id' || return 1
     done
   }
-  ids=$(active)
+  ids=$(active) || exit 1
   for id in $ids; do
     if ! gh api -X POST repos/$R/actions/runs/$id/cancel >/dev/null 2>&1; then
       st=$(gh api repos/$R/actions/runs/$id --jq .status)   # 409: already finished
       [ "$st" = completed ] || { echo "cannot cancel run $id ($st)" >&2; exit 1; }
     fi
   done
-  for i in $(seq 1 20); do left=$(active); [ -z "$left" ] && break; sleep 15; done
+  for i in $(seq 1 20); do left=$(active) || exit 1; [ -z "$left" ] && break; sleep 15; done
   if [ -n "$left" ]; then echo "review gate runs still active: $left" >&2; exit 1; fi
   ids=$(gh api --paginate "repos/$R/pulls?state=open&per_page=100" --jq '.[] | select(.auto_merge != null) | .node_id')
   for id in $ids; do
