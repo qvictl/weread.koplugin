@@ -575,6 +575,8 @@ function Downloader:_startPrefetchWorker(dl)
         replace_active = true,
         timeout = 180,
         task = function(context)
+            -- The shared worker can launch this queued request after login.
+            if dl.account_id ~= account_id(self.settings) then error("account_changed", 0) end
             return ChapterWorker.run(self.settings, self.client, dl.book,
                 dl.chapters[1], context)
         end,

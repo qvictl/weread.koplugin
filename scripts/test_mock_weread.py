@@ -13,6 +13,32 @@ from mock_weread import (BIG_BOOK_ID, BIG_CHAPTER_COUNT, BOOK_ID, BOOKS, CHAPTER
                          chapter_html, shards)
 
 
+class ObservedGate:
+    """Expose wait entry/return, optionally pausing before the underlying wait."""
+    def __init__(self, event, pause=False):
+        self.event = event
+        self.entered = threading.Event()
+        self.returned = threading.Event()
+        self.resume = threading.Event()
+        if not pause:
+            self.resume.set()
+
+    def wait(self, timeout=None):
+        self.entered.set()
+        try:
+            if not self.resume.wait(timeout):
+                return False
+            return self.event.wait(timeout)
+        finally:
+            self.returned.set()
+
+    def set(self):
+        self.event.set()
+
+    def clear(self):
+        self.event.clear()
+
+
 class MockTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -106,8 +132,10 @@ class MockTests(unittest.TestCase):
 
     def test_explicit_response_gate(self):
         endpoint = "/book/getprogress"
-        before = self.request("/__state")[1]["started_counts"].get(endpoint, 0)
         self.assertEqual(self.request("/__control", dict(match=endpoint, hold_response=True))[0], 200)
+        with self.server.lock:
+            gate = ObservedGate(self.server.response_gate)
+            self.server.response_gate = gate
         results, done = [], threading.Event()
 
         def fetch():
@@ -119,10 +147,8 @@ class MockTests(unittest.TestCase):
         thread = threading.Thread(target=fetch)
         thread.start()
         try:
-            deadline = time.monotonic() + 2
-            while self.request("/__state")[1]["started_counts"].get(endpoint, 0) == before:
-                self.assertLess(time.monotonic(), deadline, "request never reached gate")
-                done.wait(0.01)
+            self.assertTrue(gate.entered.wait(timeout=2), "request never called gate.wait")
+            self.assertFalse(gate.returned.is_set(), "gate.wait returned before explicit release")
             self.assertFalse(done.is_set(), "held response finished before explicit release")
         finally:
             self.request("/__control", dict(hold_response=False))
@@ -130,6 +156,36 @@ class MockTests(unittest.TestCase):
         self.assertFalse(thread.is_alive())
         self.assertEqual(results[0][0], 200)
         self.assertEqual(self.request("/__control", dict(hold_response=1))[0], 400)
+
+    def test_released_request_cannot_be_captured_by_the_next_gate(self):
+        endpoint = "/book/getprogress"
+        self.request("/__control", dict(match=endpoint, hold_response=True))
+        with self.server.lock:
+            old_gate = ObservedGate(self.server.response_gate, pause=True)
+            self.server.response_gate = old_gate
+        results, done = [], threading.Event()
+
+        def fetch():
+            try:
+                results.append(self.gateway(endpoint, bookId=BOOK_ID))
+            finally:
+                done.set()
+
+        thread = threading.Thread(target=fetch)
+        thread.start()
+        try:
+            self.assertTrue(old_gate.entered.wait(timeout=2))
+            self.request("/__control", dict(hold_response=False))
+            self.request("/__control", dict(hold_response=True))
+            old_gate.resume.set()
+            self.assertTrue(done.wait(timeout=2), "next gate recaptured an already released request")
+            self.assertEqual(results[0][0], 200)
+            self.assertFalse(self.server.response_gate.is_set(), "old request released the next round")
+        finally:
+            old_gate.resume.set()
+            self.request("/__control", dict(hold_response=False))
+            thread.join(timeout=3)
+        self.assertFalse(thread.is_alive())
 
     def test_fault_once_delay_and_recovery(self):
         self.request("/__control", dict(match="/book/info", times=1, status=503, delay=0.02))

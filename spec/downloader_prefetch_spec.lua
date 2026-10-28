@@ -366,6 +366,29 @@ for _, change in ipairs({ "before_launch", "after_worker", "ticket" }) do
     expect(account_downloader._active_job == nil and (account_downloader._standby_ref or 0) == 0,
         change .. " stranded prefetch active slot/standby")
 end
+-- A task queued behind another worker rechecks identity in the child too.
+scheduled = {}
+local pending_settings = fake_settings()
+pending_settings:set("account", { user_vid = "one" })
+local pending_worker = fake_worker()
+local pending_dl = Downloader:new{
+    settings = pending_settings, client = {}, background_worker = pending_worker,
+    require_login = function() return true end,
+}
+local ChapterWorker = require("weread.lib.chapter_prefetch_worker")
+local original_run, child_requests = ChapterWorker.run, 0
+ChapterWorker.run = function() child_requests = child_requests + 1; return {} end
+pending_dl:start({ book_id = "queued" }, { chapter_2 }, "chapter", { prefetch = true, single_chapter = true })
+run_scheduled()
+pending_settings:set("account", { user_vid = "two" })
+local task_ok, task_err = pcall(pending_worker.starts[1].options.task, {})
+ChapterWorker.run = original_run
+expect(not task_ok and tostring(task_err):find("account_changed", 1, true) and child_requests == 0,
+    "queued old-account task issued requests with new credentials")
+pending_worker.starts[1].options.on_done({ ok = false, error = task_err })
+expect(pending_dl._active_job == nil and (pending_dl._standby_ref or 0) == 0,
+    "queued account rejection stranded downloader/standby")
+
 os.remove(downloaded_path)
 
 -- MP jobs use the same active slot and capture identity before deferred work.

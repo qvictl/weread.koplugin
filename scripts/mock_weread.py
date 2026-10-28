@@ -158,6 +158,7 @@ class MockServer(ThreadingHTTPServer):
             request_key = api or path
             self.started_counts[request_key] = self.started_counts.get(request_key, 0) + 1
             control = self.control.copy()
+            response_gate = self.response_gate
             matches = not control["match"] or control["match"] in (api or path)
             fail = matches and control["times"] != 0
             if fail and control["times"] > 0:
@@ -165,7 +166,7 @@ class MockServer(ThreadingHTTPServer):
         if matches:
             # Tests release this explicitly after the parent mutation. The
             # timeout bounds abandoned test requests, not their ordering.
-            if control["hold_response"] and not self.response_gate.wait(timeout=30):
+            if control["hold_response"] and not response_gate.wait(timeout=30):
                 return 504, dict(errcode=-1, errmsg="Synthetic response gate timed out")
             time.sleep(control["delay"])
         if fail and control["drop"]:
@@ -445,11 +446,11 @@ class Handler(BaseHTTPRequestHandler):
                 raise ValueError("qr_delay must be 0..10 seconds")
             if not isinstance(candidate["downgrade_path"], str):
                 raise ValueError("downgrade_path must be a string")
-            self.server.control = candidate
-            if candidate["hold_response"]:
-                self.server.response_gate.clear()
-            else:
+            if candidate["hold_response"] and not self.server.control["hold_response"]:
+                self.server.response_gate = threading.Event()
+            elif not candidate["hold_response"]:
                 self.server.response_gate.set()
+            self.server.control = candidate
 
 
 def prepare(run_dir, runtime, port):
