@@ -47,6 +47,7 @@ return function(H)
         H.step("cancel during " .. endpoint, function()
             local previous = H.input_window()
             local workspace
+            local arrived_before = H.mock_state().started_counts[endpoint] or 0
             local create = Content.create_download_workspace
             H.mock_control({ match = endpoint, delay = 1.5, times = 0 })
             with_hook(Content, "create_download_workspace", function(...)
@@ -56,7 +57,9 @@ return function(H)
                 H.call(function() plugin:downloadMPArticleAndRead(book, article) end)
                 H.wait_until("actual article worker running", function()
                     local job = plugin.downloader._active_job
-                    return job and job.worker_handle and (endpoint == "/web/mp/content"
+                    return job and job.worker_handle
+                        and (H.mock_state().started_counts[endpoint] or 0) > arrived_before
+                        and (endpoint == "/web/mp/content"
                         or job.stage_title:find(H.tr("Downloading images: %1"):gsub("%%1", ""), 1, true))
                 end, 8)
             end)
