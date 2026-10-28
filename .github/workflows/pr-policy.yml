@@ -8,10 +8,19 @@ name: PR policy
 # 2. Coverage gates from .ci/coverage-policy.json (scripts/coverage_tools.py
 #    gate): changed executable Lua lines >= 80% covered by unit specs and
 #    >= 90% by unit specs + emulator scenarios; overall coverage must not drop
-#    below main's baseline (coverage branch); dated whole-plugin targets.
+#    below main's coverage at the PR's own base commit; dated whole-plugin
+#    targets.
 # The emulator line counts come from this PR's Integration run (artifacts
-# coverage-emulator-shard-*), so this job waits for it. The report goes to
-# the job summary and a sticky PR comment.
+# coverage-emulator-shard-*), so this job waits for it. That run measured
+# the merge commit refs/pull/N/merge pointed at (measured-commit.txt), so
+# this job checks out the same commit for the unit specs and the diff, and
+# the ratchet compares with main's coverage at that merge commit's first
+# parent (history.jsonl on the `coverage` branch, keyed by main SHA; nearest
+# recorded ancestor if that commit has none). PRs in flight together are
+# thus judged independently: tests another PR merges meanwhile do not raise
+# this PR's bar. Without an Integration run the PR head is measured against
+# merge-base(head, main). The report goes to the job summary and a sticky
+# PR comment.
 
 on:
   pull_request:
@@ -56,6 +65,9 @@ jobs:
             echo "labels=$(jq -r '[.labels[].name] | join(",")' <<<"$data")"
           } >> "$GITHUB_OUTPUT"
           jq -r .title <<<"$data" > "$RUNNER_TEMP/title.txt"
+          # Branch names may hold shell metacharacters: steps read it from the
+          # environment, never via expression expansion into the script.
+          echo "BASE_REF=$(jq -r .base.ref <<<"$data")" >> "$GITHUB_ENV"
 
       - name: Checkout pull request head
         uses: actions/checkout@v6
@@ -63,39 +75,14 @@ jobs:
           ref: ${{ steps.pr.outputs.head_sha }}
           fetch-depth: 0
 
-      - name: Fetch base branch and coverage baseline
+      - name: Fetch base branch and coverage history
         run: |
-          git fetch --no-tags origin "${{ steps.pr.outputs.base_ref }}:refs/remotes/origin/${{ steps.pr.outputs.base_ref }}"
+          git fetch --no-tags origin "$BASE_REF:refs/remotes/origin/$BASE_REF"
           mkdir -p "$RUNNER_TEMP/baseline"
           if git fetch --no-tags --depth 1 origin coverage:refs/remotes/origin/coverage 2>/dev/null; then
-            git show origin/coverage:baseline.json > "$RUNNER_TEMP/baseline/baseline.json" || true
             git show origin/coverage:history.jsonl > "$RUNNER_TEMP/baseline/history.jsonl" || true
           fi
           ls -la "$RUNNER_TEMP/baseline"
-
-      - name: Tests accompany code changes
-        id: policy
-        continue-on-error: true
-        env:
-          LABELS: ${{ steps.pr.outputs.labels }}
-        run: |
-          python3 scripts/check_test_policy.py \
-            --base "origin/${{ steps.pr.outputs.base_ref }}" \
-            --head HEAD \
-            --labels "$LABELS" \
-            --title "$(cat "$RUNNER_TEMP/title.txt")" \
-            --summary "$RUNNER_TEMP/policy.md"
-
-      - name: Install LuaJIT and LuaCov
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y luajit libsqlite3-0
-          git clone --quiet --depth 1 --branch "$LUACOV_VERSION" \
-            https://github.com/lunarmodules/luacov.git "$RUNNER_TEMP/luacov"
-          echo "LUA_PATH=$RUNNER_TEMP/luacov/src/?.lua;;" >> "$GITHUB_ENV"
-
-      - name: Unit specs under LuaCov
-        run: bash scripts/run_lua_coverage.sh
 
       - name: Wait for this commit's Integration run
         id: integration
@@ -131,11 +118,71 @@ jobs:
           gh run download "$RUN_ID" --repo "$GITHUB_REPOSITORY" -p 'coverage-emulator-shard-*' -D "$RUNNER_TEMP/emulator-coverage"
           find "$RUNNER_TEMP/emulator-coverage" -type f
 
+      # Measure what the Integration run measured: unit specs, changed lines
+      # and the ratchet base all refer to the same commit as the emulator
+      # line counts.
+      - name: Check out the measured commit
+        id: measured
+        env:
+          HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
+        run: |
+          set -euo pipefail
+          mapfile -t shas < <(find "$RUNNER_TEMP/emulator-coverage" -name measured-commit.txt -exec cat {} + 2>/dev/null \
+            | tr -d '\r' | grep -E '^[0-9a-f]{40}$' | sort -u)
+          if (( ${#shas[@]} == 1 )) && [[ "${shas[0]}" != "$HEAD_SHA" ]]; then
+            measured="${shas[0]}"
+            # Only a merge commit of this PR's head (second parent) is measured.
+            if ! git fetch --no-tags origin "$measured"; then
+              echo "::warning::Cannot fetch the Integration run's commit $measured; measuring the PR head."
+            elif [[ "$(git rev-parse -q --verify "$measured^2" || true)" != "$HEAD_SHA" ]]; then
+              echo "::warning::$measured is not a merge commit of the PR head $HEAD_SHA; measuring the PR head."
+            else
+              git checkout -q --detach "$measured"
+              echo "Measuring $measured (the Integration run's merge commit)"
+            fi
+          elif (( ${#shas[@]} > 1 )); then
+            echo "::warning::Emulator shards measured different commits (${shas[*]}); measuring the PR head."
+          fi
+          base_sha=""
+          if git rev-parse -q --verify 'HEAD^2' >/dev/null && [[ "$(git rev-parse 'HEAD^2')" == "$HEAD_SHA" ]]; then
+            base_sha="$(git rev-parse 'HEAD^1')"
+          else
+            base_sha="$(git merge-base HEAD "origin/$BASE_REF")"
+          fi
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "base_sha=$base_sha" >> "$GITHUB_OUTPUT"
+          echo "Measured $(git rev-parse HEAD); ratchet base $base_sha"
+
+      - name: Tests accompany code changes
+        id: policy
+        continue-on-error: true
+        env:
+          LABELS: ${{ steps.pr.outputs.labels }}
+        run: |
+          python3 scripts/check_test_policy.py \
+            --base "origin/$BASE_REF" \
+            --head HEAD \
+            --labels "$LABELS" \
+            --title "$(cat "$RUNNER_TEMP/title.txt")" \
+            --summary "$RUNNER_TEMP/policy.md"
+
+      - name: Install LuaJIT and LuaCov
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y luajit libsqlite3-0
+          git clone --quiet --depth 1 --branch "$LUACOV_VERSION" \
+            https://github.com/lunarmodules/luacov.git "$RUNNER_TEMP/luacov"
+          echo "LUA_PATH=$RUNNER_TEMP/luacov/src/?.lua;;" >> "$GITHUB_ENV"
+
+      - name: Unit specs under LuaCov
+        run: bash scripts/run_lua_coverage.sh
+
       - name: Coverage gates
         id: coverage
         continue-on-error: true
         env:
           LABELS: ${{ steps.pr.outputs.labels }}
+          BASE_SHA: ${{ steps.measured.outputs.base_sha }}
         run: |
           set -euo pipefail
           combined_args=()
@@ -145,16 +192,42 @@ jobs:
             python3 scripts/coverage_tools.py report coverage/combined.stats.out coverage/combined.report.out
             combined_args=(--combined coverage/combined.report.out)
           fi
+          history="$RUNNER_TEMP/baseline/history.jsonl"
+          if python3 scripts/coverage_tools.py gate --help | grep -q -- '--base-sha'; then
+            base_args=(--base-sha "$BASE_SHA")
+          else
+            # The measured tree predates per-commit baselines (a PR head whose
+            # Integration artifact has no measured-commit.txt): hand its gate
+            # the record of the base, or its nearest recorded ancestor, as
+            # --baseline instead of main's latest.
+            base_args=()
+            declare -A recorded=()
+            if [[ -s "$history" ]]; then
+              while read -r sha; do recorded[$sha]=1; done < <(jq -R -r 'fromjson? | objects | .sha // empty' "$history")
+            fi
+            while read -r sha; do
+              if [[ -n "${recorded[$sha]:-}" ]]; then
+                jq -R -c --arg sha "$sha" 'fromjson? | objects | select(.sha == $sha)' "$history" | tail -n 1 \
+                  > "$RUNNER_TEMP/baseline/base.json"
+                base_args=(--baseline "$RUNNER_TEMP/baseline/base.json")
+                echo "Older gate tooling: baseline main@${sha:0:8} for base ${BASE_SHA:0:8}"
+                break
+              fi
+            done < <(git rev-list --max-count=5000 "$BASE_SHA")
+          fi
           python3 scripts/coverage_tools.py gate \
             --unit coverage/unit.report.out "${combined_args[@]}" \
-            --base "origin/${{ steps.pr.outputs.base_ref }}" --head HEAD \
+            --base "origin/$BASE_REF" --head HEAD \
             --labels "$LABELS" \
-            --baseline "$RUNNER_TEMP/baseline/baseline.json" \
-            --history "$RUNNER_TEMP/baseline/history.jsonl" \
+            "${base_args[@]}" \
+            --history "$history" \
             --summary "$RUNNER_TEMP/coverage.md" --json "$RUNNER_TEMP/coverage.json"
 
       - name: Compose summary
         if: always()
+        env:
+          MEASURED_SHA: ${{ steps.measured.outputs.sha }}
+          BASE_SHA: ${{ steps.measured.outputs.base_sha }}
         run: |
           {
             echo "<!-- weread-tests-policy -->"
@@ -162,6 +235,10 @@ jobs:
             echo
             cat "$RUNNER_TEMP/coverage.md" 2>/dev/null || echo "Coverage gates did not run."
             echo
+            if [[ -n "$MEASURED_SHA" ]]; then
+              echo "_Measured commit \`${MEASURED_SHA:0:8}\`; ratchet base: main@\`${BASE_SHA:0:8}\`._"
+              echo
+            fi
             echo "_Policy: \`.ci/coverage-policy.json\` · labels: \`no-tests-needed\` (maintainers; docs, comments or log wording only) waives the test rule and the diff-coverage gates, \`upstream-sync\` marks automated upstream merges._"
           } > "$RUNNER_TEMP/comment.md"
           cat "$RUNNER_TEMP/comment.md" >> "$GITHUB_STEP_SUMMARY"
