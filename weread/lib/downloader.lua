@@ -499,31 +499,42 @@ function Downloader:_applyPrefetchResult(dl, result)
     end
 
     local value = result.value
-    if value.auth and not WorkerSettings.merge(self.settings,
-        dl.auth_fingerprint, value.auth) then
-        logger.info("skip worker auth write-back: parent auth changed")
-    end
     local book_id = tostring(dl.book.book_id or dl.book.bookId or "")
     local chapter = dl.chapters[1] or {}
     local uid = tostring(value.chapter_uid or chapter.chapterUid
         or chapter.chapterId or "1")
-    local record, books = load_book_record(self.settings, book_id, true)
-    record = record or {}
-    local function apply(target)
-        target.cached_chapters = target.cached_chapters or {}
-        target.cached_chapters[uid] = value.path
-        target.cache_dir = value.cache_dir or target.cache_dir
-        target.reader_url = target.reader_url or value.reader_url
-        if value.annotation_document then
-            target.annotation_documents = target.annotation_documents or {}
-            target.annotation_documents[value.path] = value.annotation_document
+    local persisted, persist_err = pcall(function()
+        if value.auth and not WorkerSettings.merge(self.settings,
+            dl.auth_fingerprint, value.auth) then
+            logger.info("skip worker auth write-back: parent auth changed")
         end
+        local record, books = load_book_record(self.settings, book_id, true)
+        record = record or {}
+        local function apply(target)
+            target.cached_chapters = target.cached_chapters or {}
+            target.cached_chapters[uid] = value.path
+            target.cache_dir = value.cache_dir or target.cache_dir
+            target.reader_url = target.reader_url or value.reader_url
+            if value.annotation_document then
+                target.annotation_documents = target.annotation_documents or {}
+                target.annotation_documents[value.path] = value.annotation_document
+            end
+        end
+        apply(dl.book)
+        if record ~= dl.book then apply(record) end
+        record.book_id = record.book_id or dl.book.book_id or dl.book.bookId
+        save_book_record(self.settings, book_id, record, books)
+    end)
+    if not persisted then
+        logger.err("prefetch result persistence failed:", log_error(persist_err))
+        self:_notifyCompletion(dl, false, persist_err)
+        self:_finishJob(dl)
+        return
     end
-    apply(dl.book)
-    if record ~= dl.book then apply(record) end
-    record.book_id = record.book_id or dl.book.book_id or dl.book.bookId
-    save_book_record(self.settings, book_id, record, books)
-    self.refresh_shelf()
+    local refreshed, refresh_err = pcall(self.refresh_shelf)
+    if not refreshed then
+        logger.warn("shelf refresh after prefetch failed:", log_error(refresh_err))
+    end
     logger.info("prefetch worker completed:", "book_id=", book_id,
         "chapter_uid=", uid, "path=", value.path)
     self:_notifyCompletion(dl, true, value.path)

@@ -264,6 +264,66 @@ expect(queued._active_job and not queued._active_job.prefetch
         and queued._active_job.suffix == "full",
     "queued manual download starts once the prefetch stops")
 
+-- A worker can succeed while parent-side persistence or refresh fails.
+-- Completion must still release the active slot and any queued manual job.
+local downloaded_path = os.tmpname()
+local downloaded = assert(io.open(downloaded_path, "wb"))
+downloaded:write("synthetic EPUB")
+downloaded:close()
+for _, failure in ipairs({ "auth", "save", "refresh" }) do
+    scheduled = {}
+    local failed_settings = fake_settings()
+    if failure == "auth" then
+        failed_settings.update_auth = function() error("injected auth save failure") end
+    elseif failure == "save" then
+        failed_settings.flush = function() error("injected book save failure") end
+    end
+    local failure_worker = fake_worker()
+    local result_count, result_ok, opened = 0, nil, false
+    local failing = Downloader:new{
+        client = {}, settings = failed_settings, background_worker = failure_worker,
+        is_connected = function() return true end,
+        refresh_ui = function() end,
+        require_login = function() return true end,
+        run_online_task = function() return true end,
+        refresh_shelf = function()
+            if failure == "refresh" then error("injected shelf refresh failure") end
+        end,
+        open_file = function() opened = true end,
+    }
+    failing:start(book_a, { chapter_2 }, "chapter", {
+        prefetch = true, single_chapter = true,
+        on_complete = function(ok)
+            result_count, result_ok = result_count + 1, ok
+        end,
+    })
+    run_scheduled()
+    local job = failing._active_job
+    job.open_on_complete = true
+    failing._pending_start = {
+        book = book_a, chapters = { chapter_3 }, suffix = "manual", options = {},
+    }
+    local callback_ok = pcall(failure_worker.starts[1].options.on_done, {
+        ok = true, value = { path = downloaded_path, auth = {} },
+    })
+    expect(callback_ok, failure .. " failure escaped the worker callback")
+    expect(failing._active_job == nil and job.standby_guard == nil,
+        failure .. " failure kept the downloader active or standby inhibited")
+    expect(result_count == 1 and result_ok == (failure == "refresh"),
+        failure .. " failure reported an incorrect or duplicate completion")
+    expect(opened == (failure == "refresh"),
+        failure .. " failure opened a chapter whose parent state was not saved")
+    expect(failing._scheduled_start and failing._scheduled_start.pending.suffix == "manual",
+        failure .. " failure swallowed the queued manual download")
+    local preserved = io.open(downloaded_path, "rb")
+    expect(preserved ~= nil, failure .. " failure removed the successful worker's EPUB")
+    if preserved then preserved:close() end
+    run_scheduled()
+    expect(failing._active_job and failing._active_job.suffix == "manual",
+        failure .. " failure prevented the queued manual download from starting")
+end
+os.remove(downloaded_path)
+
 print(string.format(
     "downloader_prefetch_spec: %d checks, %d failure(s)", checks, failures))
 os.exit(failures == 0 and 0 or 1)
