@@ -246,6 +246,11 @@ class MockServer(ThreadingHTTPServer):
             return 200, dict(reviews=[dict(subReviews=[dict(review=dict(
                 reviewId="mock-mp-article", belongBookId=book_id, createTime=1700000000,
                 mpInfo=dict(title="合成公众号文章", originalId="mock-mp-article")))])])
+        if path == "/web/login/renewal" and method == "POST":
+            if data.get("rq") != "%2Fweb%2Fbook%2Fread" or data.get("ql") is not False:
+                raise ValueError("unexpected renewal parameters")
+            return 200, dict(succ=1), {"x-wr-ticket": "mock-renewed-ticket",
+                                       "Set-Cookie": "wr_skey=XXX_RENEWED_KEY; Path=/"}
         if path == "/web/book/getProgress" and method == "GET":
             return 200, self.get_progress(book_id)
         if path == "/web/book/read" and method == "POST":

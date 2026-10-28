@@ -160,6 +160,13 @@ class MockTests(unittest.TestCase):
         self.assertEqual([e["status"] for e in events][-2:], [0, 200])
         self.assertEqual(self.request("/__control", dict(drop="yes"))[0], 400)
 
+    def test_synthetic_cookie_renewal(self):
+        status, result = self.request("/web/login/renewal", {"rq": "%2Fweb%2Fbook%2Fread", "ql": False})
+        self.assertEqual(status, 200)
+        self.assertEqual(result, {"succ": 1})
+        self.assertEqual(self.request("/web/login/renewal", {"rq": "wrong", "ql": False})[0], 400)
+        self.assertEqual(self.request("/web/login/renewal", {"rq": "%2Fweb%2Fbook%2Fread", "ql": True})[0], 400)
+
     def test_qr_login_modes(self):
         status, page = self.request("/__proxy?url=https%3A%2F%2Fweread.qq.com%2Fr%2Fweread-skills")
         self.assertEqual(status, 200)
