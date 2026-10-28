@@ -55,8 +55,8 @@ fixtures). Plugin files no test loads count as 0%.
 | Diff, unit | changed executable Lua lines covered by unit specs ≥ 80% | yes (waived by `no-tests-needed`) |
 | Diff, combined | changed lines covered by unit specs + emulator scenarios ≥ 90% | yes (waived by `no-tests-needed`) |
 | Ratchet | overall unit and overall combined coverage must not drop below `main`'s latest value (0.1 pp tolerance: emulator runs vary by a few timing-dependent lines, observed 0.03 pp) | yes |
-| Target 4 weeks | overall combined ≥ max(75%, day-one baseline 80.78%) from 2026-11-24 | report-only before the date, then yes |
-| Target 8 weeks | overall combined ≥ 85% from 2026-12-22 | report-only before the date, then yes |
+| Target 4 weeks | overall combined ≥ max(75%, day-one baseline 80.78%) and overall unit ≥ 80% from 2026-11-24 | report-only before the date, then yes |
+| Target 8 weeks | overall combined ≥ 85%, overall unit ≥ 88% and every `weread/lib/*` file unit ≥ 70% from 2026-12-22 | report-only before the date, then yes |
 
 Emulator coverage is measured with LuaCov inside the real KOReader app while
 the scenarios run (forked download/login workers included). Every PR gets
@@ -65,12 +65,16 @@ in the job summary and as a sticky comment. After each green `Integration`
 run on `main`, the *Coverage* workflow publishes `baseline.json`,
 `history.jsonl` and the README badge on the
 [`coverage` branch](https://github.com/qvictl/weread.koplugin/tree/coverage).
-Day-one baseline (2026-10-27): unit 73.80%, unit + emulator 80.78%.
+Day-one baseline (2026-10-27): unit 73.80%, unit + emulator 80.78%. The
+roadmap to the targets (priorities, batches) is
+[docs/coverage-plan.md](docs/coverage-plan.md).
 
 覆盖率策略见 `.ci/coverage-policy.json`，由 `tests-policy` 在每个合入 `main` 的 PR
 上强制执行：改动的可执行 Lua 行单元测试覆盖率 ≥ 80%，单元测试 + 模拟器场景合计 ≥ 90%；
 整体覆盖率（单元、合计）不得低于 `main` 当前值；合计整体覆盖率在 2026-11-24 起
-≥ max(75%, 首日基线 80.78%)，2026-12-22 起 ≥ 85%，到期前仅报告。每个 PR 的摘要和评论
+≥ max(75%, 首日基线 80.78%)，2026-12-22 起 ≥ 85%；单元整体覆盖率 2026-11-24 起 ≥ 80%，
+2026-12-22 起 ≥ 88%，且届时每个 `weread/lib/*` 文件单元覆盖率 ≥ 70%；到期前仅报告。
+路线图见 [docs/coverage-plan.md](docs/coverage-plan.md)。每个 PR 的摘要和评论
 都会列出各项结果，`main` 的历史趋势与徽章发布在 `coverage` 分支。
 
 See [docs/testing.md](docs/testing.md).
@@ -85,6 +89,25 @@ See [docs/testing.md](docs/testing.md).
 类 PR 必须新增或更新至少一个模拟器场景，并满足下面的覆盖率门禁；仅维护者可用
 `no-tests-needed` 标签豁免，且仅限文档、注释或日志措辞改动）。Bug 修复需附带修复前会失败的
 回归测试。
+
+### Review policy / 审查策略
+
+Every PR to `main` is reviewed by AI reviewers (CodeRabbit, Gemini Code Assist) and evaluated by the *Review gate*
+workflow, which keeps a checklist comment on the PR. The gate approves and enables auto-merge (squash) only when all of
+these hold on the head commit: the required checks passed; an AI reviewer reviewed it and none requests changes; every
+review thread is resolved; at most 500 changed non-test / non-doc lines; no sensitive path (CI, policy, release and
+version files, the updater, credential / cookie / crypto code); not a draft, no `do-not-merge` label, and the author
+is a collaborator or has a merged PR already. A maintainer's `human-approved` label waives only the size,
+sensitive-path and first-time-contributor rules — never the checks, the AI review or the threads. AI comments flagged
+as potential issues / bugs must be fixed or answered with a justification before resolving them. Full rules and
+activation steps: [REVIEW_POLICY.md](REVIEW_POLICY.md).
+
+所有合入 `main` 的 PR 由 AI 审查（CodeRabbit、Gemini Code Assist）并经 *Review gate* 工作流评估，网关在 PR 上维护一条
+检查清单评论。只有最新提交上必需检查全部通过、AI 已审查且没有要求修改、所有审查对话已解决、非测试/文档改动不超过 500 行、
+没有触及敏感路径（CI、策略、发布与版本文件、更新器、凭据/Cookie/加密代码）、非草稿、无 `do-not-merge` 且作者可信
+（协作者，或已有合并过的 PR）时，网关才自动批准并开启自动合并（squash）。维护者的 `human-approved` 标签只豁免行数、
+敏感路径和首次贡献者限制，不豁免检查、AI 审查和未解决对话。AI 标出的潜在问题 / bug 必须修复或回复理由后才能解决对话。
+完整规则和启用步骤见 [REVIEW_POLICY.md](REVIEW_POLICY.md)。
 
 ## Issues / 提交 Issue
 

@@ -1,0 +1,71 @@
+{
+  "_comment": "Review gate settings for qvictl/weread.koplugin (logic: review_gate.py, policy: REVIEW_POLICY.md).",
+  "merge_method": "SQUASH",
+  "merge_method_overrides": [
+    {
+      "head_ref": "sync/upstream-*",
+      "method": "MERGE"
+    }
+  ],
+  "max_changed_lines": 500,
+  "test_paths": [
+    "spec/**",
+    "scripts/test_*.py"
+  ],
+  "doc_paths": [
+    "**/*.md",
+    "docs/**",
+    "screenshots/**"
+  ],
+  "sensitive_paths": [
+    ".github/**",
+    ".ci/**",
+    ".circleci/**",
+    "REVIEW_POLICY.md",
+    "CONTRIBUTING.md",
+    ".coderabbit.yaml",
+    ".coderabbit.yml",
+    ".gemini/**",
+    ".luacheckrc",
+    ".luacov",
+    ".gitmodules",
+    "CHANGELOG.md",
+    "CLAUDE.md",
+    "weread/lib/updater.lua",
+    "weread/ui/updater.lua",
+    "weread/lib/cookie.lua",
+    "weread/lib/crypto.lua",
+    "weread/lib/qr_login.lua",
+    "weread/lib/worker_settings.lua",
+    "scripts/package_release.sh",
+    "scripts/extract_release_notes.sh",
+    "scripts/check_secrets.sh",
+    "scripts/check_test_policy.py",
+    "scripts/coverage_tools.py",
+    "scripts/run_lua_coverage.sh",
+    "scripts/check_lua_namespace.sh"
+  ],
+  "sensitive_line_patterns": [
+    {
+      "path": "_meta.lua",
+      "regex": "^\\s*version\\s*=",
+      "description": "版本号"
+    },
+    {
+      "path": "main.lua",
+      "regex": "^\\s*version\\s*=",
+      "description": "版本号"
+    },
+    {
+      "path": "weread/lib/client.lua",
+      "regex": "(?i)(auth|cookie|token|skey|wr_vid|login|credential|bearer|x-wrpa|api_?key|signature|\\bsign)",
+      "description": "认证/Cookie 相关代码"
+    },
+    {
+      "path": "weread/lib/protocol.lua",
+      "regex": "(?i)(sign|hmac|secret|salt|nonce|sha|md5)",
+      "description": "签名/加密相关代码"
+    }
+  ],
+  "sync_head_prefix": "sync/upstream-"
+}

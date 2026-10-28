@@ -219,8 +219,11 @@ The `PR policy` workflow's `tests-policy` job is a required check:
 - **Coverage gates** (`scripts/coverage_tools.py gate`, thresholds and dated
   targets in `.ci/coverage-policy.json`): unit diff coverage ≥ 80%, unit +
   emulator diff coverage ≥ 90%, overall unit and combined coverage not below
-  `main`'s baseline, and whole-plugin targets that turn blocking on their
-  date. See [CONTRIBUTING.md](../CONTRIBUTING.md#coverage-policy--覆盖率策略).
+  `main`'s baseline, and dated targets (overall unit, overall combined, a
+  per-file unit floor for `weread/lib/*`) that turn blocking on their date.
+  See [CONTRIBUTING.md](../CONTRIBUTING.md#coverage-policy--覆盖率策略) and the
+  roadmap in [coverage-plan.md](coverage-plan.md); the tooling itself is
+  tested by `python3 scripts/test_coverage_tools.py`.
 
 How coverage is measured:
 
