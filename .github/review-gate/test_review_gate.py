@@ -644,6 +644,57 @@ class EventTest(unittest.TestCase):
         self.assertEqual(self.gh.writes, [])
 
 
+class ScheduleTest(GateCase):
+    NOW = rg.datetime(2026, 10, 28, 12, 0, tzinfo=rg.timezone.utc)
+
+    def sticky(self, blockers: str, head: str = HEAD, updated: str = "2026-10-28T11:00:00Z") -> Dict[str, Any]:
+        return {"id": 5, "user": {"login": "github-actions[bot]"}, "updated_at": updated,
+                "body": "%s\n<!-- review-gate:state head=%s blockers=%s -->\n..." % (rg.MARKER, head, blockers)}
+
+    def needs(self, sticky):
+        return rg.schedule_needs_eval(self.state["pr"], sticky, self.NOW)[0]
+
+    def test_state_marker_in_comment(self):
+        self.state["reviews"] = []
+        self.state["threads"].append({"isResolved": False, "path": "p", "comments": {"nodes": []}})
+        self.run_gate()
+        self.assertIn("<!-- review-gate:state head=%s blockers=ai,threads -->" % HEAD, self.body)
+        self.assertEqual(rg.STATE_RE.search(self.body).group(2), "ai,threads")
+
+    def test_skip_rules(self):
+        self.assertTrue(self.needs(None))
+        self.assertTrue(self.needs({"user": {"login": "github-actions[bot]"}, "body": rg.MARKER}))
+        self.assertTrue(self.needs(self.sticky("ai", head=OLD)))
+        self.assertTrue(self.needs(self.sticky("threads")))
+        self.assertTrue(self.needs(self.sticky("")))
+        self.assertFalse(self.needs(self.sticky("ai,threads")))
+        self.assertFalse(self.needs(self.sticky("checks,ai")))
+        self.assertFalse(self.needs(self.sticky("sensitive,author")))
+        self.assertTrue(self.needs(self.sticky("ai", updated="2026-10-28T05:00:00Z")))
+
+    def test_schedule_run_only_evaluates_changed_prs(self):
+        self.run_gate()  # produce a real body: OK state
+        fake = FakeGitHub(self.state)
+        self.state["comments"] = [self.sticky("ai,sensitive", updated=rg.datetime.now(rg.timezone.utc)
+                                              .strftime("%Y-%m-%dT%H:%M:%SZ"))]
+        with tempfile.TemporaryDirectory() as tmp:
+            event = Path(tmp) / "event.json"
+            event.write_text(json.dumps({"schedule": "7,22,37,52 * * * *"}))
+            old_env, old_cls = dict(os.environ), rg.GitHub
+            os.environ.update({"GITHUB_TOKEN": "t", "GITHUB_EVENT_PATH": str(event), "GITHUB_EVENT_NAME": "schedule"})
+            rg.GitHub = lambda *_a, **_k: fake  # type: ignore
+            try:
+                rg.main(["--repo", REPO, "--event", "--summary", str(Path(tmp) / "s.md")])
+                self.assertEqual(fake.writes, [])  # skipped: no evaluation, no write
+                self.state["comments"] = [self.sticky("ai", head=OLD)]
+                rg.main(["--repo", REPO, "--event", "--summary", str(Path(tmp) / "s.md")])
+                self.assertTrue(any(w[0] == "PATCH" for w in fake.writes))  # head moved: evaluated
+            finally:
+                rg.GitHub = old_cls  # type: ignore
+                os.environ.clear()
+                os.environ.update(old_env)
+
+
 class MainTest(unittest.TestCase):
     def test_main_event_mode_end_to_end(self):
         state = base_state()

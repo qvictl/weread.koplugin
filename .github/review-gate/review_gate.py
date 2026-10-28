@@ -49,12 +49,17 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 MARKER = "<!-- review-gate -->"
 APPROVAL_MARKER = "<!-- review-gate:approve -->"
 AUTOMERGE_STATE = "<!-- review-gate:automerge=on -->"
+STATE_RE = re.compile(r"<!-- review-gate:state head=([0-9a-f]+) blockers=([a-z,]*) -->")
+# Scheduled runs re-evaluate a PR only when it may have changed without an
+# event (see schedule_needs_eval); every PR is still refreshed this often.
+SCHEDULE_REFRESH_HOURS = 6
 GATE_LOGIN = "github-actions[bot]"
 AI_REVIEWERS = {
     "coderabbitai[bot]": "CodeRabbit",
@@ -281,8 +286,7 @@ def collect(gh: GitHub, repo: str, number: int, repo_info: Optional[Dict[str, An
     ai_logins = set(AI_REVIEWERS)
     ai_activity = any((r.get("user") or {}).get("login") in ai_logins for r in reviews) or any(
         (c.get("user") or {}).get("login") in ai_logins for c in comments)
-    sticky = next((c for c in comments
-                   if (c.get("user") or {}).get("login") == GATE_LOGIN and c.get("body", "").startswith(MARKER)), None)
+    sticky = find_sticky(comments)
 
     facts = Facts(
         repo=repo, pr=pr, owner_login=repo_info["owner"]["login"],
@@ -602,7 +606,8 @@ def render(facts: Facts, verdict: Verdict, automerge_on: bool) -> str:
     """The sticky comment. Deterministic for a given state (no timestamps, no
     per-run actions) so that unchanged PRs are not edited every run."""
     head = facts.head_sha
-    lines = [MARKER]
+    keys = [c.key for c in verdict.blockers] + ([] if verdict.approvable else ["author"])
+    lines = [MARKER, "<!-- review-gate:state head=%s blockers=%s -->" % (head, ",".join(keys))]
     if automerge_on:
         lines.append(AUTOMERGE_STATE)
     if verdict.ok:
@@ -767,6 +772,39 @@ def prs_from_event(gh: GitHub, repo: str, event_name: str, event: Dict[str, Any]
     return []
 
 
+def schedule_needs_eval(pr: Dict[str, Any], sticky: Optional[Dict[str, Any]], now: datetime) -> Tuple[bool, str]:
+    """Light-weight check for scheduled runs (one API call per PR).
+
+    Pushes, labels, reviews, review comments and check completion all trigger
+    the gate directly; the schedule is the safety net for what has no trigger
+    (a review thread resolved or unresolved) and for missed events. So a PR is
+    re-evaluated only when it has no sticky comment yet, its head moved, it is
+    blocked by unresolved threads only, it was approved (conditions may stop
+    holding), or its comment is older than SCHEDULE_REFRESH_HOURS."""
+    if not sticky:
+        return True, "no sticky comment"
+    m = STATE_RE.search(sticky.get("body", ""))
+    if not m:
+        return True, "no state marker"
+    head, blockers = m.group(1), set(filter(None, m.group(2).split(",")))
+    if head != pr["head"]["sha"]:
+        return True, "head moved"
+    if blockers <= {"threads"}:
+        return True, "approved or only blocked by threads"
+    try:
+        age = now - datetime.strptime(sticky.get("updated_at", ""), "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return True, "unknown comment age"
+    if age > timedelta(hours=SCHEDULE_REFRESH_HOURS):
+        return True, "periodic refresh"
+    return False, "unchanged (blocked by %s)" % ",".join(sorted(blockers))
+
+
+def find_sticky(comments: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    return next((c for c in comments
+                 if (c.get("user") or {}).get("login") == GATE_LOGIN and c.get("body", "").startswith(MARKER)), None)
+
+
 def process(gh: GitHub, merge_gh: Optional[GitHub], repo: str, number: int, config: Dict[str, Any], dry_run: bool,
             repo_info: Dict[str, Any], branch_cache: Dict[str, Any]) -> Optional[str]:
     try:
@@ -809,6 +847,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     config = load_config(args.config)
     repo_info = gh.get("repos/%s" % args.repo)
 
+    event_name = os.environ.get("GITHUB_EVENT_NAME", "")
     numbers: Optional[List[int]]
     if args.pr:
         numbers = [args.pr]
@@ -817,10 +856,24 @@ def main(argv: Optional[List[str]] = None) -> int:
     else:
         with open(os.environ["GITHUB_EVENT_PATH"], encoding="utf-8") as fh:
             event = json.load(fh)
-        numbers = prs_from_event(gh, args.repo, os.environ.get("GITHUB_EVENT_NAME", ""), event)
+        numbers = prs_from_event(gh, args.repo, event_name, event)
     if numbers is None:
-        numbers = [p["number"] for p in gh.get_all("repos/%s/pulls?state=open&base=%s" % (
-            args.repo, urllib.parse.quote(repo_info["default_branch"], safe="")))]
+        open_prs = gh.get_all("repos/%s/pulls?state=open&base=%s" % (
+            args.repo, urllib.parse.quote(repo_info["default_branch"], safe="")))
+        numbers = []
+        now = datetime.now(timezone.utc)
+        for pr in open_prs:
+            if args.event and event_name == "schedule":
+                try:
+                    sticky = find_sticky(gh.get_all("repos/%s/issues/%d/comments" % (args.repo, pr["number"])))
+                except ApiError as err:
+                    print("::warning::#%d: %s" % (pr["number"], err))
+                    continue
+                needed, why = schedule_needs_eval(pr, sticky, now)
+                if not needed:
+                    print("#%d: %s, skipped" % (pr["number"], why))
+                    continue
+            numbers.append(pr["number"])
 
     summaries = []
     branch_cache: Dict[str, Any] = {}

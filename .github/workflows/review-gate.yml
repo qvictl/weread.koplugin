@@ -18,9 +18,12 @@
 # checked out or executed.
 #
 # Triggers: PR events, AI / human reviews and review comments, completion of
-# the required-check workflows, commit statuses and third-party check suites,
-# and a 15-minute schedule as a safety net (review-thread resolution has no
-# workflow trigger: the schedule picks it up). Repository variable
+# the required-check workflows and of third-party check suites, and a
+# 15-minute schedule as a safety net (review-thread resolution has no
+# workflow trigger). Scheduled runs are cheap: one API call per open PR, and
+# a full evaluation only for PRs that may have changed without an event (head
+# moved, blocked only by threads, approved, or not refreshed for 6 hours).
+# The sticky comment is edited only when its content changes. Repository variable
 # REVIEW_GATE_DRY_RUN=true turns it into report-only. Secret
 # REVIEW_GATE_MERGE_TOKEN (fine-grained PAT: contents + pull requests write)
 # lets it enable auto-merge; without it, approved PRs are merged by hand.
@@ -39,7 +42,6 @@ on:
     types: [completed]
   check_suite:
     types: [completed]
-  status:
   schedule:
     - cron: '7,22,37,52 * * * *'
   workflow_dispatch:
@@ -56,9 +58,11 @@ permissions:
   checks: read
   statuses: read
 
+# One run per PR at a time (a newer event supersedes an older run); scheduled
+# and manual all-PR runs share one group.
 concurrency:
-  group: review-gate-${{ github.event.pull_request.number || inputs.pr || (github.event_name == 'schedule' && 'all') || github.run_id }}
-  cancel-in-progress: ${{ github.event.pull_request.number != null }}
+  group: review-gate-${{ github.event.pull_request.number || github.event.workflow_run.pull_requests[0].number || inputs.pr || ((github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && 'all') || github.run_id }}
+  cancel-in-progress: ${{ github.event_name != 'schedule' }}
 
 jobs:
 

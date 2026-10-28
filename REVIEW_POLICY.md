@@ -71,13 +71,11 @@
    - `scripts/coverage_tools.py`
    - `scripts/run_lua_coverage.sh`
    - `scripts/check_lua_namespace.sh`
-   - 以及按行判断的敏感改动：
+   - 以及按行判断的敏感改动（读不到 diff 时一律视为敏感）：
      - `_meta.lua` 中匹配 `^\s*version\s*=` 的改动行（版本号）
      - `main.lua` 中匹配 `^\s*version\s*=` 的改动行（版本号）
      - `weread/lib/client.lua` 中匹配 `(?i)(auth\|cookie\|token\|skey\|wr_vid\|login\|credential\|bearer\|x-wrpa\|api_?key\|signature\|\bsign)` 的改动行（认证/Cookie 相关代码）
      - `weread/lib/protocol.lua` 中匹配 `(?i)(sign\|hmac\|secret\|salt\|nonce\|sha\|md5)` 的改动行（签名/加密相关代码）
-
-   读不到 diff 的按行规则文件一律视为敏感。
 6. **非草稿、没有 `do-not-merge` 标签，作者可信**：作者是仓库协作者（`OWNER` / `MEMBER` / `COLLABORATOR`），
    或是已经有至少一个 PR 被合并的外部贡献者。
 
@@ -117,8 +115,10 @@
 
 - 触发：PR 事件（`pull_request_target`：opened / synchronize / reopened / labeled / unlabeled / ready_for_review /
   converted_to_draft）、审查与审查评论（`pull_request_review`、`pull_request_review_comment`）、必需检查所在工作流完成
-  （`workflow_run`）、第三方 check suite 完成和提交状态（`check_suite`、`status`），以及每 15 分钟一次的定时兜底
+  （`workflow_run`）、第三方 check suite 完成（`check_suite`），以及每 15 分钟一次的定时兜底
   （GitHub Actions 没有“审查对话已解决”的触发器，由定时任务补上）。也可以在 Actions 页面手动运行 *Review gate*，填 PR 号或留空评估全部。
+- 定时任务很轻：每个打开的 PR 只读一次评论列表，只有可能在没有事件的情况下发生变化的 PR 才完整评估（head 变了、
+  只被未解决对话阻塞、已批准、或超过 6 小时未刷新）；同一个 PR 的新事件会取消旧的运行。
 - 每个 PR 只有一条置顶评论（以 `<!-- review-gate -->` 开头），逐项列出条件和阻塞原因；内容不变时不会重复编辑。
 - 只评估目标分支为 `main` 的打开的 PR。
 - 仓库变量 `REVIEW_GATE_DRY_RUN=true` 时只报告、不批准、不撤销、不合并（紧急关闭开关）。
