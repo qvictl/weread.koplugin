@@ -77,4 +77,22 @@ return function(H)
             H.mock_control({ match = "", delay = 0, times = 0 })
         end)
     end
+    H.step("automatic detail cancellation keeps the local book accessible", function()
+        H.mock_control({ match = "/book/info", delay = 1.5, times = 0 })
+        H.call(function() plugin:refreshBookRecord(book, nil, { automatic = true }) end)
+        H.wait_until("automatic detail request shown", function()
+            return getmetatable(H.input_window()) == TrapWidget
+        end, 5)
+        H.tap_at(580, 20)
+        local view = H.wait_until("local book menu shown", function()
+            local current = plugin._book_detail_view
+            return current and UIManager:isWidgetShown(current) and current
+        end, 5)
+        H.equal(plugin.busy_message, nil, "automatic cancel clears busy state")
+        H.sleep(1.7)
+        H.equal(plugin._book_detail_view, view, "late response does not replace the local menu")
+        H.equal(book.detail_updated_at, nil, "cancelled automatic request does not apply remote details")
+        H.mock_control({ match = "", delay = 0, times = 0 })
+        H.call(function() plugin:closeWeReadUI() end)
+    end)
 end

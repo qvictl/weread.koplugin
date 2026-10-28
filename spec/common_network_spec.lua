@@ -76,6 +76,18 @@ eq(host:runOnlineTask("lifecycle", function() end, nil, {
 }), false, "link-only task skips quietly when the link is down")
 eq(dns_lookups, 0, "still no DNS lookup")
 
+-- Unsupported runtimes fail through cleanup without executing the task.
+local ran_without_worker, unavailable_failures = false, 0
+host:_runNetworkRequest("Loading", "Load", function() ran_without_worker = true end,
+    function() error("unsupported worker delivered a result") end,
+    function(err, cancelled)
+        unavailable_failures = unavailable_failures + 1
+        eq(cancelled, false, "unavailable worker is a failure, not a dismissal")
+        eq(err, "Network subprocess is unavailable.", "unavailable worker explained")
+    end)
+eq(ran_without_worker, false, "unavailable worker never executes network on UI")
+eq(unavailable_failures, 1, "unavailable worker cleans up exactly once")
+
 -- Shared short requests execute only the task in the worker and deliver UI
 -- results/credential updates in the parent, including cancellation cleanup.
 local in_child, encoded, mode, merged = false, nil, "success", 0

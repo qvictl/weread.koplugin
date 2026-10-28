@@ -154,7 +154,7 @@ end
 -- dismissable subprocess, like chapter downloads: blocking HTTP on the UI
 -- thread freezes taps and repaints for the whole request. on_success runs in
 -- the parent with the task's result; failures are reported with error_label.
--- Falls back to an in-process call where KOReader cannot fork.
+-- Refuse to run network tasks when the runtime cannot provide a worker.
 function M:_runNetworkRequest(busy_text, error_label, task, on_success, on_failure)
     local function report(err)
         if on_failure then return on_failure(err, false) end
@@ -168,10 +168,9 @@ function M:_runNetworkRequest(busy_text, error_label, task, on_success, on_failu
     local ok_ffi, ffiutil = pcall(require, "ffi/util")
     local ok_trapper, Trapper = pcall(require, "ui/trapper")
     if not (ok_ffi and type(ffiutil) == "table" and type(ffiutil.runInSubProcess) == "function"
-        and ok_trapper and Trapper) then
-        local ok, value = xpcall(task, debug.traceback)
-        if not ok then return report(value) end
-        return deliver(value)
+        and ok_trapper and type(Trapper) == "table" and type(Trapper.wrap) == "function"
+        and type(Trapper.dismissableRunInSubprocess) == "function") then
+        return report(_("Network subprocess is unavailable."))
     end
     local ok_json, Json = pcall(require, "json")
     if not ok_json then Json = require("rapidjson") end
