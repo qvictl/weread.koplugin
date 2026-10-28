@@ -312,7 +312,9 @@ expect(Content.first_readable_chapter({ { title = "封面", wordCount = 9 } }) =
 local made = {}
 util_stub.makePath = function(path)
     made[#made + 1] = path
-    return os.execute("mkdir -p " .. quoted(path)) == 0 or nil
+    -- LuaJIT returns 0 or true (Lua 5.2 compatible builds) on success.
+    local status = os.execute("mkdir -p " .. quoted(path))
+    return (status == 0 or status == true) or nil
 end
 local book = { book_id = "full-book" }
 local workspace = Content.open_full_download_workspace(settings, book)
