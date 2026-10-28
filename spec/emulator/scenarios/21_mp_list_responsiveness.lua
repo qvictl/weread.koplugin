@@ -37,19 +37,22 @@ return function(H)
         H.mock_control({ match = "/web/mp/articles", delay = 1.5, times = 0 })
         local worker_pid
         local launch = ffiutil.runInSubProcess
-        H.call(function()
-            ffiutil.runInSubProcess = function(...)
-                local pid, fd = launch(...)
-                worker_pid = pid
-                return pid, fd
-            end
-            plugin:fetchMPArticles(book)
-        end)
-        H.wait_until("dismissable article request", function()
-            return worker_pid and getmetatable(H.input_window()) == TrapWidget
-                and (H.mock_state().started_counts["/web/mp/articles"] or 0) > started_prior
-        end, 5)
+        local launched, launch_err = xpcall(function()
+            H.call(function()
+                ffiutil.runInSubProcess = function(...)
+                    local pid, fd = launch(...)
+                    worker_pid = pid
+                    return pid, fd
+                end
+                plugin:fetchMPArticles(book)
+            end)
+            H.wait_until("dismissable article request", function()
+                return worker_pid and getmetatable(H.input_window()) == TrapWidget
+                    and (H.mock_state().started_counts["/web/mp/articles"] or 0) > started_prior
+            end, 5)
+        end, debug.traceback)
         H.call(function() ffiutil.runInSubProcess = launch end)
+        if not launched then error(launch_err, 0) end
         local started = H.now_ms()
         H.tap_at(580, 20)
         H.wait_until("article request dismissed", function() return H.input_window() == previous end, 5)
