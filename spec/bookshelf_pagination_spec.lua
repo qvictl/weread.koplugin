@@ -343,14 +343,11 @@ shown[#shown].callbacks.on_page_changed(2)
 
 local pending, fetches, written_archives
 host.requireLogin = function() return true end
-host.showBusy = function() end
-host.closeBusy = function() end
-host.showInfo = function() end
-host._runNetworkRequest = function(_self, _busy, _label, task, on_success, on_failure)
-    local ok, value = pcall(task)
-    if ok then return on_success(value) end
-    return on_failure(value, false)
-end
+host.showBusy = function(self) self.busy_message = {} end
+host.closeBusy = function(self) self.busy_message = nil end
+local notices = {}
+host.showInfo = function(_self, message) notices[#notices + 1] = message end
+host._runNetworkRequest = require("spec.helpers.immediate_network_request")
 host.runOnlineTask = function(_self, _label, callback) pending = callback return true end
 host.client.get_shelf = function()
     fetches = (fetches or 0) + 1
@@ -395,6 +392,14 @@ host.client.get_shelf = function() error("fixture") end
 local before_failure = #shown
 shown[#shown].callbacks.on_refresh()
 expect(#shown == before_failure and not host.shelf_refreshing, "failed refresh replaced the shelf or stayed locked")
+local before_cancel, notices_before = #shown, #notices
+host.cancel_network_request = true
+shown[#shown].callbacks.on_refresh()
+expect(#shown == before_cancel and #notices == notices_before,
+    "cancelled refresh opened a view or reported an error")
+expect(host.busy_message == nil and not host.shelf_refreshing,
+    "cancelled refresh kept its busy message or refresh lock")
+host.cancel_network_request = false
 host.library_db.getShelf = function() return grouped_books end
 host.library_db.getShelfArchives = function() return archives end
 host:showBookshelf()

@@ -190,6 +190,8 @@ for _, module in ipairs({ Library, Common }) do
         if host[key] == nil then host[key] = value end
     end
 end
+host._runNetworkRequest = require("spec.helpers.immediate_network_request")
+
 
 -- 1. First open without a cached shelf and without a login: no request,
 -- no lock left behind, the QR login is offered.
@@ -532,5 +534,17 @@ host.showBookRecord = function(_self, book) opened_book = book end
 host:showCurrentBookDetails()
 expect(opened_book == records["7"] and opened_book.book_id == "7",
     "current book details did not open the stored record")
+
+local original_list, original_info = host.showTrackedList, host.showInfo
+local cancel_lists, cancel_notices = 0, 0
+host.showTrackedList = function() cancel_lists = cancel_lists + 1 end
+host.showInfo = function() cancel_notices = cancel_notices + 1 end
+host.cancel_network_request = true
+host:searchWithUI("cancelled")
+drain()
+expect(cancel_lists == 0 and cancel_notices == 0 and host.busy_message == nil,
+    "cancelled search opened a result/error view or kept busy state")
+host.cancel_network_request = false
+host.showTrackedList, host.showInfo = original_list, original_info
 
 print(("library_shelf_sync_spec: %d checks"):format(checks))

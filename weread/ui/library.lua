@@ -724,7 +724,10 @@ function M:refreshBookRecord(book, old_view, options)
     self:showBusy(_("Loading book info..."))
     local function failed(err, cancelled)
         self:closeBusy()
-        if cancelled then return end
+        if cancelled then
+            if options.automatic then self:showBookMenu(book) end
+            return
+        end
         logger.err("load book info failed:", log_error(err))
         if options.automatic then self:showBookMenu(book) end
         self:showInfo(T(_("%1 failed:\n%2"), _("Book info"), display_error(err)))

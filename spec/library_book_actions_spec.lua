@@ -202,6 +202,8 @@ for _, module in ipairs({ Library, Common }) do
         if host[key] == nil then host[key] = value end
     end
 end
+host._runNetworkRequest = require("spec.helpers.immediate_network_request")
+
 local real = {}
 for _, name in ipairs({ "showBookMenu", "showMPAccount", "refreshBookRecord", "openBookForReading" }) do
     real[name] = host[name]
@@ -312,6 +314,18 @@ book.title = "Stale"
 host:refreshBookRecord(book, left_page)
 drain()
 expect(#captured == 6 and book.title == "Fresh", "refresh re-opened a page the user had left")
+local original_info, cancel_notices = host.showInfo, 0
+host.showInfo = function() cancel_notices = cancel_notices + 1 end
+host.cancel_network_request = true
+host:refreshBookRecord(book, old_page)
+drain()
+expect(#captured == 6 and cancel_notices == 0 and host.busy_message == nil,
+    "manual refresh cancellation opened a new view, reported an error or kept busy state")
+host:refreshBookRecord(book, nil, { automatic = true })
+drain()
+expect(#captured == 7 and captured[7][2] == book and cancel_notices == 0 and host.busy_message == nil,
+    "automatic refresh cancellation did not show the cached book without an error")
+host.cancel_network_request, host.showInfo = false, original_info
 restore()
 
 -- 3. The detail page: legacy catalog import, status and metadata rows,
