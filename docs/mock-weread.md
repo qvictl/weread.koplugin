@@ -139,6 +139,7 @@ python3 scripts/mock_weread.py --port 8765 \
 | `status` | 注入的 HTTP 错误码，400–599 |
 | `times` | 失败次数；0 关闭失败、1 仅下一次、-1 持续失败 |
 | `empty_shelf` / `empty_annotations` | 返回空书架 / 空划线想法，布尔值 |
+| `shelf_idless_entry` | 书架同步额外返回一条没有任何书籍 ID 的条目，布尔值 |
 
 例如让每个章节的首个分片慢 2 秒，便于在真实进度框点击取消：
 

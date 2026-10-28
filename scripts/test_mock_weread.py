@@ -8,7 +8,7 @@ from urllib.error import HTTPError
 from urllib.request import ProxyHandler, Request, build_opener
 
 from fetch_weread_epub import decode_content_shards, decode_style_shard, weread_e
-from mock_weread import (BIG_BOOK_ID, BIG_CHAPTER_COUNT, BOOK_ID, CHAPTERS, MockServer, annotation,
+from mock_weread import (BIG_BOOK_ID, BIG_CHAPTER_COUNT, BOOK_ID, BOOKS, CHAPTERS, MockServer, annotation,
                          chapter_html, shards)
 
 
@@ -45,7 +45,7 @@ class MockTests(unittest.TestCase):
 
     def setUp(self):
         self.request("/__control", dict(delay=0, match="", status=503, times=0,
-                                        empty_shelf=False, empty_annotations=False,
+                                        empty_shelf=False, empty_annotations=False, shelf_idless_entry=False,
                                         qr_mode="succeed", qr_delay=0))
 
     def test_contract_and_real_reference_decoder(self):
@@ -88,7 +88,12 @@ class MockTests(unittest.TestCase):
         self.assertGreaterEqual(time.monotonic() - start, 0.02)
         self.assertEqual(self.gateway("/book/info", bookId=BOOK_ID)[0], 200)
         self.assertEqual(self.gateway("/shelf/sync")[0], 200)
-        self.request("/__control", dict(empty_shelf=True, empty_annotations=True))
+        self.request("/__control", dict(shelf_idless_entry=True))
+        books = self.gateway("/shelf/sync")[1]["books"]
+        self.assertEqual(len(books), len(BOOKS) + 1)
+        self.assertNotIn("bookId", books[-1])
+        self.assertEqual(self.request("/__control", dict(shelf_idless_entry=1))[0], 400)
+        self.request("/__control", dict(shelf_idless_entry=False, empty_shelf=True, empty_annotations=True))
         self.assertEqual(self.gateway("/shelf/sync")[1]["books"], [])
         self.assertEqual(self.gateway("/book/underlines", bookId=BOOK_ID, chapterUid=1)[1]["underlines"], [])
 
