@@ -670,6 +670,16 @@ do
     local retried = fetch(tar_entry("complete.png", PNG .. "complete") .. good .. TAR_END, "m6", failed_names)
     expect(#retried == 2 and retried[1].href == "images/complete.png" and retried[2].href == "images/p.png",
         "retry after a failed TAR did not reuse its original asset names")
+    local collided_names = { ["fig.png"] = true }
+    expect_error(function()
+        fetch(tar_entry("a/fig.png", PNG .. "new")
+            .. tar_entry("b/fig.png", PNG .. string.rep("p", 600)):sub(1, 512 + 400),
+            "collision-retry", collided_names)
+    end, "TAR entry", "a colliding partial TAR was accepted")
+    local collided_retry = fetch(tar_entry("a/fig.png", PNG .. "new")
+        .. tar_entry("b/fig.png", PNG .. "second") .. TAR_END, "collision-retry", collided_names)
+    expect(collided_retry[1].href == "images/fig-2.png" and collided_retry[2].href == "images/fig-3.png",
+        "rolled-back suffixes must be reused on retry")
     local bad_size = tar_entry("p.png", "data")
     bad_size = bad_size:sub(1, 124) .. "zzzzzzzzzzz\0" .. bad_size:sub(137)
     malformed(bad_size, "m5", "TAR entry size", "a non-octal TAR size was accepted")
