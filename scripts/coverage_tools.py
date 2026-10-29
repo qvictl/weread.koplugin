@@ -9,12 +9,12 @@ with all their executable lines missed (`merge --all-files`).
     coverage_tools.py merge --out coverage/unit.stats.out --all-files coverage/parts
     # line report (needs LuaCov on LUA_PATH and luajit)
     coverage_tools.py report coverage/unit.stats.out coverage/unit.report.out
-    # PR gate: diff unit, diff combined, overall ratchet, dated targets. The
-    # ratchet compares with main's coverage at merge-base(base, head) (for a
-    # PR merge commit: its first parent) taken from history.jsonl, falling
-    # back to the nearest ancestor with a record, then the day-one baseline.
-    coverage_tools.py gate --unit coverage/unit.report.out --combined coverage/combined.report.out \
-        --base origin/main --labels "a,b" --history history.jsonl --summary out.md --json out.json
+    # PR unit gate against its own merge-base and nearest unit history record.
+    coverage_tools.py gate --mode unit --unit coverage/unit.report.out --base origin/main --history history.jsonl
+    # Release combined gate over all unreleased changes since the last genuine
+    # combined ancestor. The overall ratchet also includes this candidate.
+    coverage_tools.py gate --mode release --unit coverage/unit.report.out --combined coverage/combined.report.out \
+        --base origin/main --history history.jsonl --summary out.md --json out.json
     # main: history record (keyed by SHA), baseline.json and badges for the coverage branch
     coverage_tools.py baseline --unit ... --combined ... --sha SHA --out-dir DIR
     # quick totals / single diff
@@ -357,7 +357,8 @@ def git_ancestors(sha: str, cwd=REPO, limit: int = 5000) -> list:
     if not sha:
         return []
     try:
-        out = subprocess.check_output(["git", "rev-list", f"--max-count={limit}", sha, "--"],
+        limit_args = [f"--max-count={limit}"] if limit is not None else []
+        out = subprocess.check_output(["git", "rev-list", *limit_args, sha, "--"],
                                       cwd=cwd, text=True, stderr=subprocess.DEVNULL)
     except subprocess.CalledProcessError:
         return [sha]
@@ -426,7 +427,7 @@ def gate(args) -> int:
     if mode == "release":
         # A version commit or a repeated candidate validation must cover the
         # entire batch since the previous authentic combined measurement.
-        ancestors = git_ancestors(args.head)
+        ancestors = git_ancestors(args.head, limit=None)
         previous = ancestors[1:]
         base_sha = ancestors[0]
         baseline, match = select_baseline(records, base_sha, ancestors)
@@ -596,7 +597,7 @@ def baseline(args) -> int:
     except (OSError, json.JSONDecodeError):
         visible = None
     if visible:
-        measured, _ = select_baseline(entries, visible["sha"], git_ancestors(visible["sha"]), "combined")
+        measured, _ = select_baseline(entries, visible["sha"], git_ancestors(visible["sha"], limit=None), "combined")
         if measured:
             value = measured["combined"]["percent"]
             (out / "badge.json").write_text(json.dumps(dict(

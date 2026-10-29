@@ -1,26 +1,7 @@
 name: PR policy
 
-# tests-policy (required check for main):
-# 1. Lua code changes need test changes; a feat/fix PR must add or update an
-#    emulator scenario (scripts/check_test_policy.py). Maintainer label
-#    `no-tests-needed` (docs, comments, log wording only) waives it;
-#    `upstream-sync` PRs are exempt.
-# 2. Coverage gates from .ci/coverage-policy.json (scripts/coverage_tools.py
-#    gate): changed executable Lua lines >= 80% covered by unit specs and
-#    >= 90% by unit specs + emulator scenarios; overall coverage must not drop
-#    below main's coverage at the PR's own base commit; dated whole-plugin
-#    targets.
-# The emulator line counts come from this PR's Integration run (artifacts
-# coverage-emulator-shard-*), so this job waits for it. That run measured
-# the merge commit refs/pull/N/merge pointed at (measured-commit.txt), so
-# this job checks out the same commit for the unit specs and the diff, and
-# the ratchet compares with main's coverage at that merge commit's first
-# parent (history.jsonl on the `coverage` branch, keyed by main SHA; nearest
-# recorded ancestor if that commit has none). PRs in flight together are
-# thus judged independently: tests another PR merges meanwhile do not raise
-# this PR's bar. Without an Integration run the PR head is measured against
-# merge-base(head, main). The report goes to the job summary and a sticky
-# PR comment.
+# PRs measure unit coverage only: diff >=80%, own-base unit ratchet and
+# dated unit/module floors. Combined coverage is a Release gate; no IT wait.
 
 on:
   pull_request:
@@ -47,7 +28,7 @@ jobs:
   tests-policy:
     name: tests-policy
     runs-on: ubuntu-latest
-    timeout-minutes: 75
+    timeout-minutes: 20
     steps:
       - name: Resolve pull request
         id: pr
@@ -85,86 +66,20 @@ jobs:
           fi
           ls -la "$RUNNER_TEMP/baseline"
 
-      - name: Wait for this commit's Integration run
-        id: integration
-        env:
-          GH_TOKEN: ${{ github.token }}
-          HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
-        run: |
-          set -euo pipefail
-          deadline=$((SECONDS + 60 * 60))
-          run_id=""
-          while (( SECONDS < deadline )); do
-            run_json="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/integration.yml/runs?head_sha=$HEAD_SHA&per_page=20" \
-              --jq '[.workflow_runs[] | select(.event == "pull_request" or .event == "workflow_dispatch")] | sort_by(.created_at) | last // empty')"
-            if [[ -n "$run_json" ]]; then
-              run_id="$(jq -r .id <<<"$run_json")"
-              status="$(jq -r .status <<<"$run_json")"
-              echo "Integration run $run_id: $status"
-              [[ "$status" == "completed" ]] && break
-            else
-              echo "No Integration run for $HEAD_SHA yet"
-            fi
-            sleep 30
-          done
-          echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
-
-      # A dispatched policy may inspect an older or external PR head. Use
-      # tooling from this workflow's fixed revision, never from that head.
       - name: Checkout coverage tooling
-        if: steps.integration.outputs.run_id != ''
         run: |
           tools="$RUNNER_TEMP/coverage-tooling"
           git init --quiet "$tools"
-          git -C "$tools" sparse-checkout set --no-cone /scripts/download_emulator_coverage.py
+          git -C "$tools" sparse-checkout set --no-cone /scripts/download_emulator_coverage.py /scripts/coverage_tools.py
           GIT_TERMINAL_PROMPT=0 git -C "$tools" -c credential.helper= fetch --quiet --depth 1 \
             "https://github.com/$GITHUB_REPOSITORY.git" "$GITHUB_WORKFLOW_SHA"
           git -C "$tools" checkout --quiet --detach FETCH_HEAD
 
-      - name: Download emulator coverage
-        if: steps.integration.outputs.run_id != ''
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RUN_ID: ${{ steps.integration.outputs.run_id }}
-        run: |
-          python3 "$RUNNER_TEMP/coverage-tooling/scripts/download_emulator_coverage.py" --repo "$GITHUB_REPOSITORY" \
-            --run "$RUN_ID" --out "$RUNNER_TEMP/emulator-coverage"
-          find "$RUNNER_TEMP/emulator-coverage" -type f
-
-      # Measure what the Integration run measured: unit specs, changed lines
-      # and the ratchet base all refer to the same commit as the emulator
-      # line counts.
-      - name: Check out the measured commit
+      - name: Measure the pull request against its own base
         id: measured
-        env:
-          HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
         run: |
-          set -euo pipefail
-          mapfile -t shas < <(find "$RUNNER_TEMP/emulator-coverage" -name measured-commit.txt -exec cat {} + 2>/dev/null \
-            | tr -d '\r' | grep -E '^[0-9a-f]{40}$' | sort -u)
-          if (( ${#shas[@]} == 1 )) && [[ "${shas[0]}" != "$HEAD_SHA" ]]; then
-            measured="${shas[0]}"
-            # Only a merge commit of this PR's head (second parent) is measured.
-            if ! git fetch --no-tags origin "$measured"; then
-              echo "::warning::Cannot fetch the Integration run's commit $measured; measuring the PR head."
-            elif [[ "$(git rev-parse -q --verify "$measured^2" || true)" != "$HEAD_SHA" ]]; then
-              echo "::warning::$measured is not a merge commit of the PR head $HEAD_SHA; measuring the PR head."
-            else
-              git checkout -q --detach "$measured"
-              echo "Measuring $measured (the Integration run's merge commit)"
-            fi
-          elif (( ${#shas[@]} > 1 )); then
-            echo "::warning::Emulator shards measured different commits (${shas[*]}); measuring the PR head."
-          fi
-          base_sha=""
-          if git rev-parse -q --verify 'HEAD^2' >/dev/null && [[ "$(git rev-parse 'HEAD^2')" == "$HEAD_SHA" ]]; then
-            base_sha="$(git rev-parse 'HEAD^1')"
-          else
-            base_sha="$(git merge-base HEAD "origin/$BASE_REF")"
-          fi
           echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-          echo "base_sha=$base_sha" >> "$GITHUB_OUTPUT"
-          echo "Measured $(git rev-parse HEAD); ratchet base $base_sha"
+          echo "base_sha=$(git merge-base HEAD "origin/$BASE_REF")" >> "$GITHUB_OUTPUT"
 
       - name: Tests accompany code changes
         id: policy
@@ -198,42 +113,10 @@ jobs:
           BASE_SHA: ${{ steps.measured.outputs.base_sha }}
         run: |
           set -euo pipefail
-          combined_args=()
-          if find "$RUNNER_TEMP/emulator-coverage" -name emulator.stats.out 2>/dev/null | grep -q .; then
-            python3 scripts/coverage_tools.py merge --all-files --out coverage/combined.stats.out \
-              coverage/unit.stats.out "$RUNNER_TEMP/emulator-coverage"
-            python3 scripts/coverage_tools.py report coverage/combined.stats.out coverage/combined.report.out
-            combined_args=(--combined coverage/combined.report.out)
-          fi
-          history="$RUNNER_TEMP/baseline/history.jsonl"
-          if python3 scripts/coverage_tools.py gate --help | grep -q -- '--base-sha'; then
-            base_args=(--base-sha "$BASE_SHA")
-          else
-            # The measured tree predates per-commit baselines (a PR head whose
-            # Integration artifact has no measured-commit.txt): hand its gate
-            # the record of the base, or its nearest recorded ancestor, as
-            # --baseline instead of main's latest.
-            base_args=()
-            declare -A recorded=()
-            if [[ -s "$history" ]]; then
-              while read -r sha; do recorded[$sha]=1; done < <(jq -R -r 'fromjson? | objects | .sha // empty' "$history")
-            fi
-            while read -r sha; do
-              if [[ -n "${recorded[$sha]:-}" ]]; then
-                jq -R -c --arg sha "$sha" 'fromjson? | objects | select(.sha == $sha)' "$history" | tail -n 1 \
-                  > "$RUNNER_TEMP/baseline/base.json"
-                base_args=(--baseline "$RUNNER_TEMP/baseline/base.json")
-                echo "Older gate tooling: baseline main@${sha:0:8} for base ${BASE_SHA:0:8}"
-                break
-              fi
-            done < <(git rev-list --max-count=5000 "$BASE_SHA")
-          fi
-          python3 scripts/coverage_tools.py gate \
-            --unit coverage/unit.report.out "${combined_args[@]}" \
-            --base "origin/$BASE_REF" --head HEAD \
-            --labels "$LABELS" \
-            "${base_args[@]}" \
-            --history "$history" \
+          COVERAGE_REPO="$GITHUB_WORKSPACE" python3 "$RUNNER_TEMP/coverage-tooling/scripts/coverage_tools.py" gate \
+            --mode unit --unit coverage/unit.report.out \
+            --base "origin/$BASE_REF" --base-sha "$BASE_SHA" --head HEAD \
+            --labels "$LABELS" --history "$RUNNER_TEMP/baseline/history.jsonl" \
             --summary "$RUNNER_TEMP/coverage.md" --json "$RUNNER_TEMP/coverage.json"
 
       - name: Compose summary
