@@ -271,6 +271,65 @@ local ok, err = xpcall(function()
     children[launched].task(); children[launched].done = true
     pump(10)
     expect(b_ran and not shared:busy() and Budget.available(), "reentrant queued work never completed")
+    -- Actual Downloader + coroutine adapter + BackgroundWorker retain the
+    -- reason after a real launch; an empty IPC result is not a fork failure.
+    d.settings.data_dir = "/data"
+    d.settings.get = function(_, key, default)
+        if key == "account" then return { user_vid = "A" } end
+        return default
+    end
+    d.memory_gate = function() return true end
+    local function download_wait()
+        local outcome
+        local request_dl = { book = {}, account_id = "A", trapper = true }
+        local co = coroutine.create(function()
+            outcome = { pcall(d._runInterruptible, d, request_dl, function() return "unused" end) }
+        end)
+        expect(coroutine.resume(co), "download error probe failed to start")
+        return co, function() return outcome end, request_dl
+    end
+    local empty_pid = launched + 1
+    local empty_co, empty_result = download_wait()
+    expect(launched == empty_pid and coroutine.status(empty_co) == "suspended",
+        "missing-result probe did not launch a worker: " .. tostring(empty_result() and empty_result()[2]))
+    children[empty_pid].done = true -- The process exited without writing IPC.
+    pump(10)
+    expect(empty_result() and empty_result()[1] == false
+        and tostring(empty_result()[2]):find("The operation did not return a result.", 1, true)
+        and children[empty_pid].reaped and Budget.available(),
+        "started Downloader worker with no IPC was reported as a launch failure")
+
+    local clock = 0
+    replace_module("weread.lib.background_worker", { new = function(_, options)
+        options.clock = function() return clock end
+        options.timeout = 1 -- Exercise the actual watchdog without changing production deadlines.
+        return Worker:new(options)
+    end })
+    local timeout_pid = launched + 1
+    local timeout_co, timeout_result = download_wait()
+    expect(launched == timeout_pid and coroutine.status(timeout_co) == "suspended",
+        "timeout probe did not launch a worker")
+    clock = 2
+    pump(1)
+    expect(signalled[#signalled] == timeout_pid and not Budget.available() and not timeout_result(),
+        "timeout returned or released its slot before the worker was reaped")
+    children[timeout_pid].done = true
+    pump(10)
+    expect(timeout_result() and timeout_result()[1] == false
+        and tostring(timeout_result()[2]):find("The operation timed out.", 1, true)
+        and children[timeout_pid].reaped and Budget.available(),
+        "started Downloader timeout lost its reason after exact reaping")
+    package.loaded["weread.lib.background_worker"] = Worker
+    d.settings.data_dir = nil
+    local before_start_failure = launched
+    local failed_start_co, failed_start_result, failed_start_dl = download_wait()
+    expect(coroutine.status(failed_start_co) == "dead" and launched == before_start_failure
+        and failed_start_result()[1] == false
+        and tostring(failed_start_result()[2]):find("could not start download worker", 1, true)
+        and not failed_start_dl.cancelled and Budget.available(),
+        "unavailable worker startup changed its legacy failure or cancellation semantics")
+    d.settings.data_dir = "/data"
+
     local subsequent_wait = { keep_waiting = true }
     local co_waiting, waiting_result = start(subsequent_wait)
     local completed_dismiss = subsequent_wait.dismiss_callback
