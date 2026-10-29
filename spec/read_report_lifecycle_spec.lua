@@ -641,6 +641,7 @@ end)
 local function job_for(report, book_id)
     return {
         book_id = book_id or "book",
+        owner = require("weread.lib.request_owner").capture(report.settings),
         auth_fingerprint = report:_auth_fingerprint(),
         context_fingerprint = report:_context_fingerprint(book_id or "book"),
     }
@@ -760,6 +761,63 @@ test("an inline upload records renewal and survives a failed context write", fun
     expect(report.last_renew_attempt == 1000, "renewal cooldown started")
     expect(H.count_logs("warn", "persist progress upload context failed:") == 1, "logged")
     expect(env.settings.flushes == 0, "no session to persist")
+end)
+
+-- A completed job/cache belongs to its accepting cookie/gateway identity.
+for _, stage in ipairs({ "active", "cached" }) do
+    for _, change in ipairs({ "uid", "api_key", "ticket" }) do
+        test(stage .. " upload owner " .. change, function()
+            local settings, runner = H.settings(), H.runner()
+            settings.store.account, settings.store.api_key = { user_vid = "42" }, "synthetic-api-one"
+            local report, env = H.new_report{ settings = settings, subprocess = runner }
+            report.ensure_context = function() return H.ready_book(report) end
+            local position = { chapter_uid = 6, chapter_offset = 10, percent = 4 }
+            report:upload_position("book", position, 0)
+            runner.finish(); runner.done = true
+            if stage == "cached" then env.scheduler:run_next() end
+            if change == "uid" then settings.store.account.user_vid = "other"
+            elseif change == "api_key" then settings.store.api_key = "synthetic-api-two"
+            else settings.store.wr_ticket = "rotated" end
+            local flushes = settings.flushes
+            if stage == "active" then env.scheduler:run_next() end
+            if change == "ticket" then
+                local accepted = report:upload_position("book", position, 0)
+                expect(accepted == true and runner.forks == 1, "same-account ticket rotation discarded result")
+            else
+                expect(report.upload_result == nil or report.upload_result.owner ~= nil, "cache lost owner metadata")
+                local accepted, outcome = report:upload_position("book", position, 0)
+                expect(not accepted and outcome.error_kind == "pending", "old accepted result crossed owner")
+                expect(settings.flushes == flushes, "old result persisted into another owner")
+                expect(runner.forks == 2, "fresh owner did not get its own job")
+            end
+        end)
+    end
+end
+
+test("account invalidation cancels jobs and caches without writing new settings", function()
+    local settings, runner = H.settings(), H.runner()
+    local report = H.new_report{ settings = settings, subprocess = runner }
+    report.ensure_context = function() return H.ready_book(report) end
+    report:upload_position("book", { percent = 4 }, 0)
+    report.upload_result = { accepted = true }
+    report.server_session_ready, report.server_session_book_id = true, "book"
+    local flushes = settings.flushes
+    report:on_account_changed()
+    expect(report.job == nil and report.upload_result == nil and #runner.terminated == 1,
+        "account change kept old job/cache")
+    expect(not report.server_session_ready and report.owner_changed, "old session credit retained")
+    expect(settings.flushes == flushes, "account invalidation wrote new-owner settings")
+end)
+
+test("old owner cannot write context or renewed auth", function()
+    local report, env = H.new_report()
+    local job = job_for(report)
+    env.settings.store.api_key = "synthetic-new-api"
+    local flushes, updates = env.settings.flushes, #env.settings.auth_updates
+    expect(report:_write_back(job, { auth = { cookies = {} }, book = { progress = 50 } }) == false,
+        "old job write-back accepted")
+    expect(env.settings.flushes == flushes and #env.settings.auth_updates == updates,
+        "old job touched new owner")
 end)
 
 print(("read_report_lifecycle_spec: %d checks"):format(checks))

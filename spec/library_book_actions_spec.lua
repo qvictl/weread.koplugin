@@ -655,4 +655,9 @@ expect(cancelled_mp_lists == 0 and cancelled_mp_notices == 0 and host.busy_messa
 host.cancel_network_request = false
 host.showMPArticleList, host.showInfo = old_mp_list, old_info
 
+local progress_resets, report_resets = 0, 0
+host.progress_sync = { on_account_changed = function() progress_resets = progress_resets + 1 end }
+host.read_report = { on_account_changed = function() report_resets = report_resets + 1 end }
+host:onWeReadAccountChanged()
+expect(progress_resets == 1 and report_resets == 1, "account transition did not invalidate both state machines")
 print(("library_book_actions_spec: %d checks"):format(checks))

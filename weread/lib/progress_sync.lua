@@ -1,4 +1,5 @@
 local PositionMapper = require("weread.lib.position_mapper")
+local RequestOwner = require("weread.lib.request_owner")
 
 local logger = require("weread.lib.logger").scoped("ProgressSync")
 
@@ -96,6 +97,7 @@ function ProgressSync:new(options)
 
     local object = {
         settings = options.settings,
+        session_owner = RequestOwner.capture(options.settings),
         client = options.client,
         scheduler = options.scheduler,
         get_document = options.get_document,
@@ -104,6 +106,9 @@ function ProgressSync:new(options)
         get_book = options.get_book,
         get_chapters = options.get_chapters,
         refresh_catalog = options.refresh_catalog,
+        fetch_catalog = options.fetch_catalog,
+        apply_catalog = options.apply_catalog,
+        request = options.request,
         get_file_context = options.get_file_context,
         run_online = options.run_online,
         upload_position = options.upload_position,
@@ -129,6 +134,7 @@ function ProgressSync:_config()
 end
 
 function ProgressSync:_persist(book_id, patch)
+    if not RequestOwner.matches(self.settings, self.session_owner) then return false end
     book_id = tostring(book_id or "")
     if book_id == "" or type(patch) ~= "table" then return false end
     local book = stored_book(self.settings, book_id) or { book_id = book_id }
@@ -162,6 +168,7 @@ end
 -- host's onCloseWidget. Unsent positions stay persisted in the book records
 -- and are uploaded by the next instance.
 function ProgressSync:teardown(reason)
+    self:_cancel_pull()
     self:_close_choice(reason or "teardown")
     self:_persist_unsaved_uploads()
     self.torn_down = true
@@ -455,6 +462,7 @@ end
 -- up. Automatic uploads carry guard data so the child never moves the
 -- cloud back past newer reading done elsewhere (see ReadReport).
 function ProgressSync:_enqueue_upload(position, reason, options)
+    if not RequestOwner.matches(self.settings, self.session_owner) then return nil end
     options = options or {}
     if type(position) ~= "table" then return nil end
     local book_id = tostring(position.book_id or self.current_book_id or "")
@@ -462,6 +470,7 @@ function ProgressSync:_enqueue_upload(position, reason, options)
     local entry = {
         book_id = book_id,
         position = copy(position),
+        owner = RequestOwner.capture(self.settings),
         reason = reason or "unspecified",
         show_result = options.show_result == true,
         explicit = options.explicit == true,
@@ -478,12 +487,15 @@ function ProgressSync:_enqueue_upload(position, reason, options)
 end
 
 function ProgressSync:_persist_upload(entry)
-    self:_persist(entry.book_id, {
+    if not RequestOwner.matches(self.settings, entry.owner) then return false end
+    local persisted = self:_persist(entry.book_id, {
         pending_upload_position = entry.position,
         pending_upload_reason = entry.reason,
         pending_upload_baselines = entry.baselines or false,
+        pending_upload_owner = RequestOwner.digest(entry.owner),
     })
-    entry.persisted = true
+    if persisted then entry.persisted = true end
+    return persisted
 end
 
 -- Queued positions that so far only live in memory (suspend) must survive
@@ -505,6 +517,7 @@ end
 -- Positions persisted by earlier instances (closed documents, failed
 -- uploads). Without book_id: every book; with it: that book only.
 function ProgressSync:_load_persisted_uploads(book_id)
+    if not RequestOwner.matches(self.settings, self.session_owner) then return end
     if self:_config().upload_on_close ~= true then return end
     self.upload_queue = self.upload_queue or {}
     local books
@@ -518,9 +531,14 @@ function ProgressSync:_load_persisted_uploads(book_id)
         end
         books = result
     end
+    local owner = RequestOwner.capture(self.settings)
+    local digest = RequestOwner.digest(owner)
     for id, book in pairs(books) do
         id = tostring(id)
+        -- Older unsigned positions stay on disk: the global book store
+        -- cannot prove their account. Fresh local positions can replace them.
         if type(book) == "table" and type(book.pending_upload_position) == "table"
+            and book.pending_upload_owner == digest
             and not self.upload_queue[id]
             and not (self.uploading and self.uploading.book_id == id) then
             local position = copy(book.pending_upload_position)
@@ -529,6 +547,7 @@ function ProgressSync:_load_persisted_uploads(book_id)
                 book_id = id,
                 position = position,
                 reason = book.pending_upload_reason or "deferred",
+                owner = owner,
                 baselines = type(book.pending_upload_baselines) == "table"
                     and copy(book.pending_upload_baselines) or {},
                 persisted = true,
@@ -540,6 +559,10 @@ end
 -- Starts the next queued upload unless one is running, the device sleeps,
 -- or the link is down (the queue then waits for the next resume/open).
 function ProgressSync:_pump_uploads()
+    if not RequestOwner.matches(self.settings, self.session_owner) then
+        self:on_account_changed()
+        return false
+    end
     if self.uploading or self.suspended or self.torn_down then return false end
     local queue = self.upload_queue or {}
     local entry
@@ -548,7 +571,9 @@ function ProgressSync:_pump_uploads()
         -- or an open choice dialog, not uploaded behind it.
         local held = book_id == self.current_book_id
             and (self.pulling or self.choice ~= nil)
-        if not held and (not entry or book_id == self.current_book_id) then
+        if not RequestOwner.matches(self.settings, candidate.owner) then
+            queue[book_id] = nil
+        elseif not held and (not entry or book_id == self.current_book_id) then
             entry = candidate
         end
     end
@@ -567,6 +592,7 @@ function ProgressSync:_pump_uploads()
 end
 
 function ProgressSync:_start_upload(entry)
+    if not RequestOwner.matches(self.settings, entry.owner) then return false end
     self.uploading = entry
     self.upload_token = (self.upload_token or 0) + 1
     local token = self.upload_token
@@ -584,6 +610,10 @@ function ProgressSync:_start_upload(entry)
     local attempt
     attempt = function()
         if token ~= self.upload_token then return end
+        if not RequestOwner.matches(self.settings, entry.owner) then
+            if self.uploading == entry then self.uploading = nil end
+            return
+        end
         attempts = attempts + 1
         local ok, accepted, outcome = pcall(
             self.upload_position,
@@ -592,6 +622,10 @@ function ProgressSync:_start_upload(entry)
             0
         )
         if token ~= self.upload_token then return end
+        if not RequestOwner.matches(self.settings, entry.owner) then
+            if self.uploading == entry then self.uploading = nil end
+            return
+        end
         -- The upload runs in a background job; poll for its result.
         if ok and not accepted and type(outcome) == "table"
             and outcome.error_kind == "pending"
@@ -615,6 +649,7 @@ function ProgressSync:_start_upload(entry)
 end
 
 function ProgressSync:_finish_upload(entry, ok, accepted, outcome)
+    if not RequestOwner.matches(self.settings, entry.owner) then return false end
     local book_id = entry.book_id
     local position = entry.position
     local is_current = book_id == self.current_book_id
@@ -623,6 +658,7 @@ function ProgressSync:_finish_upload(entry, ok, accepted, outcome)
         pending_upload_position = false,
         pending_upload_reason = false,
         pending_upload_baselines = false,
+        pending_upload_owner = false,
     } or {}
     if ok and accepted then
         self.last_uploaded_position = copy(position)
@@ -773,6 +809,9 @@ function ProgressSync:_resolve(local_position, remote, context, options)
     -- A position queued for this book (suspend/close) is decided here: it is
     -- uploaded only on the "keep local" paths below.
     local queued = self.upload_queue and self.upload_queue[context.book_id]
+    if queued and not RequestOwner.matches(self.settings, queued.owner) then
+        self.upload_queue[context.book_id], queued = nil, nil
+    end
     if queued then
         self.upload_queue[context.book_id] = nil
         options.upload_pending = true
@@ -785,6 +824,7 @@ function ProgressSync:_resolve(local_position, remote, context, options)
                 pending_upload_position = false,
                 pending_upload_reason = false,
                 pending_upload_baselines = false,
+                pending_upload_owner = false,
             })
         end
     end
@@ -957,11 +997,24 @@ function ProgressSync:_offer_choice(local_position, remote, context, options)
     if self.choice then return end
     self.state = "awaiting_choice"
     local choice_generation = self.generation
+    local choice_owner = RequestOwner.capture(self.settings)
+    local choice_position = self:capture_local()
+    local choice_path = document_path(self.get_document())
     local choice
     local function choice_is_current()
-        return self.choice == choice
-            and choice_generation == self.generation
-            and tostring(self.detect_book() or "") == context.book_id
+        if self.choice ~= choice or choice_generation ~= self.generation
+            or tostring(self.detect_book() or "") ~= context.book_id then return false end
+        local owner_valid = RequestOwner.matches(self.settings, choice_owner)
+        local current_position = owner_valid and self:capture_local() or nil
+        if not owner_valid or document_path(self.get_document()) ~= choice_path
+            or not choice_position or not current_position
+            or not PositionMapper.same_position(current_position, choice_position) then
+            self:_close_choice("context_changed")
+            self.verified, self.remote_floor, self.dirty = false, nil, true
+            if not owner_valid then self.report_fallback = nil end
+            return false
+        end
+        return true
     end
     local function chapter_title(position)
         local uid = position and position.chapter_uid
@@ -1052,8 +1105,22 @@ function ProgressSync:_schedule_pull_retry(options, retry_token)
     return true
 end
 
+function ProgressSync:_cancel_pull()
+    local cancel = self.pull_cancel
+    self.pull_cancel, self.pull_request, self.pulling = nil, nil, false
+    if type(cancel) == "function" then
+        local ok, err = pcall(cancel)
+        if not ok then log("warn", "cancel progress pull failed:", tostring(err)) end
+    end
+end
+
 function ProgressSync:_pull(options)
     options = options or {}
+    if not RequestOwner.matches(self.settings, self.session_owner) then
+        self:on_account_changed()
+        if not options.manual then return false end
+        self.session_owner = RequestOwner.capture(self.settings)
+    end
     if self.pulling then return false end
     -- A choice dialog is still waiting for an answer: do not stack another.
     if self.choice then return false end
@@ -1070,7 +1137,7 @@ function ProgressSync:_pull(options)
     if not local_position then
         if not (options.manual == true
             and reason == "catalog_unavailable"
-            and type(self.refresh_catalog) == "function") then
+            and (type(self.fetch_catalog) == "function" or type(self.refresh_catalog) == "function")) then
             if options.manual then
                 self.notify("local_unavailable", { error = reason })
             end
@@ -1092,99 +1159,137 @@ function ProgressSync:_pull(options)
         return false
     end
 
-    local generation = self.generation
-    self.pulling = true
+    local generation, request_token = self.generation, {}
+    local book_id = tostring(self.detect_book() or "")
+    local path = document_path(self.get_document())
+    local owner = RequestOwner.capture(self.settings)
+    self.session_owner = owner
+    self.pull_request, self.pulling = request_token, true
     self.state = "pulling"
-    local function pull_task()
-        -- Scheduled through run_online, which teardown/on_suspend can't
-        -- cancel: never start network work for a closed or sleeping object.
-        if self.torn_down or self.suspended then
-            self.pulling = false
-            return
-        end
-        if not local_position then
-            local book_id = tostring(self.detect_book() or "")
-            local refresh_ok, refreshed, refresh_error = pcall(
-                self.refresh_catalog, book_id)
-            if not refresh_ok then
-                refresh_error = refreshed
-                refreshed = nil
+    local function release()
+        if self.pull_request == request_token then
+            self.pull_request, self.pull_cancel, self.pulling = nil, nil, false
+            if self.state == "pulling" then self.state = "unverified" end
+            if not RequestOwner.matches(self.settings, owner) then
+                self.verified, self.remote_floor, self.report_fallback = false, nil, nil
             end
-            self.document_context = nil
-            local_position, reason, context = self:capture_local()
-            if not local_position then
-                self.pulling = false
+        end
+    end
+    local function current()
+        return self.pull_request == request_token and generation == self.generation
+            and not self.torn_down and not self.suspended and RequestOwner.matches(self.settings, owner)
+            and tostring(self.detect_book() or "") == book_id
+            and document_path(self.get_document()) == path
+    end
+    local function guarded(callback)
+        return function(...)
+            if not current() then release(); return end
+            local args = { ... }
+            local ok, err = xpcall(function() return callback(unpack(args)) end, debug.traceback)
+            if not ok then
+                release()
                 self.state = "error"
-                self.notify("local_unavailable", {
-                    error = refresh_error or reason,
-                })
-                return
-            end
-            if type(refreshed) ~= "table" or #refreshed == 0 then
-                log("warn", "catalog refresh returned no chapters for:", book_id)
+                if options.manual then self.notify("pull_failed", { error = tostring(err) })
+                else self:_schedule_pull_retry(options, retry_token) end
             end
         end
-        local remote, pull_error = self:_fetch_remote(
-            context.book_id,
-            context.chapters
-        )
+    end
+    local function failed(err, cancelled)
         self.pulling = false
-        if generation ~= self.generation
-            or tostring(self.detect_book() or "") ~= context.book_id then
-            return
-        end
-        if not remote then
+        if cancelled then
+            self.state = self.verified and "synced" or "unverified"
+            if not options.manual then self:_schedule_pull_retry(options, retry_token) end
+        else
             self.state = "error"
-            self:_persist(context.book_id, {
-                last_pull_at = self.now(),
-                last_sync_error = tostring(pull_error),
-            })
-            if options.manual then
-                self.notify("pull_failed", { error = tostring(pull_error) })
-            else
-                -- The link check can report online right after wake-up while
-                -- requests still fail; retry like the offline paths so the
-                -- session does not stay unverified until the next reopen.
-                self:_schedule_pull_retry(options, retry_token)
+            self:_persist(book_id, { last_pull_at = self.now(), last_sync_error = tostring(err) })
+            if options.manual then self.notify("pull_failed", { error = tostring(err) })
+            else self:_schedule_pull_retry(options, retry_token) end
+        end
+        release()
+    end
+    local function request(task, on_success, on_failure)
+        if not current() then release(); return end
+        self.pull_cancel = nil
+        local success, failure = guarded(on_success), guarded(on_failure or failed)
+        if self.request then
+            local ok, cancel = pcall(self.request, task, success, failure, options)
+            if not ok then failure(cancel, false)
+            elseif self.pull_request == request_token and self.pulling and type(cancel) == "function" then
+                self.pull_cancel = cancel
             end
+        else
+            -- Non-UI consumers may execute their supplied client directly.
+            local ok, value = pcall(task)
+            if ok then success(value) else failure(value, false) end
+        end
+    end
+    local function fetched(result)
+        self.pulling = false
+        local remote, pull_error = result.remote, result.error
+        if not remote then return failed(pull_error, false) end
+        local_position, reason, context = self:capture_local()
+        if not local_position then
+            self.state = "error"
+            self.notify("local_unavailable", { error = reason })
+            release()
             return
         end
-        -- Collect what this device knew about the cloud before the pull
-        -- result overwrites it (see _resolve rule 3).
-        options.baselines = self:_known_cloud_positions(context.book_id)
-        self:_persist(context.book_id, {
+        -- Keep the positions known before this result replaces them.
+        options.baselines = self:_known_cloud_positions(book_id)
+        self:_persist(book_id, {
             last_remote_position = remote,
             last_local_position = local_position,
-            last_pull_at = self.now(),
-            last_sync_error = false,
+            last_pull_at = self.now(), last_sync_error = false,
         })
         self:_resolve(local_position, remote, context, options)
         self:_pump_uploads()
+        release()
     end
-    local started = self.run_online("progress_pull", function()
-        -- Anything in pull_task may throw (catalog refresh, capture, remote
-        -- normalization). run_online catches it, but a pull left marked in
-        -- flight would make every later pull, manual ones included, return
-        -- early until KOReader restarts.
-        local ok, err = xpcall(pull_task, debug.traceback)
-        if not ok then
-            self.pulling = false
-            self.state = "error"
-            error(err, 0)
+    local function fetch_remote()
+        request(function()
+            local remote, err = self:_fetch_remote(context.book_id, context.chapters)
+            return { remote = remote, error = err }
+        end, fetched)
+    end
+    local function after_catalog(refreshed, refresh_error)
+        self.document_context = nil
+        local_position, reason, context = self:capture_local()
+        if not local_position then
+            self.pulling, self.state = false, "error"
+            self.notify("local_unavailable", { error = refresh_error or reason })
+            release()
+            return
         end
-    end, {
-        silent_offline = true,
-        -- Manual and automatic pulls must never resolve DNS on the UI loop.
-        link_only = true,
+        if type(refreshed) ~= "table" or #refreshed == 0 then
+            log("warn", "catalog refresh returned no chapters for:", book_id)
+        end
+        fetch_remote()
+    end
+    local function start_request()
+        if local_position then return fetch_remote() end
+        if self.fetch_catalog then
+            request(function() return self.fetch_catalog(book_id) end, function(chapters)
+                local refreshed, err = chapters
+                if self.apply_catalog then refreshed, err = self.apply_catalog(book_id, chapters) end
+                after_catalog(refreshed, err)
+            end, function(err, cancelled)
+                if cancelled then return failed(err, true) end
+                after_catalog(nil, err)
+            end)
+        else
+            local ok, refreshed, err = pcall(self.refresh_catalog, book_id)
+            if not ok then err, refreshed = refreshed, nil end
+            after_catalog(refreshed, err)
+        end
+    end
+    local started = self.run_online("progress_pull", guarded(start_request), {
+        silent_offline = true, link_only = true,
     })
     if not started then
-        self.pulling = false
+        release()
         self.state = "offline"
-        if options.manual then
-            self.notify("offline", {})
-        else
-            self:_schedule_pull_retry(options, retry_token)
-        end
+        if options.manual then self.notify("offline", {})
+        else self:_schedule_pull_retry(options, retry_token) end
     end
     return started == true
 end
@@ -1244,7 +1349,30 @@ function ProgressSync:cancel_pending_jump(reason)
     return true
 end
 
+-- Account transitions invalidate in-memory work without touching the new
+-- account's book records. Existing pending positions stay with their store.
+function ProgressSync:on_account_changed()
+    self.session_owner = nil
+    self:_cancel_pull()
+    self:_close_choice("account_changed")
+    self.upload_token = (self.upload_token or 0) + 1
+    self.net_token = (self.net_token or 0) + 1
+    self.pull_retry_token = self.pull_retry_token + 1
+    self.generation = self.generation + 1
+    self.upload_queue, self.uploading = {}, nil
+    self.current_book_id, self.pending_jump = nil, nil
+    self.local_position, self.remote_position, self.remote_floor = nil, nil, nil
+    self.report_fallback, self.document_context, self.jump_echo = nil, nil, nil
+    self.verified, self.dirty, self.state = false, false, "unverified"
+    if type(self.scheduler.unschedule) == "function" then
+        for timer in pairs(self.timers or {}) do self.scheduler:unschedule(timer) end
+    end
+    self.timers = {}
+end
+
 function ProgressSync:on_reader_ready()
+    self:_cancel_pull()
+    self.session_owner = RequestOwner.capture(self.settings)
     self:_close_choice("document_changed")
     self.generation = self.generation + 1
     local generation = self.generation
@@ -1322,6 +1450,7 @@ end
 -- Must not touch the network (F3): the final position is persisted as a
 -- pending upload and sent by a later instance after open/resume.
 function ProgressSync:on_close_document()
+    self:_cancel_pull()
     -- A choice left on screen would float over the next document.
     self:_close_choice("document_closed")
     -- Only a verified WeRead book can enqueue an upload; don't scan the
@@ -1359,6 +1488,7 @@ end
 -- O(1) and network-free (F3, F16): the device and its Wi-Fi are going to
 -- sleep. Remember what to upload (in memory) and stop every chain.
 function ProgressSync:on_suspend()
+    self:_cancel_pull()
     self.suspended = true
     self.suspended_at = self.now()
     -- Positions in an unanswered dialog may be stale after sleeping; ask

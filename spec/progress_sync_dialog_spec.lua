@@ -95,4 +95,36 @@ first = shown
 context.close()
 assert(closed[#closed] == first and #calls == 0, "close() is not a choice")
 
-print("progress_sync_dialog_spec: 18 checks passed")
+-- Automatic HTTP uses a plain cancellation token, never an input widget.
+package.preload["ui/widget/trapwidget"] = function()
+    return { new = function(_, options) return options end }
+end
+local pending, successes, failures = nil, 0, 0
+local host = { _runNetworkRequest = function(_, token, _, task, success, failure)
+    pending = { token = token, task = task, success = success, failure = failure }
+    token.dismiss_callback = function() failure(nil, true) end
+end }
+local before = shown
+local cancel = Dialog.request(host, function() return "remote" end,
+    function(value) assert(value == "remote"); successes = successes + 1 end,
+    function() failures = failures + 1 end, { manual = false })
+assert(shown == before and pending.token.text == nil, "automatic request intercepted reader input")
+cancel(); cancel()
+assert(failures == 1 and successes == 0, "programmatic cancellation was not idempotent")
+local cancelled = false
+cancel = Dialog.request(host, function() return "remote" end, function() successes = successes + 1 end,
+    function(_, was_cancelled) cancelled = was_cancelled end, { manual = true })
+assert(shown == pending.token and shown.text == "Sync progress", "manual request has no cancel UI")
+cancel(); assert(cancelled and closed[#closed] == shown, "manual cancellation kept its widget")
+cancel = Dialog.request(host, function() end, function() successes = successes + 1 end,
+    function() error("completed request failed") end, {})
+pending.success("remote"); cancel()
+assert(successes == 1, "completed request did not deliver exactly once")
+local failed
+host._runNetworkRequest = function() error("transport failed") end
+Dialog.request(host, function() end, function() error("failed transport succeeded") end,
+    function(err) failed = err end, { manual = true })
+assert(failed and failed:find("transport failed", 1, true) and closed[#closed] == shown,
+    "transport exception kept the request UI or hid the failure")
+
+print("progress_sync_dialog_spec: dialog and cancellable transport checks passed")

@@ -96,6 +96,9 @@ local function fixture(remote, options)
         get_book = function() return book end,
         get_chapters = options.get_chapters or function() return chapters end,
         refresh_catalog = options.refresh_catalog,
+        fetch_catalog = options.fetch_catalog,
+        apply_catalog = options.apply_catalog,
+        request = options.request,
         get_file_context = function()
             return nil, nil, true
         end,
@@ -1389,6 +1392,8 @@ test("resume sends positions other books left pending", function()
     f.values.books.other = {
         book_id = "other",
         pending_upload_position = { book_id = "other", chapter_uid = 7, percent = 12 },
+        pending_upload_owner = require("weread.lib.request_owner").digest(
+            require("weread.lib.request_owner").capture(f.sync.settings)),
         pending_upload_baselines = { { chapter_uid = 7, chapter_offset = 1 } },
     }
     local ids = {}
@@ -1516,6 +1521,199 @@ test("a failed upload records the real error text", function()
     eq(f.values.books.book.last_sync_error, "gateway said no", "scalar outcome is recorded as the error")
     shown = f.notifications[#f.notifications]
     eq(shown and shown.data.error, "gateway said no", "scalar outcome is shown")
+end)
+
+local function async_fixture(options)
+    options = options or {}
+    local pending, cancellations = {}, 0
+    options.request = options.request or function(task, success, failure)
+        pending[#pending + 1] = { task = task, success = success, failure = failure }
+        return function() cancellations = cancellations + 1; failure(nil, true) end
+    end
+    local f = fixture({ bookId = "book", progress = 25, chapterUid = 22,
+        chapterIdx = 2, chapterOffset = 150, updateTime = 10 }, options)
+    f.values.account, f.values.api_key = { user_vid = "one" }, "synthetic-api-one"
+    f.values.sync.pull_on_open = false
+    f.sync:on_reader_ready(); f.drain()
+    return f, pending, function() return cancellations end
+end
+local function complete(request) request.success(request.task()) end
+
+test("async pull keeps HTTP in the task and persistence in the parent", function()
+    local f, pending = async_fixture()
+    local child, calls = false, 0
+    for _, method in ipairs({ "get_progress", "get_web_progress" }) do
+        local original = f.sync.client[method]
+        f.sync.client[method] = function(...)
+            eq(child, true, method .. " executes in child task")
+            calls = calls + 1; return original(...)
+        end
+    end
+    local flush = f.sync.settings.flush
+    f.sync.settings.flush = function(...)
+        eq(child, false, "progress persistence stays in parent"); return flush(...)
+    end
+    f.sync:sync_now(); eq(calls, 0, "acceptance performs no HTTP")
+    child = true; local value = pending[1].task(); child = false
+    pending[1].success(value)
+    eq(calls, 2, "both sources fetched")
+    eq(f.sync.verified, true, "parent verifies result")
+    eq(f.sync.pulling, false, "success releases lock")
+end)
+
+test("deferred pull binds owner and document before starting HTTP", function()
+    for _, change in ipairs({ "uid", "api_key", "source", "path", "close", "suspend", "ticket" }) do
+        local callback
+        local f, pending = async_fixture({ run_online = function(_, action) callback = action; return true end })
+        f.sync:sync_now()
+        if change == "uid" then f.values.account.user_vid = "two"
+        elseif change == "api_key" then f.values.api_key = "synthetic-api-two"
+        elseif change == "source" then f.sync.settings.is_cookie_configured = function() return false end
+        elseif change == "path" then f.document.file = "/other/book.epub"
+        elseif change == "close" then f.sync:on_close_document()
+        elseif change == "suspend" then f.sync:on_suspend()
+        else f.values.wr_ticket = "rotated" end
+        callback()
+        eq(#pending, change == "ticket" and 1 or 0, change .. " request-start guard")
+        if change == "ticket" then complete(pending[1]); eq(f.sync.verified, true, "ticket accepted") end
+        eq(f.sync.pulling, false, change .. " releases lock")
+        if change ~= "ticket" then eq(f.values.books.book.last_remote_position, nil, change .. " no old write") end
+    end
+end)
+
+test("lifecycle cancels pull without letting stale callbacks clear new work", function()
+    for _, action in ipairs({ "on_reader_ready", "on_close_document", "on_suspend", "teardown", "on_account_changed" }) do
+        local f, pending, cancelled = async_fixture()
+        f.sync:sync_now(); local old = pending[1]
+        f.sync[action](f.sync)
+        eq(cancelled(), 1, action .. " cancels child")
+        old.success(old.task())
+        eq(f.sync.pulling, false, action .. " clears lock")
+        eq(f.values.books.book.last_remote_position, nil, action .. " drops late position")
+    end
+    local f, pending = async_fixture()
+    f.sync:sync_now(); local old = pending[1]
+    f.sync:on_reader_ready(); f.drain(); f.sync:sync_now()
+    old.success(old.task()); eq(f.sync.pulling, true, "old callback cannot clear new operation")
+    complete(pending[2]); eq(f.sync.verified, true, "new request completes")
+end)
+
+test("late owner change and user cancellation do not deliver old results", function()
+    for _, mode in ipairs({ "uid", "api_key", "cancel" }) do
+        local f, pending = async_fixture(); f.sync:sync_now()
+        local value, notices = pending[1].task(), #f.notifications
+        if mode == "cancel" then pending[1].failure(nil, true)
+        else
+            if mode == "uid" then f.values.account.user_vid = "two" else f.values.api_key = "synthetic-api-two" end
+            pending[1].success(value)
+        end
+        eq(f.sync.pulling, false, mode .. " clears lock")
+        eq(f.values.books.book.last_remote_position, nil, mode .. " no persistence")
+        eq(#f.notifications, notices, mode .. " no old result notice")
+        eq(#f.uploads, 0, mode .. " no old upload")
+    end
+end)
+
+test("catalog HTTP precedes parent application and progress HTTP", function()
+    local available, applied, child = nil, 0, false
+    local f, pending = async_fixture({
+        get_chapters = function() return available end,
+        fetch_catalog = function() eq(child, true, "catalog HTTP is child-only"); return chapters end,
+        apply_catalog = function(_, value)
+            eq(child, false, "catalog application is parent-only")
+            available, applied = value, applied + 1; return value
+        end,
+    })
+    f.sync:sync_now()
+    child = true; local value = pending[1].task(); child = false
+    pending[1].success(value)
+    eq(applied, 1, "catalog applied")
+    eq(#pending, 2, "progress follows catalog")
+    complete(pending[2]); eq(f.sync.verified, true, "refreshed catalog verifies")
+end)
+
+test("transport and parent exceptions release state and permit retry", function()
+    local f, pending = async_fixture(); f.sync:sync_now()
+    local flush = f.sync.settings.flush
+    f.sync.settings.flush = function() error("parent disk failure") end
+    complete(pending[1])
+    eq(f.sync.pulling, false, "parent exception releases lock")
+    eq(f.sync.state, "error", "parent exception records error")
+    eq(f.notifications[#f.notifications].code, "pull_failed", "parent error visible")
+    f.sync.settings.flush = flush; f.sync:sync_now(); complete(pending[2])
+    eq(f.sync.verified, true, "retry succeeds")
+    f = async_fixture({ request = function() error("transport unavailable") end })
+    f.sync:sync_now()
+    eq(f.sync.pulling, false, "transport exception releases lock")
+    eq(f.notifications[#f.notifications].code, "pull_failed", "transport error visible")
+end)
+
+test("queued and accepted uploads cannot cross owners but permit ticket renewal", function()
+    for _, mode in ipairs({ "queued_uid", "queued_api", "pending_uid", "accepted_api", "ticket" }) do
+        local f = fixture({ bookId = "book", progress = 25, chapterUid = 22,
+            chapterIdx = 2, chapterOffset = 150, updateTime = 10 })
+        f.values.account, f.values.api_key = { user_vid = "one" }, "synthetic-api-one"
+        f.sync:on_reader_ready(); f.drain()
+        local calls = 0
+        f.sync.upload_position = function()
+            calls = calls + 1
+            if mode == "accepted_api" then f.values.api_key = "synthetic-api-two"; return true, { accepted = true } end
+            if calls == 1 and (mode == "pending_uid" or mode == "ticket") then
+                return false, { error_kind = "pending" }
+            end
+            return true, { accepted = true }
+        end
+        f.sync:_enqueue_upload({ book_id = "book", fraction = 0.4, percent = 40 }, "probe")
+        if mode == "queued_uid" then f.values.account.user_vid = "two"
+        elseif mode == "queued_api" then f.values.api_key = "synthetic-api-two" end
+        f.sync:_pump_uploads()
+        if mode == "pending_uid" then f.values.account.user_vid = "two"
+        elseif mode == "ticket" then f.values.wr_ticket = "rotated" end
+        f.drain()
+        eq(calls, mode == "ticket" and 2 or (mode:find("queued", 1, true) and 0 or 1), mode .. " calls")
+        eq(f.values.books.book.last_uploaded_position ~= nil, mode == "ticket", mode .. " result ownership")
+        eq(f.values.books.book.pending_upload_position ~= nil, mode ~= "ticket", mode .. " pending kept")
+    end
+end)
+
+test("a page turned during HTTP or while a prompt is open is never overwritten", function()
+    local f, pending = async_fixture(); f.sync:sync_now()
+    f.document.page = 50
+    complete(pending[1])
+    eq(f.values.books.book.last_local_position.percent, 50, "HTTP completion captures current page")
+    eq(#f.choices, 1, "fresh conflict uses the new page")
+    f.document.page = 60
+    f.choices[1].use_remote()
+    eq(#f.jumps, 0, "stale prompt never jumps")
+    eq(#f.uploads, 0, "stale prompt never uploads")
+    eq(f.sync.choice, nil, "stale prompt releases state")
+end)
+
+test("pending owner digest restores only a proven account across instances", function()
+    local Owner = require("weread.lib.request_owner")
+    local f = fixture({ bookId = "book", progress = 25, chapterUid = 22,
+        chapterIdx = 2, chapterOffset = 150, updateTime = 10 })
+    f.values.api_key = "synthetic-api-one"
+    f.sync:on_reader_ready(); f.drain()
+    f.sync:_enqueue_upload({ book_id = "book", percent = 40, fraction = 0.4 }, "persist")
+    local digest = f.values.books.book.pending_upload_owner
+    eq(#digest, 64, "only a digest is persisted")
+    eq(digest:find("synthetic", 1, true), nil, "no raw API key in pending owner")
+    f.sync.upload_queue = {}; f.sync:_load_persisted_uploads("book")
+    eq(f.sync.upload_queue.book ~= nil, true, "same owner restores pending position")
+    f.values.api_key = "synthetic-api-two"
+    f.sync:on_account_changed(); f.sync:on_reader_ready()
+    f.sync.upload_queue = {}; f.sync:_load_persisted_uploads("book")
+    eq(f.sync.upload_queue.book, nil, "different gateway does not restore pending position")
+    eq(f.values.books.book.pending_upload_owner, digest, "mismatched position remains on disk")
+    f.values.books.book.pending_upload_owner = nil
+    f.sync:_load_persisted_uploads("book")
+    eq(f.sync.upload_queue.book, nil, "unsigned legacy position is not silently accepted")
+    eq(f.values.books.book.pending_upload_position.percent, 40, "legacy position is preserved")
+    f.sync:_enqueue_upload({ book_id = "book", percent = 50, fraction = 0.5 }, "fresh")
+    eq(f.values.books.book.pending_upload_position.percent, 50, "fresh local position replaces legacy")
+    eq(f.values.books.book.pending_upload_owner, Owner.digest(Owner.capture(f.sync.settings)),
+        "fresh pending position is owned by current account")
 end)
 
 print(string.format(

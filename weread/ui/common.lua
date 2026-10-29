@@ -7,6 +7,7 @@ local Menu = require("ui/widget/menu")
 local UIManager = require("ui/uimanager")
 
 local PluginUtil = require("weread.lib.plugin_util")
+local RequestOwner = require("weread.lib.request_owner")
 local _ = PluginUtil.tr
 local T = PluginUtil.T
 local log_error = PluginUtil.log_error
@@ -153,12 +154,7 @@ end
 -- the parent with the task's result; failures are reported with error_label.
 -- Refuse to run network tasks when the runtime cannot provide a worker.
 function M:_runNetworkRequest(busy_text, error_label, task, on_success, on_failure)
-    local function account_id()
-        local settings = self.settings
-        local account = settings and settings.get and settings:get("account", {})
-        return type(account) == "table" and tostring(account.user_vid or "") or ""
-    end
-    local original_account = account_id()
+    local original_owner = RequestOwner.capture(self.settings)
     local function report(err)
         if on_failure then return on_failure(err, false) end
         logger.warn("annotation request failed:", tostring(error_label), tostring(err))
@@ -187,7 +183,7 @@ function M:_runNetworkRequest(busy_text, error_label, task, on_success, on_failu
         end, busy_text, true)
         -- A queued QR completion can switch accounts while the UI loop keeps
         -- running. Cookie/ticket renewal within the same account is harmless.
-        if account_id() ~= original_account then
+        if not RequestOwner.matches(self.settings, original_owner) then
             if on_failure then on_failure(nil, true, "account_changed") end
             return
         end

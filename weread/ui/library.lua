@@ -159,6 +159,8 @@ function M:showTrackedList(...)
 end
 
 function M:onWeReadAccountChanged()
+    if self.progress_sync and self.progress_sync.on_account_changed then self.progress_sync:on_account_changed() end
+    if self.read_report and self.read_report.on_account_changed then self.read_report:on_account_changed() end
     self:closeWeReadUI()
     self.shelf_regular = nil
     self.shelf_mp = nil

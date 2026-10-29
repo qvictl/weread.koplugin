@@ -1,6 +1,7 @@
 local CatalogMemo = require("weread.lib.catalog_memo")
 local Content = require("weread.lib.content")
 local PositionMapper = require("weread.lib.position_mapper")
+local RequestOwner = require("weread.lib.request_owner")
 local WeRead = require("weread.lib.protocol")
 
 local logger = require("weread.lib.logger").scoped("ReadReport")
@@ -254,6 +255,7 @@ function ReadReport:new(options)
 
     local object = {
         settings = options.settings,
+        owner = RequestOwner.capture(options.settings),
         client = options.client,
         library_db = options.library_db,
         scheduler = options.scheduler,
@@ -363,6 +365,7 @@ function ReadReport:_persist_session()
 end
 
 function ReadReport:_restore_session(book_id)
+    if self.owner_changed then return end
     if self.server_session_ready and self.server_session_book_id == book_id then
         return
     end
@@ -402,6 +405,7 @@ function ReadReport:_remember_session(book_id, outcome)
     book_id = tostring(book_id or "")
     if book_id == "" then return end
     if outcome.entered then
+        self.owner_changed = nil
         self.server_session_book_id = book_id
         self.server_session_ready = true
         self.server_session_ready_at = self.now()
@@ -455,6 +459,7 @@ function ReadReport:_log_skip(reason)
 end
 
 function ReadReport:maybe_start(reason)
+    if not RequestOwner.matches(self.settings, self.owner) then self:on_account_changed() end
     local config = self:_config()
     if not config.enabled then
         self:_log_skip("disabled")
@@ -481,6 +486,7 @@ function ReadReport:maybe_start(reason)
 end
 
 function ReadReport:start(reason)
+    if not RequestOwner.matches(self.settings, self.owner) then self:on_account_changed() end
     if self.task then
         return true
     end
@@ -635,6 +641,17 @@ end
 -- pipeline to a subprocess (or run it inline as a fallback).
 -- ------------------------------------------------------------------
 
+-- No persistence here: credentials already select the new account's store.
+function ReadReport:on_account_changed()
+    self:stop("account_changed")
+    self.owner = RequestOwner.capture(self.settings)
+    self.upload_result, self.report_floor = nil, nil
+    self.current_book_id, self.current_book_title, self.current_book_source = nil, nil, nil
+    self.server_session_book_id, self.server_session_ready, self.server_session_ready_at = nil, false, nil
+    self.last_credit_at, self.credit_paused_at, self.last_renew_attempt = nil, nil, nil
+    self.owner_changed, self.needs_cloud_check = true, true
+end
+
 function ReadReport:_schedule_next(generation, task, delay)
     if self.generation == generation and self.task == task then
         self.scheduler:scheduleIn(delay or self:_interval(), task)
@@ -642,6 +659,7 @@ function ReadReport:_schedule_next(generation, task, delay)
 end
 
 function ReadReport:_tick(generation, task)
+    if not RequestOwner.matches(self.settings, self.owner) then self:on_account_changed(); return end
     local ok, err = pcall(function()
         local proceed, book_id, position = self:_precheck()
         if not proceed then
@@ -801,6 +819,7 @@ function ReadReport:_spawn_job(spec, on_done)
     if not memory_ok then
         return false, "low memory (" .. tostring(available_kb) .. " kB available)"
     end
+    local owner = RequestOwner.capture(self.settings)
     local pid, read_fd = runner.run(function(_pid, child_write_fd)
         local outcome = self:_child_report(spec.book_id, spec.allow_renewal,
             spec.position, spec.credit, spec)
@@ -819,6 +838,7 @@ function ReadReport:_spawn_job(spec, on_done)
 
     local job = {
         kind = spec.kind or "report",
+        owner = owner,
         key = spec.key,
         pid = pid,
         read_fd = read_fd,
@@ -861,6 +881,7 @@ function ReadReport:_poll_job(job)
     if self.job ~= job then
         return
     end
+    if not RequestOwner.matches(self.settings, job.owner) then self:on_account_changed(); return end
     local runner = self.subprocess
     local done = runner.is_done(job.pid)
     local readable = job.read_fd and runner.read_size(job.read_fd)
@@ -953,7 +974,8 @@ end
 -- ------------------------------------------------------------------
 
 function ReadReport:_apply_job_outcome(job, outcome)
-    self:_write_back(job, outcome)
+    if not RequestOwner.matches(self.settings, job.owner) then return false end
+    if self:_write_back(job, outcome) == false then return false end
     self:_note_cloud_check(job.book_id, outcome)
     return self:_apply_outcome(outcome, job.book_id)
 end
@@ -989,6 +1011,7 @@ end
 -- Persists renewed auth and the refreshed reader context a child sent
 -- back, unless the parent's copy changed while the job ran.
 function ReadReport:_write_back(job, outcome)
+    if not RequestOwner.matches(self.settings, job.owner) then return false end
     local book_id = job.book_id
     if type(outcome) == "table" then
         if type(outcome.auth) == "table" then
@@ -1007,6 +1030,7 @@ function ReadReport:_write_back(job, outcome)
                 end
             end
         end
+        if not RequestOwner.matches(self.settings, job.owner) then self:on_account_changed(); return false end
         if type(outcome.book) == "table" then
             if self:_context_fingerprint(book_id) ~= job.context_fingerprint then
                 log("info", "skip report context write-back: parent record changed during job")
@@ -1020,6 +1044,7 @@ function ReadReport:_write_back(job, outcome)
             end
         end
     end
+    return true
 end
 
 function ReadReport:_apply_outcome(outcome, book_id)
@@ -1599,6 +1624,10 @@ end
 -- flight (a report tick) returns { error_kind = "busy" }. Nothing here
 -- blocks the UI loop unless the platform cannot fork at all.
 function ReadReport:upload_position(book_id, position, elapsed_seconds)
+    if not RequestOwner.matches(self.settings, self.owner) then self:on_account_changed() end
+    if self.upload_result and not RequestOwner.matches(self.settings, self.upload_result.owner) then
+        self.upload_result = nil
+    end
     book_id = tostring(book_id)
     local key = upload_key(book_id, position)
     local result = self.upload_result
@@ -1657,6 +1686,7 @@ function ReadReport:upload_position(book_id, position, elapsed_seconds)
         guard = guard,
         timeout = UPLOAD_JOB_TIMEOUT_SECONDS,
     }, function(done_job, outcome, timed_out)
+        if not RequestOwner.matches(self.settings, done_job.owner) then return end
         if timed_out or type(outcome) ~= "table" then
             outcome = {
                 accepted = false,
@@ -1665,10 +1695,11 @@ function ReadReport:upload_position(book_id, position, elapsed_seconds)
                 error_kind = timed_out and "transport" or "job",
             }
         else
-            self:_write_back(done_job, outcome)
+            if self:_write_back(done_job, outcome) == false then return end
         end
         self:_finish_upload(book_id, outcome)
         self.upload_result = {
+            owner = done_job.owner,
             key = key,
             at = self.now(),
             accepted = outcome.accepted == true,

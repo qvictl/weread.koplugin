@@ -624,6 +624,8 @@ test("the per-book store returns a pending upload on resume (control)", function
     local f = fixture(cloud(25))
     f.open()
     f.book.pending_upload_position = { percent = 40 }
+    f.book.pending_upload_owner = require("weread.lib.request_owner").digest(
+        require("weread.lib.request_owner").capture(f.sync.settings))
     f.sync:on_close_document()
     f.sync:on_resume()
     f.drain()
@@ -634,6 +636,8 @@ test("a broken book store does not break resume", function()
     local f = fixture(cloud(25))
     f.open()
     f.book.pending_upload_position = { percent = 40 }
+    f.book.pending_upload_owner = require("weread.lib.request_owner").digest(
+        require("weread.lib.request_owner").capture(f.sync.settings))
     f.sync.settings.get_books = function() error("db locked") end
     f.sync:on_close_document()
     f.sync:on_resume()

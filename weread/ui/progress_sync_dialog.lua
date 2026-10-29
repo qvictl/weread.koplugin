@@ -149,4 +149,31 @@ function ProgressSyncDialog.notify(code, data)
     UIManager:show(InfoMessage:new{ text = text })
 end
 
+-- Own the trap so document/suspend lifecycle can cancel the pure HTTP task.
+-- Automatic pulls use a non-UI cancellation token and never intercept reading.
+function ProgressSyncDialog.request(host, task, on_success, on_failure, options)
+    local manual = options and options.manual == true
+    local widget = {}
+    if manual then widget = require("ui/widget/trapwidget"):new{ text = _("Sync progress") } end
+    local closed = false
+    local function close()
+        if closed then return end
+        closed = true
+        if manual then
+            local ok, err = pcall(UIManager.close, UIManager, widget)
+            if not ok then require("weread.lib.logger").warn("close progress request failed:", tostring(err)) end
+        end
+    end
+    if manual then UIManager:show(widget) end
+    local ok, err = pcall(host._runNetworkRequest, host, widget, _("Sync progress"), task,
+        function(value) close(); on_success(value) end,
+        function(...) close(); on_failure(...) end)
+    if not ok then close(); on_failure(err, false) end
+    return function()
+        if closed then return end
+        if type(widget.dismiss_callback) == "function" then widget.dismiss_callback() end
+        close()
+    end
+end
+
 return ProgressSyncDialog

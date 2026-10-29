@@ -31,4 +31,12 @@ owner = Owner.capture(settings)
 values.api_key = "synthetic-gateway-two"
 expect(not Owner.matches(settings, owner))
 expect(not Owner.matches(settings, nil))
+local current = Owner.capture(settings)
+local reordered = {}
+for _, key in ipairs({ "cookie", "api", "api_key", "cookie_vid", "user_vid" }) do reordered[key] = current[key] end
+expect(Owner.digest(current) == Owner.digest(reordered))
+expect(Owner.digest(current) ~= Owner.digest({ user_vid = current.user_vid, cookie_vid = current.cookie_vid,
+    api_key = "different", api = current.api, cookie = current.cookie }))
+expect(Owner.digest(nil) == nil)
+expect(Owner.matches(nil, Owner.capture(nil)))
 print(("request_owner_spec: %d checks"):format(checks))
