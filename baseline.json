@@ -1,6 +1,6 @@
 {
-  "sha": "bb0a5be937ca67ae4894e646debb54fcbe68339f",
-  "date": "2026-10-29T03:05:08+00:00",
+  "sha": "73782bc80e2e675aeecf255e13fd56350ea35a91",
+  "date": "2026-10-29T04:46:54+00:00",
   "unit": {
     "percent": 91.35,
     "covered": 19385,
@@ -13,5 +13,5 @@
     "executable": 21319,
     "files": 89
   },
-  "run": "https://github.com/qvictl/weread.koplugin/actions/runs/40809460694"
+  "run": "https://github.com/qvictl/weread.koplugin/actions/runs/40818996538"
 }
