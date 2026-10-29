@@ -42,6 +42,7 @@ end
 -- This spec replaces OS execution and IPC encoding with in-memory tokens.
 package.preload["string.buffer"] = function() return require("json") end
 local Memory = require("weread.lib.memory_gate")
+local read_memory = Memory.read_meminfo
 Memory.read_meminfo = function() return nil end -- unknown memory still permits work.
 local Process = require("weread.lib.subprocess")
 local Budget = require("weread.lib.fork_budget")
@@ -235,6 +236,7 @@ local ok, err = xpcall(function()
         expect(not log.text:find("synthetic-private-auth", 1, true), "resume failure leaked its error contents")
     end
 end, debug.traceback)
+Memory.read_meminfo = read_memory
 rawset(io, "open", real_open)
 rawset(os, "remove", real_remove)
 rawset(os, "rename", real_rename)
