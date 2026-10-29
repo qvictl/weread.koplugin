@@ -22,6 +22,7 @@ import shlex
 import shutil
 import struct
 import subprocess
+import tarfile
 import threading
 import time
 from urllib.parse import parse_qs, urlsplit
@@ -53,6 +54,29 @@ BIG_CHAPTERS = [dict(chapterUid=i, chapterIdx=i, title=f"第{i}章 长路", leve
 ALL_BOOKS = BOOKS + [BIG_BOOK]
 QR_UID = "mock-login-uid"
 QR_VID = "900000"
+
+
+def resource_archive(stage):
+    """Small synthetic resources for real-client extraction regressions."""
+    signature = b"\x89PNG\r\n\x1a\n"
+
+    def entry(name, data):
+        header = tarfile.TarInfo(name)
+        header.size = len(data)
+        return header.tobuf() + data + b"\0" * (-len(data) % 512)
+
+    complete = entry("first/existing.png", signature + b"complete")
+    partial = entry("second/existing.png", signature + b"x" * (128 * 1024))
+    if stage == "initial":
+        return complete + partial[:512 + 66000]
+    if stage == "retry":
+        return complete + partial + b"\0" * 1024
+    if stage == "bulk":
+        return b"".join(entry(f"directory-{i}/existing.png", signature + str(i).encode())
+                        for i in range(1, 513)) + b"\0" * 1024
+    if stage == "cover":
+        return entry("Cover.jpg", signature + b"mismatched extension") + b"\0" * 1024
+    raise ValueError("unknown synthetic resource archive")
 
 
 def find_book(book_id):
@@ -290,6 +314,8 @@ class MockServer(ThreadingHTTPServer):
             return 200, dict(succ=1)
         if path in {"/mock/cover.png", "/mock/illustration.png"} and method == "GET":
             return 200, png()
+        if path.startswith("/mock/resource-archive/") and path.endswith(".tar") and method == "GET":
+            return 200, resource_archive(path.rsplit("/", 1)[1][:-4])
         raise LookupError("route is not implemented")
 
     def qr_route(self, method, path, query, control):
@@ -431,7 +457,8 @@ class Handler(BaseHTTPRequestHandler):
                                 api=data.get("api_name"), book=data.get("bookId"), chapter=data.get("chapterUid"),
                                 encoded_chapter=data.get("c"), status=status))
         if isinstance(result, bytes):
-            content_type, body = "image/png", result
+            content_type = "application/x-tar" if parsed.path.startswith("/mock/resource-archive/") else "image/png"
+            body = result
         elif isinstance(result, str):
             content_type, body = "text/plain; charset=utf-8", result.encode()
         else:
