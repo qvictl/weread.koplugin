@@ -30,9 +30,11 @@
 本仓库欢迎人或 AI 编写的 PR，以测试把关：普通 PR 的必需检查 `ci`、`tests-policy`
 全部通过后才能合并。修改 `main.lua`、`weread/`、`integrations/` 的 Lua 代码必须同时修改
 `spec/` 下的测试；`feat`/`fix` 类 PR 必须新增或更新至少一个模拟器场景，供发版候选执行。
-普通 PR 要求改动行单元覆盖率 ≥ 80%、相对自身基线的单元整体棘轮及原有日期/模块目标。
+普通 PR/main 按改动影响选择业务 Lua UT；PR 整批改动行单元覆盖率 ≥ 80%。基础CI工具
+自检固定运行，无法分类时回退全量；部分测试不声称整体覆盖率，也不更新历史/徽章。
 真实集成仅由 Release 发版候选运行：官方/fork 模拟器与 PluginLoader 全部通过，并满足
-整批未发布改动的单元 + 模拟器覆盖率 ≥ 90%、真实 combined 整体棘轮及原有日期目标
+普通全量UT硬通过、整批未发布改动的单元 + 模拟器覆盖率 ≥ 90%、原有全量unit/combined
+整体棘轮及日期/模块目标
 （见 `.ci/coverage-policy.json`）。仅维护者可添加 `no-tests-needed` 标签豁免
 （仅限文档、注释或日志措辞改动）。
 
@@ -47,7 +49,7 @@
 
 - [ ] 新增或修改了单元测试（`spec/*_spec.lua`），bugfix 的回归测试在修复前会失败
 - [ ] 新增或修改了模拟器场景（`spec/emulator/scenarios/`），或说明为何不需要
-- [ ] 已运行 `bash scripts/run_lua_specs.sh`
+- [ ] 已运行受影响UT并提供选择清单，或本地默认全量 `bash scripts/run_lua_specs.sh`
 - [ ] 已运行 `bash scripts/check_lua_namespace.sh`
 - [ ] 已运行 `luacheck main.lua _meta.lua weread integrations spec`
 - [ ] 若为发版候选，Release 中的官方/fork/PluginLoader 集成和真实 combined 门禁已通过（普通 PR 不运行）

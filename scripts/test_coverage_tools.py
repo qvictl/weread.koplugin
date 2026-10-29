@@ -288,7 +288,12 @@ class RatchetBaselineTest(unittest.TestCase):
             def publish(sha):
                 args = argparse.Namespace(unit=str(report), combined=str(report), sha=sha, run_url="",
                                           out_dir=str(site))
-                with contextlib.redirect_stdout(io.StringIO()):
+                # This identity/serialization case uses synthetic SHAs and a
+                # 50% toy report; Git ancestry and real floors have Git tests.
+                toy_policy = dict(POLICY, day_one_baseline=dict(POLICY["day_one_baseline"], unit=0))
+                with mock.patch.object(ct, "git_ancestors", return_value=[sha]), \
+                        mock.patch.object(ct, "load_policy", return_value=toy_policy), \
+                        contextlib.redirect_stdout(io.StringIO()):
                     self.assertEqual(ct.baseline(args), 0)
 
             publish("a" * 40)
@@ -310,7 +315,10 @@ class RatchetBaselineTest(unittest.TestCase):
                 (site / name).write_text(text, encoding="utf-8")
             args = argparse.Namespace(unit=str(report), combined=str(report), sha="c" * 40, run_url="",
                                       out_dir=str(site))
+            toy_policy = dict(POLICY, day_one_baseline=dict(POLICY["day_one_baseline"], unit=0))
             with mock.patch.object(ct, "is_newest_publish", return_value=False), \
+                    mock.patch.object(ct, "git_ancestors", return_value=[args.sha]), \
+                    mock.patch.object(ct, "load_policy", return_value=toy_policy), \
                     contextlib.redirect_stdout(io.StringIO()):
                 self.assertEqual(ct.baseline(args), 0)
             self.assertEqual([r["sha"] for r in ct.read_history(site / "history.jsonl")], ["c" * 40])
@@ -332,6 +340,9 @@ class CoveragePhaseTest(unittest.TestCase):
         (self.root / ".ci/coverage-policy.json").write_text(json.dumps(policy))
         (self.root / "weread/lib").mkdir(parents=True)
         self.module = self.root / "weread/lib/m.lua"
+        (self.root / "spec").mkdir()
+        (self.root / "spec/affected_spec.lua").write_text('require("weread.lib.m")\n')
+        (self.root / "spec/unrelated_spec.lua").write_text("assert(true)\n")
         self.rows = ["old_%d()" % i for i in range(10)]
         self.module.write_text("\n".join(self.rows) + "\n")
         (self.root / "_meta.lua").write_text('version = "1.0.0"\n')
@@ -367,15 +378,130 @@ class CoveragePhaseTest(unittest.TestCase):
         history.write_text("".join(json.dumps(r) + "\n" for r in records))
         output = self.root / "gate.json"
         args = [sys.executable, ct.__file__, "gate", "--mode", mode, "--unit", str(self.unit),
-                "--base", self.production, "--head", self.candidate, "--history", str(history),
+                "--base", options.get("base", self.production), "--head", self.candidate, "--history", str(history),
                 "--today", options.get("today", "2026-10-28"), "--json", str(output)]
         if combined is not None:
             args += ["--combined", str(combined)]
         if options.get("labels"):
             args += ["--labels", options["labels"]]
+        if options.get("selection_manifest"):
+            args += ["--selection-manifest", str(options["selection_manifest"])]
         process = subprocess.run(args, cwd=self.root, env=self.env, capture_output=True, text=True)
         self.assertTrue(output.is_file(), process.stderr)
         return process.returncode, json.loads(output.read_text())
+
+    def selection(self, base=None, full=False):
+        import select_lua_tests
+        result = select_lua_tests.select(base or self.base, self.candidate, self.root)
+        if full:
+            result.update(mode="full", tests=["spec/affected_spec.lua", "spec/unrelated_spec.lua"])
+        path = self.root / "selection.json"
+        path.write_text(json.dumps(result))
+        return path
+
+    def test_partial_diff_does_not_claim_whole_coverage_or_read_whole_history(self):
+        self.unit = self.report("unit", [5, 6, 7, 8, 9])
+        code, data = self.run_gate("diff", base=self.base, selection_manifest=self.selection(),
+                                   today="2027-01-02", records=[dict(sha=self.base, unit="invalid")])
+        self.assertEqual(code, 0, data)
+        self.assertEqual(data["diff_unit"]["percent"], 100)
+        self.assertIsNone(data["overall_unit"])
+        self.assertIsNone(data["overall_combined"])
+        self.assertIsNone(data["baseline_unit"])
+        self.assertIsNone(data["baseline_sha"])
+        self.assertIsNone(data["baseline_match"])
+        self.assertEqual(len(data["checks"]), 1)
+
+    def test_partial_diff_still_enforces_full_pr_80_percent_floor(self):
+        manifest = self.selection()
+        self.unit = self.report("unit", [0])
+        self.assertEqual(self.run_gate("diff", base=self.base, selection_manifest=manifest)[0], 0)
+        self.unit = self.report("unit", [0, 1])
+        code, data = self.run_gate("diff", base=self.base, selection_manifest=manifest)
+        self.assertEqual(code, 1)
+        self.assertEqual(data["diff_unit"]["executable"], 5, "version-only tip must not hide the PR batch")
+        self.assertEqual(data["diff_unit"]["percent"], 60)
+
+    def test_none_selection_reports_no_whole_measurement(self):
+        code, data = self.run_gate("diff", selection_manifest=self.selection(self.production))
+        self.assertEqual(code, 0, data)
+        self.assertEqual(data["diff_unit"]["executable"], 0)
+        self.assertIsNone(data["overall_unit"])
+
+    def test_partial_reports_cannot_update_whole_history_or_badges(self):
+        site = self.root / "site"
+        args = [sys.executable, ct.__file__, "baseline", "--unit", str(self.unit),
+                "--sha", self.candidate, "--out-dir", str(site)]
+        subprocess.run(args, cwd=self.root, env=self.env, capture_output=True, check=True)
+        before = {path.name: path.read_bytes() for path in site.iterdir()}
+        process = subprocess.run(args + ["--selection-manifest", str(self.selection())],
+                                 cwd=self.root, env=self.env, capture_output=True, text=True)
+        self.assertNotEqual(process.returncode, 0)
+        self.assertIn("partial unit coverage cannot update history", process.stderr)
+        self.assertEqual({path.name: path.read_bytes() for path in site.iterdir()}, before)
+
+    def test_full_manifest_keeps_release_unit_floor_and_same_candidate_ratchet(self):
+        self.unit = self.report("unit", [9])
+        history = [self.history_record(self.base, 90), self.history_record(self.candidate, 90)]
+        history[-1]["unit"]["percent"] = 100
+        code, data = self.run_gate("release", self.report("combined", []), history,
+                                   selection_manifest=self.selection(full=True))
+        self.assertEqual(data["baseline_unit"], 100)
+        self.assertEqual(code, 1, "same-candidate full-unit floor must survive version-only retries")
+
+    def test_partial_manifest_cannot_be_relabelled_a_release_measurement(self):
+        output = self.root / "forbidden.json"
+        process = subprocess.run([sys.executable, ct.__file__, "gate", "--mode", "release",
+                                  "--unit", str(self.unit), "--combined", str(self.unit),
+                                  "--base", self.base, "--head", self.candidate,
+                                  "--selection-manifest", str(self.selection()), "--json", str(output)],
+                                 cwd=self.root, env=self.env, capture_output=True, text=True)
+        self.assertNotEqual(process.returncode, 0)
+        self.assertIn("requires the full unit suite", process.stderr)
+        self.assertFalse(output.exists())
+
+    def test_manual_low_unit_backfill_cannot_lower_the_floor_even_with_high_combined(self):
+        site = self.root / "site"
+        args = [sys.executable, ct.__file__, "baseline", "--unit", str(self.unit),
+                "--sha", self.candidate, "--out-dir", str(site)]
+        subprocess.run(args, cwd=self.root, env=self.env, capture_output=True, check=True)
+        before = {path.name: path.read_bytes() for path in site.iterdir()}
+        low = self.report("low-unit", [0])
+        for combined in ([], ["--combined", str(self.report("high-combined", []))]):
+            process = subprocess.run([sys.executable, ct.__file__, "baseline", "--unit", str(low),
+                                      "--sha", self.candidate, "--out-dir", str(site), *combined],
+                                     cwd=self.root, env=self.env, capture_output=True, text=True)
+            self.assertNotEqual(process.returncode, 0)
+            self.assertIn("full-unit coverage ratchet", process.stderr)
+            self.assertEqual({path.name: path.read_bytes() for path in site.iterdir()}, before)
+
+    def test_unit_backfill_tolerance_records_actual_9495_and_rejects_9489(self):
+        self.rows = ["row_%d()" % index for index in range(10000)]
+        self.module.write_text("\n".join(self.rows) + "\n")
+        self.candidate = self.commit("unit precision fixture")
+        site = self.root / "site"
+        def publish(report):
+            return subprocess.run([sys.executable, ct.__file__, "baseline", "--unit", str(report),
+                                   "--sha", self.candidate, "--out-dir", str(site)],
+                                  cwd=self.root, env=self.env, capture_output=True, text=True)
+        self.assertEqual(publish(self.report("unit95", range(9500, 10000))).returncode, 0)
+        before = {path.name: path.read_bytes() for path in site.iterdir()}
+        self.assertNotEqual(publish(self.report("unit9489", range(9489, 10000))).returncode, 0)
+        self.assertEqual({path.name: path.read_bytes() for path in site.iterdir()}, before)
+        allowed = publish(self.report("unit9495", range(9495, 10000)))
+        self.assertEqual(allowed.returncode, 0, allowed.stderr)
+        self.assertEqual(ct.read_history(site / "history.jsonl")[0]["unit"]["percent"], 94.95)
+
+    def test_old_full_backfill_uses_its_ancestors_not_newer_main_descendants(self):
+        site = self.root / "site"
+        for sha, missed in ((self.base, [8, 9]), (self.candidate, []), (self.production, [9])):
+            process = subprocess.run([sys.executable, ct.__file__, "baseline", "--unit",
+                                      str(self.report("measurement", missed)), "--sha", sha, "--out-dir", str(site)],
+                                     cwd=self.root, env=self.env, capture_output=True, text=True)
+            self.assertEqual(process.returncode, 0, process.stderr)
+        records = {record["sha"]: record for record in ct.read_history(site / "history.jsonl")}
+        self.assertEqual(records[self.production]["unit"]["percent"], 90)
+        self.assertEqual(json.loads((site / "baseline.json").read_text())["sha"], self.candidate)
 
     def test_unit_mode_never_requires_emulator_even_after_combined_target_dates(self):
         code, data = self.run_gate("unit", today="2027-01-02")

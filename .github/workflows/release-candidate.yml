@@ -52,7 +52,7 @@ jobs:
         run: |
           tools="$RUNNER_TEMP/coverage-tooling"
           git init --quiet "$tools"
-          git -C "$tools" sparse-checkout set --no-cone /scripts/download_emulator_coverage.py /scripts/coverage_tools.py
+          git -C "$tools" sparse-checkout set --no-cone /scripts/download_emulator_coverage.py /scripts/coverage_tools.py /scripts/select_lua_tests.py
           GIT_TERMINAL_PROMPT=0 git -C "$tools" -c credential.helper= fetch --quiet --depth 1 \
             "https://github.com/$GITHUB_REPOSITORY.git" "$GITHUB_WORKFLOW_SHA"
           git -C "$tools" checkout --quiet --detach FETCH_HEAD
@@ -94,6 +94,9 @@ jobs:
       - name: Unit specs and release coverage gates
         run: |
           set -euo pipefail
+          # Normal execution is blocking; LuaCov's instrumentation-only timing
+          # failures remain advisory after this full suite has passed.
+          bash scripts/run_lua_specs.sh
           bash scripts/run_lua_coverage.sh
           tool="$RUNNER_TEMP/coverage-tooling/scripts/coverage_tools.py"
           export COVERAGE_REPO="$GITHUB_WORKSPACE"
@@ -145,7 +148,7 @@ jobs:
         run: |
           tools="$RUNNER_TEMP/coverage-tooling"
           git init --quiet "$tools"
-          git -C "$tools" sparse-checkout set --no-cone /scripts/download_emulator_coverage.py /scripts/coverage_tools.py
+          git -C "$tools" sparse-checkout set --no-cone /scripts/download_emulator_coverage.py /scripts/coverage_tools.py /scripts/select_lua_tests.py
           GIT_TERMINAL_PROMPT=0 git -C "$tools" -c credential.helper= fetch --quiet --depth 1 \
             "https://github.com/$GITHUB_REPOSITORY.git" "$GITHUB_WORKFLOW_SHA"
           git -C "$tools" checkout --quiet --detach FETCH_HEAD
