@@ -94,6 +94,7 @@ jobs:
         with:
           ref: ${{ steps.run.outputs.sha }}
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Install LuaJIT and LuaCov
         run: |
@@ -116,6 +117,7 @@ jobs:
 
       - name: Update the coverage branch
         env:
+          GH_TOKEN: ${{ github.token }}
           SHA: ${{ steps.run.outputs.sha }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ steps.run.outputs.run_id }}
         run: |
@@ -146,7 +148,7 @@ jobs:
             git -C "$site" -c user.name="github-actions[bot]" \
                 -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
                 commit -q -m "coverage: ${SHA:0:8} $(record .combined.percent)% (unit $(record .unit.percent)%)" || return 1
-            git -C "$site" push origin coverage
+            git -C "$site" -c credential.helper= -c 'credential.helper=!gh auth git-credential' push origin coverage
           }
           record() { jq -r --arg sha "$SHA" "select(.sha == \$sha) | $1" "$site/history.jsonl" | tail -n 1; }
           for attempt in 1 2 3 4 5; do
