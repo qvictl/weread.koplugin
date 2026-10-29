@@ -260,8 +260,10 @@ python3 scripts/run_emulator_scenarios.py --koreader /tmp/koreader/fork/extract 
 python3 scripts/coverage_tools.py merge --all-files --out coverage/combined.stats.out \
     coverage/unit.stats.out /tmp/emu/coverage/emulator.stats.out
 python3 scripts/coverage_tools.py report coverage/combined.stats.out coverage/combined.report.out
+git fetch --no-tags origin coverage:refs/remotes/origin/coverage
+git show origin/coverage:history.jsonl > coverage/history.jsonl
 python3 scripts/coverage_tools.py gate --mode release --unit coverage/unit.report.out \
-    --combined coverage/combined.report.out --base origin/main
+    --combined coverage/combined.report.out --base origin/main --history coverage/history.jsonl
 ```
 
 修改 Lua 代码的 PR 必须修改 `spec/`，`feat`/`fix` 类 PR 必须新增或更新模拟器场景；改动行

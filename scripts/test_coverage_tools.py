@@ -468,6 +468,43 @@ class CoveragePhaseTest(unittest.TestCase):
         self.unit = self.report("unit", [0, 1])
         self.assertEqual(self.run_gate("unit")[0], 1)
 
+    def test_unit_publisher_rejects_corrupt_existing_history_without_writing(self):
+        site = self.root / "site"
+        site.mkdir()
+        history = site / "history.jsonl"
+        args = [sys.executable, ct.__file__, "baseline", "--unit", str(self.unit),
+                "--sha", self.candidate, "--out-dir", str(site)]
+        subprocess.run(args, cwd=self.root, env=self.env, capture_output=True, check=True)
+        history.write_text(history.read_text() + "broken combined row\n")
+        before = {path.name: path.read_bytes() for path in site.iterdir()}
+        process = subprocess.run(args, cwd=self.root, env=self.env, capture_output=True)
+        self.assertNotEqual(process.returncode, 0)
+        self.assertEqual({path.name: path.read_bytes() for path in site.iterdir()}, before)
+
+    def test_durable_release_checks_survive_unit_updates_and_keep_accepted_floors(self):
+        site = self.root / "site"
+        site.mkdir()
+        record = self.history_record(self.candidate, 95)
+        record["release_checks"] = {"10": {"attempt": 2, "sha": self.candidate, "combined": 95}}
+        (site / "history.jsonl").write_text(json.dumps(record) + "\n")
+        args = [sys.executable, ct.__file__, "baseline", "--unit", str(self.unit),
+                "--sha", self.candidate, "--out-dir", str(site)]
+        subprocess.run(args, cwd=self.root, env=self.env, capture_output=True, check=True)
+        saved = ct.read_history(site / "history.jsonl", strict=True)[0]
+        self.assertEqual(saved, record, "late unit publication erased accepted release evidence")
+        checks = self.root / "checks.json"
+        checks.write_text(json.dumps({"10": {"attempt": 3}}))
+        combined = self.report("combined", [])
+        subprocess.run(args + ["--combined", str(combined), "--release-checks", str(checks)],
+                       cwd=self.root, env=self.env, capture_output=True, check=True)
+        saved = ct.read_history(site / "history.jsonl", strict=True)[0]
+        self.assertEqual(saved["release_checks"]["10"], {"attempt": 3, "sha": self.candidate, "combined": 95})
+        before = {path.name: path.read_bytes() for path in site.iterdir()}
+        lower = self.report("lower", [8, 9])
+        process = subprocess.run(args + ["--combined", str(lower)], cwd=self.root, env=self.env, capture_output=True)
+        self.assertNotEqual(process.returncode, 0)
+        self.assertEqual({path.name: path.read_bytes() for path in site.iterdir()}, before)
+
     def test_unit_publisher_preserves_real_combined_and_separate_latest_badge(self):
         site = self.root / "site"
         def publish(sha, combined=None):

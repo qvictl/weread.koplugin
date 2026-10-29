@@ -334,6 +334,34 @@ def fmt_pct(value) -> str:
     return "n/a" if value is None else f"{value:.2f}%"
 
 
+def validate_release_checks(checks):
+    if not isinstance(checks, dict):
+        raise ValueError("release checks must be a run/attempt map")
+    for run_id, check in checks.items():
+        if (not isinstance(run_id, str) or not run_id.isdigit() or int(run_id) <= 0
+                or not isinstance(check, dict) or type(check.get("attempt")) is not int or check["attempt"] <= 0):
+            raise ValueError("invalid release run/attempt watermark")
+        if "sha" in check or "combined" in check:
+            if (not isinstance(check.get("sha"), str) or not re.fullmatch(r"[0-9a-f]{40}", check["sha"])
+                    or type(check.get("combined")) not in (int, float) or not 0 <= check["combined"] <= 100):
+                raise ValueError("invalid accepted release floor")
+    return checks
+
+
+def merge_release_checks(*maps):
+    merged = {}
+    for checks in maps:
+        for run_id, check in validate_release_checks(checks).items():
+            old = merged.get(run_id, {})
+            if old.get("sha") and check.get("sha") and old["sha"] != check["sha"]:
+                raise ValueError("a release run cannot change its measured source")
+            value = dict(old, attempt=max(old.get("attempt", 0), check["attempt"]))
+            if "sha" in check:
+                value.update(sha=check["sha"], combined=max(old.get("combined", 0), check["combined"]))
+            merged[run_id] = value
+    return merged
+
+
 def read_history(path, strict=False) -> list:
     """Keep legacy unit-history tolerance; release history must be complete."""
     records = []
@@ -358,6 +386,7 @@ def read_history(path, strict=False) -> list:
                 valid = valid and type(percent) in (int, float) and 0 <= percent <= 100
             if not valid:
                 raise ValueError("coverage history contains an invalid measurement")
+            validate_release_checks(record.get("release_checks", {}))
         if isinstance(record, dict) and record.get("sha"):
             records.append(record)
     if strict and not records:
@@ -598,10 +627,30 @@ def baseline(args) -> int:
         record["combined"] = combined
     out = Path(args.out_dir)
     out.mkdir(parents=True, exist_ok=True)
-    previous = read_history(out / "history.jsonl")
+    history_path = out / "history.jsonl"
+    previous = read_history(history_path, strict=history_path.exists())
+    if any(not isinstance(entry.get("date"), str) or not entry["date"] for entry in previous):
+        raise ValueError("coverage history contains an invalid publication date")
+    checks_path = getattr(args, "release_checks", None)
+    checks = validate_release_checks(json.loads(Path(checks_path).read_text())) if checks_path else {}
+    publication_attempt = getattr(args, "publication_attempt", None)
+    if publication_attempt is not None:
+        run_id = (args.run_url or "").rstrip("/").split("/")[-1]
+        own = checks.get(run_id, {})
+        if (publication_attempt <= 0 or own.get("sha") != args.sha or combined is None
+                or own.get("combined") != combined["percent"]):
+            raise ValueError("persistence retry does not match the accepted release")
+        checks[run_id] = dict(own, attempt=max(own["attempt"], publication_attempt))
+    all_checks = merge_release_checks(*(entry.get("release_checks", {}) for entry in previous), checks)
+    for check in all_checks.values():
+        if combined is not None and check.get("sha") == args.sha and combined["percent"] < check["combined"]:
+            raise ValueError("publication would erase a durable accepted release floor")
     existing = next((entry for entry in reversed(previous) if entry["sha"] == args.sha), None)
     if combined is None and existing and existing.get("combined"):
         record = existing  # A late unit publisher cannot erase a true combined measurement.
+    merged_checks = merge_release_checks(existing.get("release_checks", {}) if existing else {}, checks)
+    if merged_checks:
+        record["release_checks"] = merged_checks
     entries = [entry for entry in previous if entry["sha"] != args.sha] + [record]
     (out / "history.jsonl").write_text("".join(json.dumps(entry) + "\n" for entry in entries), encoding="utf-8")
     if is_newest_publish(out / "baseline.json", args.sha):
@@ -676,6 +725,8 @@ def main() -> int:
     p.add_argument("--combined", help="authentic release report; omit for unit-only main records")
     p.add_argument("--sha", required=True)
     p.add_argument("--run-url")
+    p.add_argument("--publication-attempt", type=int, help="acknowledge the persistence retry without rerunning tests")
+    p.add_argument("--release-checks", help="durable checked run/attempt watermarks from the accepted gate")
     p.add_argument("--out-dir", required=True)
     args = parser.parse_args()
     return dict(merge=merge, report=report, diff=diff, total=total, gate=gate, baseline=baseline)[args.command](args)

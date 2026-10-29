@@ -62,7 +62,8 @@ To publish a release:
    version with its first parent and checks that the tag is new. Only this
    version change starts the reusable integration matrix.
 5. Fork and official emulators, pinned PluginLoader and real combined
-   coverage must all pass at the same candidate SHA before packaging/publication.
+   coverage must all pass at the same candidate SHA. Accepted coverage is
+   persisted before packaging/publication.
 6. If `vX.Y.Z` does not already exist, it creates the package, checksum, tag,
    and GitHub Release on `qvictl/weread.koplugin`, marks it latest, and
    re-downloads the assets to verify the checksum. The asset names
@@ -104,7 +105,14 @@ latest creation time and reject partial, ambiguous or mismatched data. Publicati
 keeps main ancestry checks, fixed-workflow tooling and non-persistent checkout
 credentials. Daily unit history never fabricates or erases combined coverage.
 
-Release candidates serialize through combined-history persistence. A dedicated
+Version resolution runs without a concurrency lock. Only a confirmed candidate
+enters the reusable `release-candidate.yml` call, whose lock covers integration,
+coverage, persistence and publication. A normal main CI completion cannot replace
+a candidate in the pending queue. GitHub retains only the newest pending
+candidate when several real candidates queue; manually redispatch a superseded
+version if it still needs publication.
+
+A dedicated
 job validates the exact accepted reports, fetches main ancestry and current
 history again, rechecks the gate, and pushes the measurement before packaging.
 A main candidate cannot finish successfully while its combined record is still
@@ -114,7 +122,21 @@ historical backfills remain available.
 
 A failed or cancelled Release with a previously successful combined gate must
 have that ancestor measurement in history before a later candidate proceeds.
-Retry the failed candidate's persistence first. Revalidating the same candidate
-may repair it, provided its new measurement retains every still-available
-accepted attempt's combined floor. Missing or inconsistent accepted evidence
-fails closed; a lower subsequent rerun cannot replace an earlier high floor.
+Retry the failed candidate's persistence first: it downloads the API's latest
+successful gate attempt, then selects the unique newest artifact within that
+identity. A later failed full rerun's lower report cannot hide that accepted
+report, so recovery does not require another integration run.
+
+History stores small `release_checks` run/attempt watermarks and genuine accepted
+floors. Already acknowledged failed-package runs need no old artifacts. Only new
+or changed attempts require jobs/artifact queries; queued runs are never
+acknowledged before they can execute their candidate. A persistence-only retry
+advances its durable watermark without rerunning tests. Unit publication retains
+these proofs and rejects damaged existing history before changing any files.
+
+An unacknowledged higher successful gate still needs its authentic evidence.
+Revalidating the same candidate must retain that earlier floor. If unacknowledged
+accepted evidence expires, publication stops until its genuine source and
+measurement can be recovered from retained evidence and restored to history.
+Do not discard the check, infer combined from unit, or treat a lower fresh run as
+proof of the missing earlier maximum.
