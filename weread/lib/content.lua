@@ -230,6 +230,8 @@ local function asset_name_taken(used, candidate)
     return used[key] or used[candidate] or key:match("^cover%.") ~= nil
 end
 
+local MAX_ASSET_SUFFIX_CURSORS = 1024
+
 local function unique_asset_name(used, name, ext)
     local base = filename_safe(name):gsub("[^%w%._-]", "_"):gsub("_+", "_")
     if base:gsub("[_%.]", "") == "" then base = "img" end
@@ -251,7 +253,15 @@ local function unique_asset_name(used, name, ext)
         index = index + 1
     end
     if index > 2 then
-        suffixes = suffixes or {}
+        suffixes = suffixes or { __count = 0 }
+        if suffixes[key] == nil then
+            -- The authoritative used-name set remains intact. Evicted
+            -- cursors can safely rediscover their next suffix from it.
+            if suffixes.__count >= MAX_ASSET_SUFFIX_CURSORS then
+                suffixes = { __count = 0 }
+            end
+            suffixes.__count = suffixes.__count + 1
+        end
         suffixes[key] = index
         used.__next_asset_suffix = suffixes
     end

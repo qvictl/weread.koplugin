@@ -37,6 +37,18 @@ local distinct = {}
 for i = 1, 512 do name(distinct, "image-" .. i, ".png") end
 expect(distinct.__next_asset_suffix == nil, "unique stems do not need a second per-image map")
 
+local families = {}
+for i = 1, 1030 do
+    name(families, "family" .. i, ".png")
+    name(families, "family" .. i, ".png")
+end
+local cursor_count = 0
+for key in pairs(families.__next_asset_suffix) do
+    if key ~= "__count" then cursor_count = cursor_count + 1 end
+end
+expect(cursor_count <= 1024, "collision cursors have a fixed capacity")
+expect(name(families, "family1", ".png") == "family1-3.png", "evicted cursor rediscovers the first unused suffix")
+
 -- Bound accesses so the old cover.* infinite loop fails without hanging
 -- this process. MIME sniffing can disagree with a remote image's extension.
 local cover_probes, cover_names = 0, { ["cover-jpg-2.png"] = true }

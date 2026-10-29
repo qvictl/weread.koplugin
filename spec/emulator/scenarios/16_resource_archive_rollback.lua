@@ -58,6 +58,8 @@ return function(H)
             -- Match the serialization boundary between actual chapter workers.
             local buffer = require("string.buffer")
             names = buffer.decode(buffer.encode(names))
+            H.check(names.__next_asset_suffix and names.__next_asset_suffix["existing.png"] == 4,
+                "actual worker serialization preserves the next suffix cursor")
             local started = os.clock()
             local many = Content.download_chapter_assets_to_files(
                 client, { book_id = "synthetic" }, chapter, names, workspace)
