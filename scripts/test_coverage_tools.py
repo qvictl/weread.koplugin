@@ -420,8 +420,38 @@ class CoveragePhaseTest(unittest.TestCase):
         self.assertNotEqual(process.returncode, 0, "Git failure was reclassified as a first release")
         self.assertFalse(output.exists(), "unreadable history produced a passing measurement")
 
+    def test_release_rejects_corrupt_combined_history_instead_of_day_one(self):
+        history = self.root / "history.jsonl"
+        good = json.dumps(self.history_record(self.production)) + "\n"
+        invalid = ["not json", "{}", "[]", "", "\udcff"]
+        for combined in ({}, None, {"percent": "95"}, {"percent": True},
+                         {"percent": float("nan")}, {"percent": float("inf")},
+                         {"percent": -1}, {"percent": 101}):
+            broken = self.history_record(self.base)
+            broken["combined"] = combined
+            invalid.append(json.dumps(broken))
+        output = self.root / "corrupt-gate.json"
+        for broken in invalid:
+            with self.subTest(history=repr(broken)):
+                if broken == "":
+                    history.write_text("")
+                else:
+                    history.write_bytes((good + broken + "\n").encode("utf-8", errors="surrogateescape"))
+                process = subprocess.run([sys.executable, ct.__file__, "gate", "--mode", "release",
+                                          "--unit", str(self.unit), "--combined", str(self.report("combined", [9])),
+                                          "--base", self.base, "--head", self.candidate, "--history", str(history),
+                                          "--today", "2026-10-28", "--json", str(output)],
+                                         cwd=self.root, env=self.env, capture_output=True, text=True)
+                self.assertNotEqual(process.returncode, 0, "corrupt combined history fell back to day-one")
+                self.assertFalse(output.exists())
+        history.unlink()
+        with self.assertRaises(ValueError):
+            ct.read_history(history, strict=True)
+        history.write_text(json.dumps(self.history_record(self.base)) + "\n")
+        self.assertEqual(ct.read_history(history, strict=True)[0]["sha"], self.base)
+
     def test_first_release_counts_all_code_and_never_fakes_combined(self):
-        code, data = self.run_gate("release", self.report("combined", [9]), records=[])
+        code, data = self.run_gate("release", self.report("combined", [9]), records=[self.history_record(self.base)])
         self.assertEqual(code, 0, data)
         self.assertEqual(data["diff_combined"]["executable"], 10)
         self.assertIsNone(data["combined_diff_baseline_sha"])

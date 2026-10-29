@@ -334,17 +334,34 @@ def fmt_pct(value) -> str:
     return "n/a" if value is None else f"{value:.2f}%"
 
 
-def read_history(path) -> list:
-    """Records of history.jsonl (one per measured main commit); unreadable lines are skipped."""
+def read_history(path, strict=False) -> list:
+    """Keep legacy unit-history tolerance; release history must be complete."""
     records = []
-    if path and Path(path).is_file():
-        for line in Path(path).read_text(encoding="utf-8").splitlines():
-            try:
-                record = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(record, dict) and record.get("sha"):
-                records.append(record)
+    if not path or not Path(path).is_file():
+        if strict:
+            raise ValueError("coverage history is missing")
+        return records
+    for line in Path(path).read_text(encoding="utf-8").splitlines():
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            if strict:
+                raise ValueError("coverage history contains malformed JSON")
+            continue
+        if strict:
+            valid = (isinstance(record, dict)
+                     and isinstance(record.get("sha"), str)
+                     and re.fullmatch(r"[0-9a-f]{40}", record["sha"]))
+            for metric in ("unit", "combined") if isinstance(record, dict) and "combined" in record else ("unit",):
+                value = record.get(metric) if isinstance(record, dict) else None
+                percent = value.get("percent") if isinstance(value, dict) else None
+                valid = valid and type(percent) in (int, float) and 0 <= percent <= 100
+            if not valid:
+                raise ValueError("coverage history contains an invalid measurement")
+        if isinstance(record, dict) and record.get("sha"):
+            records.append(record)
+    if strict and not records:
+        raise ValueError("coverage history is empty")
     return records
 
 
@@ -423,7 +440,7 @@ def gate(args) -> int:
     today = dt.date.fromisoformat(args.today) if args.today else dt.date.today()
     unit_cov = parse_report(Path(args.unit))
     combined_cov = parse_report(Path(args.combined)) if args.combined and Path(args.combined).is_file() else None
-    records = read_history(args.history)
+    records = read_history(args.history, strict=(mode == "release"))
     combined_baseline = None
     combined_diff_baseline = None
     if mode == "release":
