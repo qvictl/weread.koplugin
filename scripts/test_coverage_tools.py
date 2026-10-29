@@ -318,5 +318,126 @@ class RatchetBaselineTest(unittest.TestCase):
                 self.assertEqual((site / name).read_text(encoding="utf-8"), text, name)
 
 
+class CoveragePhaseTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.repo = GitRepo(self.tmp.name, 0)
+        self.env = dict(os.environ, COVERAGE_REPO=self.tmp.name, GIT_AUTHOR_NAME="t",
+                        GIT_AUTHOR_EMAIL="t@example.com", GIT_COMMITTER_NAME="t",
+                        GIT_COMMITTER_EMAIL="t@example.com")
+        (self.root / ".ci").mkdir()
+        policy = dict(POLICY, diff_unit_min=80, diff_combined_min=90, ratchet_tolerance_pp=0.1)
+        (self.root / ".ci/coverage-policy.json").write_text(json.dumps(policy))
+        (self.root / "weread/lib").mkdir(parents=True)
+        self.module = self.root / "weread/lib/m.lua"
+        self.rows = ["old_%d()" % i for i in range(10)]
+        self.module.write_text("\n".join(self.rows) + "\n")
+        (self.root / "_meta.lua").write_text('version = "1.0.0"\n')
+        self.base = self.commit("previous release")
+        self.rows[:5] = ["new_%d()" % i for i in range(5)]
+        self.module.write_text("\n".join(self.rows) + "\n")
+        self.production = self.commit("unreleased production change")
+        (self.root / "_meta.lua").write_text('version = "1.0.1"\n')
+        self.candidate = self.commit("version-only candidate")
+        self.unit = self.report("unit", [])
+
+    def commit(self, title):
+        self.repo.git("add", ".")
+        self.repo.git("commit", "-qm", title, env=self.env)
+        return self.repo.git("rev-parse", "HEAD")
+
+    def report(self, name, missed):
+        path = self.root / (name + ".report")
+        path.write_text(luacov_report({"weread/lib/m.lua": [
+            (0 if i in missed else 1, row) for i, row in enumerate(self.rows)]}))
+        return path
+
+    def history_record(self, sha, combined=None):
+        result = dict(sha=sha, date="2026-10-28", unit=dict(percent=80), run="")
+        if combined is not None:
+            result["combined"] = dict(percent=combined)
+        return result
+
+    def run_gate(self, mode, combined=None, records=None, **options):
+        history = self.root / "history.jsonl"
+        if records is None:
+            records = [self.history_record(self.base, 90), self.history_record(self.production)]
+        history.write_text("".join(json.dumps(r) + "\n" for r in records))
+        output = self.root / "gate.json"
+        args = [sys.executable, ct.__file__, "gate", "--mode", mode, "--unit", str(self.unit),
+                "--base", self.production, "--head", self.candidate, "--history", str(history),
+                "--today", options.get("today", "2026-10-28"), "--json", str(output)]
+        if combined is not None:
+            args += ["--combined", str(combined)]
+        if options.get("labels"):
+            args += ["--labels", options["labels"]]
+        process = subprocess.run(args, cwd=self.root, env=self.env, capture_output=True, text=True)
+        self.assertTrue(output.is_file(), process.stderr)
+        return process.returncode, json.loads(output.read_text())
+
+    def test_unit_mode_never_requires_emulator_even_after_combined_target_dates(self):
+        code, data = self.run_gate("unit", today="2027-01-02")
+        self.assertEqual(code, 0, data)
+        self.assertIsNone(data["overall_combined"])
+        self.assertFalse(any("emulator" in item["name"] for item in data["checks"]))
+
+    def test_release_diff_spans_production_and_skips_unit_only_history(self):
+        code, data = self.run_gate("release", self.report("combined", [0]), labels="no-tests-needed")
+        self.assertEqual(code, 1)
+        self.assertEqual(data["diff_base"], self.base)
+        self.assertEqual(data["diff_combined"]["executable"], 5)
+        self.assertEqual(data["diff_combined"]["percent"], 80)
+        self.assertEqual(data["combined_diff_baseline_sha"], self.base)
+
+    def test_same_candidate_record_is_excluded_from_diff_but_keeps_high_ratchet(self):
+        history = [self.history_record(self.base, 90), self.history_record(self.production),
+                   self.history_record(self.candidate, 100)]
+        code, data = self.run_gate("release", self.report("combined", [9]), history)
+        self.assertEqual(data["diff_combined"]["percent"], 100)
+        self.assertEqual(data["diff_base"], self.base)
+        self.assertEqual(data["combined_baseline_sha"], self.candidate)
+        self.assertEqual(data["baseline_combined"], 100)
+        self.assertEqual(code, 1, "same-source coverage fell but an older low floor hid it")
+
+    def test_first_release_counts_all_code_and_never_fakes_combined(self):
+        code, data = self.run_gate("release", self.report("combined", [9]), records=[])
+        self.assertEqual(code, 0, data)
+        self.assertEqual(data["diff_combined"]["executable"], 10)
+        self.assertIsNone(data["combined_diff_baseline_sha"])
+        code, data = self.run_gate("release", labels="upstream-sync")
+        self.assertEqual(code, 1)
+        self.assertIsNone(data["overall_combined"])
+
+    def test_unit_diff_floor_and_ratchet_remain_blocking(self):
+        self.candidate = self.production
+        self.production = self.base
+        self.unit = self.report("unit", [0])
+        self.assertEqual(self.run_gate("unit")[0], 0)
+        self.unit = self.report("unit", [0, 1])
+        self.assertEqual(self.run_gate("unit")[0], 1)
+
+    def test_unit_publisher_preserves_real_combined_and_separate_latest_badge(self):
+        site = self.root / "site"
+        def publish(sha, combined=None):
+            args = [sys.executable, ct.__file__, "baseline", "--unit", str(self.unit),
+                    "--sha", sha, "--out-dir", str(site)]
+            if combined:
+                args += ["--combined", str(combined)]
+            subprocess.run(args, cwd=self.root, env=self.env, capture_output=True, check=True)
+        publish(self.production)
+        publish(self.base, self.report("combined", [9]))
+        self.assertEqual(json.loads((site / "baseline.json").read_text())["sha"], self.production)
+        self.assertEqual(json.loads((site / "badge.json").read_text())["message"], "90.0%")
+        publish(self.base)
+        publish(self.candidate)
+        records = {r["sha"]: r for r in ct.read_history(site / "history.jsonl")}
+        self.assertEqual(records[self.base]["combined"]["percent"], 90)
+        self.assertNotIn("combined", records[self.candidate])
+        self.assertEqual(json.loads((site / "badge.json").read_text())["message"], "90.0%")
+        self.assertIn("—", (site / "README.md").read_text())
+
+
 if __name__ == "__main__":
     unittest.main()
