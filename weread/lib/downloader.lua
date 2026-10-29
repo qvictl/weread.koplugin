@@ -1178,6 +1178,7 @@ function Downloader:_skipCompletedChapterBatch(dl)
 end
 
 function Downloader:_retryChapterSource(dl, err)
+    dl.reader_session_ready = nil
     -- Not a chapter problem: stop the job, so no chapter is skipped and a
     -- full-book download keeps its checkpoint.
     if is_low_memory_error(err) then
@@ -1832,7 +1833,8 @@ function Downloader:_step(dl)
         return self:_runInterruptible(dl, function()
             local state, collect = ChapterState.begin(dl.state)
             local xhtml = Content.fetch_single_chapter_source(
-                self.client, self.settings, dl.book, chapter, state)
+                self.client, self.settings, dl.book, chapter, state,
+                { reuse_reader_state = dl.reader_session_ready == true })
             local value = { xhtml = xhtml, book = reader_book(dl.book) }
             if with_images then
                 -- Fetch text and images in one worker; only the finalized
@@ -1855,6 +1857,7 @@ function Downloader:_step(dl)
     local xhtml = result.xhtml
     ChapterState.apply(dl.state, result.state_delta)
     apply_reader_book(dl.book, result.book)
+    dl.reader_session_ready = true
     if dl.chapter_source_retries then
         dl.chapter_source_retries[tostring(chapter.chapterUid or dl.index)] = nil
     end

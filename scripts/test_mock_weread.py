@@ -93,7 +93,7 @@ class MockTests(unittest.TestCase):
 
     def setUp(self):
         self.request("/__control", dict(delay=0, match="", status=503, times=0, drop=False,
-                                        empty_shelf=False, empty_annotations=False, shelf_idless_entry=False, hold_response=False,
+                                        empty_shelf=False, empty_annotations=False, empty_chapter=False, shelf_idless_entry=False, hold_response=False,
                                         qr_mode="succeed", qr_delay=0))
 
     def test_read_statistics_view_fixture(self):
@@ -242,6 +242,20 @@ class MockTests(unittest.TestCase):
         self.request("/__control", dict(shelf_idless_entry=False, empty_shelf=True, empty_annotations=True))
         self.assertEqual(self.gateway("/shelf/sync")[1]["books"], [])
         self.assertEqual(self.gateway("/book/underlines", bookId=BOOK_ID, chapterUid=1)[1]["underlines"], [])
+
+    def test_reader_context_rejection_is_explicit_and_bounded(self):
+        endpoint = "/web/book/chapter/e_0"
+        params = dict(b=weread_e(BOOK_ID), c=weread_e(1))
+        self.assertEqual(self.request("/__control", dict(empty_chapter=1))[0], 400)
+        self.request("/__control", dict(match=endpoint, times=1, empty_chapter=True))
+        self.assertEqual(self.request(endpoint, params), (200, {}))
+        status, body = self.request(endpoint, params)
+        self.assertEqual(status, 200)
+        self.assertEqual(body.decode(), shards(chapter_html(1))[0])
+        self.assertEqual(self.gateway("/book/info", bookId=BOOK_ID)[0], 200)
+        self.request("/__control", dict(match=endpoint, times=-1, empty_chapter=True))
+        self.assertEqual(self.request(endpoint, params), (200, {}))
+        self.assertEqual(self.request(endpoint, params), (200, {}))
 
     def test_downgrade_redirect_and_request_log(self):
         import urllib.parse
