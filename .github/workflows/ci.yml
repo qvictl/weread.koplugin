@@ -65,6 +65,9 @@ jobs:
       - name: Offline mock service contract
         run: python3 scripts/test_mock_weread.py
 
+      - name: Reader-session probe tests
+        run: python3 scripts/test_probe_reader_session.py
+
       - name: Coverage tooling tests
         run: |
           python3 scripts/test_coverage_tools.py
