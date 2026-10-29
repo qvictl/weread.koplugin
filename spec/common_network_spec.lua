@@ -92,7 +92,11 @@ eq(unavailable_failures, 1, "unavailable worker cleans up exactly once")
 -- results/credential updates in the parent, including cancellation cleanup.
 local in_child, encoded, mode, merged = false, nil, "success", 0
 local account = { user_vid = "original" }
-host.settings = { get = function(_self, key) if key == "account" then return account end end }
+local gateway_key = "synthetic-api-one"
+host.settings = { get = function(_self, key)
+    if key == "account" then return account end
+    if key == "api_key" then return gateway_key end
+end }
 package.loaded["ffi/util"] = { runInSubProcess = function() end }
 package.loaded["json"] = {
     encode = function(value) encoded = value return "reply" end,
@@ -128,12 +132,13 @@ package.loaded["ui/trapper"] = {
         local value = task()
         in_child = false
         if mode == "account_changed" then account.user_vid = "replacement" end
+        if mode == "gateway_changed" then gateway_key = "synthetic-api-two" end
         return true, value
     end,
 }
 for _, current in ipairs({ "success", "task_error", "cancel", "fork_error", "invalid", "auth_error", "ui_error",
-    "ticket_rotated", "account_changed", "start_failed", "read_failed", "unknown_failure" }) do
-    mode, account.user_vid = current, "original"
+    "ticket_rotated", "account_changed", "gateway_changed", "start_failed", "read_failed", "unknown_failure" }) do
+    mode, account.user_vid, gateway_key = current, "original", "synthetic-api-one"
     local results, failures, cancelled, reason, failure_message = 0, 0, false, nil, nil
     host:_runNetworkRequest("Loading", "Load", function()
         eq(in_child, true, "network task runs in worker")
@@ -151,8 +156,8 @@ for _, current in ipairs({ "success", "task_error", "cancel", "fork_error", "inv
     local succeeds = current == "success" or current == "ticket_rotated"
     eq(results, succeeds and 1 or 0, current .. " success delivery")
     eq(failures, succeeds and 0 or 1, current .. " failure cleanup exactly once")
-    eq(cancelled, current == "cancel" or current == "account_changed", current .. " cancellation distinguished")
-    eq(reason, current == "account_changed" and "account_changed" or nil, current .. " discard reason")
+    eq(cancelled, current == "cancel" or current == "account_changed" or current == "gateway_changed", current .. " cancellation distinguished")
+    eq(reason, (current == "account_changed" or current == "gateway_changed") and "account_changed" or nil, current .. " discard reason")
     if current == "start_failed" then
         eq(failure_message, "Could not start network subprocess.", "explicit launch failure is reported")
     elseif current == "read_failed" then
@@ -162,5 +167,33 @@ for _, current in ipairs({ "success", "task_error", "cancel", "fork_error", "inv
     end
 end
 eq(merged, 3, "successful worker credentials merged before task/UI error delivery")
+
+-- A UI gate must carry admission ownership through its deferred callback.
+local UIManager = require("ui/uimanager")
+local schedule = UIManager.scheduleIn
+for _, change in ipairs({ "uid", "api_key", "ticket" }) do
+    local queued
+    UIManager.scheduleIn = function(_, _, callback) queued = callback end
+    mode, account.user_vid, gateway_key, link_up = "success", "original", "synthetic-api-one", true
+    local tasks, delivered, cancelled, reason = 0, 0, 0, nil
+    host:runOnlineTask("Book info", function()
+        host:_runNetworkRequest("Loading", "Book info", function() tasks = tasks + 1; return {} end,
+            function() delivered = delivered + 1 end,
+            function(_, was_cancelled, why)
+                eq(was_cancelled, true, "deferred owner rejection is cleanup cancellation")
+                cancelled, reason = cancelled + 1, why
+            end)
+    end)
+    if change == "uid" then account.user_vid = "replacement"
+    elseif change == "api_key" then gateway_key = "synthetic-api-two"
+    else host.settings.wr_ticket = "rotated" end
+    queued()
+    eq(tasks, change == "ticket" and 1 or 0, change .. " deferred task admission")
+    eq(delivered, tasks, change .. " no stale parent publication")
+    eq(cancelled, change == "ticket" and 0 or 1, change .. " cleanup exactly once")
+    eq(reason, change ~= "ticket" and "account_changed" or nil, change .. " cancellation reason")
+    eq(host._network_task_owner, nil, "temporary admission context restored")
+end
+UIManager.scheduleIn = schedule
 
 print(string.format("common_network_spec: %d checks", checks))

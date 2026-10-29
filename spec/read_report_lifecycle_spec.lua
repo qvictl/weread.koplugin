@@ -117,6 +117,7 @@ test("a restored server session waits a full interval before the first tick", fu
         enabled = true, mode = "auto", interval_seconds = 60,
         session_book_id = "book", session_started_at = 940, last_credit_at = 980,
     } }
+    env.settings.config.session_owner_digest = require("weread.lib.request_owner").digest(report.owner)
     expect(report:maybe_start("reader_ready") == true, "started")
     expect(env.scheduler:delays() == "60", "no new enter right away")
     expect(report.server_session_ready == true, "session restored")
@@ -641,6 +642,7 @@ end)
 local function job_for(report, book_id)
     return {
         book_id = book_id or "book",
+        owner = require("weread.lib.request_owner").capture(report.settings),
         auth_fingerprint = report:_auth_fingerprint(),
         context_fingerprint = report:_context_fingerprint(book_id or "book"),
     }
@@ -760,6 +762,119 @@ test("an inline upload records renewal and survives a failed context write", fun
     expect(report.last_renew_attempt == 1000, "renewal cooldown started")
     expect(H.count_logs("warn", "persist progress upload context failed:") == 1, "logged")
     expect(env.settings.flushes == 0, "no session to persist")
+end)
+
+-- A completed job/cache belongs to its accepting cookie/gateway identity.
+for _, stage in ipairs({ "active", "cached" }) do
+    for _, change in ipairs({ "uid", "api_key", "ticket" }) do
+        test(stage .. " upload owner " .. change, function()
+            local settings, runner = H.settings(), H.runner()
+            settings.store.account, settings.store.api_key = { user_vid = "42" }, "synthetic-api-one"
+            local report, env = H.new_report{ settings = settings, subprocess = runner }
+            report.ensure_context = function() return H.ready_book(report) end
+            local position = { chapter_uid = 6, chapter_offset = 10, percent = 4 }
+            report:upload_position("book", position, 0)
+            runner.finish(); runner.done = true
+            if stage == "cached" then env.scheduler:run_next() end
+            if change == "uid" then settings.store.account.user_vid = "other"
+            elseif change == "api_key" then settings.store.api_key = "synthetic-api-two"
+            else settings.store.wr_ticket = "rotated" end
+            local flushes = settings.flushes
+            if stage == "active" then env.scheduler:run_next() end
+            if change == "ticket" then
+                local accepted = report:upload_position("book", position, 0)
+                expect(accepted == true and runner.forks == 1, "same-account ticket rotation discarded result")
+            else
+                expect(report.upload_result == nil or report.upload_result.owner ~= nil, "cache lost owner metadata")
+                local accepted, outcome = report:upload_position("book", position, 0)
+                expect(not accepted and outcome.error_kind == "pending", "old accepted result crossed owner")
+                expect(settings.flushes == flushes, "old result persisted into another owner")
+                expect(runner.forks == 2, "fresh owner did not get its own job")
+            end
+        end)
+    end
+end
+
+test("account invalidation cancels jobs and caches without writing new settings", function()
+    local settings, runner = H.settings(), H.runner()
+    local report = H.new_report{ settings = settings, subprocess = runner }
+    report.ensure_context = function() return H.ready_book(report) end
+    report:upload_position("book", { percent = 4 }, 0)
+    report.upload_result = { accepted = true }
+    report.server_session_ready, report.server_session_book_id = true, "book"
+    local flushes = settings.flushes
+    report:on_account_changed()
+    expect(report.job == nil and report.upload_result == nil and #runner.terminated == 1,
+        "account change kept old job/cache")
+    expect(not report.server_session_ready and report.owner_changed, "old session credit retained")
+    expect(settings.flushes == flushes, "account invalidation wrote new-owner settings")
+end)
+
+test("account change rebuilds the same book context and enters a new server session", function()
+    local settings = H.settings()
+    settings.store.account = { user_vid = "first" }
+    local report, env = H.new_report{ inline = true, settings = settings }
+    local book = H.ready_book(report, { read_context_updated_at = env.clock.t,
+        chapters = { { chapterUid = 5, chapterIdx = 1, wordCount = 100 } } })
+    settings:put_book("book", book)
+    local old_session = report.session_id
+    settings.store.account.user_vid = "second"
+    report:on_account_changed()
+    local accepted = report:upload_position("book", { chapter_uid = 5, percent = 4 }, 0)
+    expect(accepted and env.client.sent[1].kind == "enter", "new owner skipped enter for the old book session")
+    expect(report.session_id ~= old_session and H.content.reader_states == 1,
+        "old owner context was reused before its TTL expired")
+    expect(settings:get_book("book").read_session_id == report.session_id,
+        "new session context did not reach parent persistence")
+end)
+
+for _, change in ipairs({ "uid", "api_key", "unsigned", "ticket" }) do
+    test("restored reading credit owner " .. change, function()
+        local settings = H.settings()
+        settings.store.account, settings.store.api_key = { user_vid = "first" }, "synthetic-api-one"
+        local first = H.new_report{ inline = true, settings = settings }
+        settings:put_book("book", H.ready_book(first, { read_context_updated_at = 1000,
+            chapters = { { chapterUid = 5, chapterIdx = 1, wordCount = 100 } } }))
+        first:_remember_session("book", { accepted = true, entered = true })
+        local old_digest = settings.config.session_owner_digest
+        if change == "uid" then settings.store.account.user_vid = "second"
+        elseif change == "api_key" then settings.store.api_key = "synthetic-api-two"
+        elseif change == "unsigned" then settings.config.session_owner_digest = nil
+        else settings.store.wr_ticket = "rotated" end
+        local next_report, env = H.new_report{ inline = true, settings = settings }
+        local _, restored = next_report:_reading_credit("book")
+        expect(restored == (change == "ticket"), "unproven account inherited old session credit")
+        local expected_digest = old_digest
+        if change == "unsigned" then expected_digest = nil end
+        expect(settings.config.session_owner_digest == expected_digest,
+            "credit read rewrote old persisted ownership")
+        local accepted = next_report:upload_position("book", { chapter_uid = 5, percent = 4 }, 0)
+        expect(accepted and env.client.sent[1].kind == (change == "ticket" and "report" or "enter"),
+            "new instance reused an unproven server session")
+    end)
+end
+
+test("old in-memory reading credit cannot be relabelled at close", function()
+    local report, env = H.new_report()
+    report:_remember_session("book", { accepted = true, entered = true })
+    env.settings.store.api_key = "synthetic-different-api"
+    local flushes = env.settings.flushes
+    expect(report:_persist_session() == false and env.settings.flushes == flushes,
+        "old session was persisted under new credentials")
+    local _, open = report:_reading_credit("book")
+    expect(not open and not report.server_session_ready and env.settings.flushes == flushes,
+        "old memory credit survived owner invalidation")
+end)
+
+test("old owner cannot write context or renewed auth", function()
+    local report, env = H.new_report()
+    local job = job_for(report)
+    env.settings.store.api_key = "synthetic-new-api"
+    local flushes, updates = env.settings.flushes, #env.settings.auth_updates
+    expect(report:_write_back(job, { auth = { cookies = {} }, book = { progress = 50 } }) == false,
+        "old job write-back accepted")
+    expect(env.settings.flushes == flushes and #env.settings.auth_updates == updates,
+        "old job touched new owner")
 end)
 
 print(("read_report_lifecycle_spec: %d checks"):format(checks))

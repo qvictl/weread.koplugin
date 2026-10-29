@@ -1,6 +1,7 @@
 -- @title Manual chapter downloads reject responses from an earlier account
 -- @timeout 90
 return function(H)
+    local without_ui_dns = dofile(os.getenv("WEREAD_TEST_HARNESS_DIR") .. "/no_ui_dns.lua")
     local plugin, book, chapters
     H.step("setup manual chapter download", function()
         plugin = H.wait_until("plugin attached", function() return H.plugin() end, 20)
@@ -23,7 +24,7 @@ return function(H)
             local before = H.mock_state().started_counts["/web/book/chapter/e_0"] or 0
             H.mock_control({ match = "/web/book/chapter/e_0", times = 0, hold_response = true })
             local ok, err = xpcall(function()
-                H.call(function()
+                without_ui_dns(H, function()
                     plugin.downloader:start(book, {chapters[6]}, mode == "full" and "full" or "chapter", {
                         single_chapter = mode ~= "full", include_annotations = false,
                         silent_completion = true, offer_read = false,

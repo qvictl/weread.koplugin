@@ -287,6 +287,10 @@ test("a payload re-asserting the cloud is not marked as our own position", funct
     expect(context.reported_local == false, "cloud position flagged")
     report:build_payload("book", 30, context, { chapter_uid = 9, percent = 70 })
     expect(context.reported_local == true and context.progress == 70, "own position flagged")
+    expect(context.reported_local_owner == require("weread.lib.request_owner").digest(report.owner),
+        "new reading position carries only its owner digest")
+    expect(report:_context_snapshot(context).reported_local_owner == context.reported_local_owner,
+        "owner is returned with the child position for parent persistence")
 end)
 
 -- ------------------------------------------------------------------
