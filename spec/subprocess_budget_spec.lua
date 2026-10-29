@@ -70,12 +70,16 @@ local function start(trap, options)
     local co = coroutine.create(function()
         outcome = { Process.run(function() return "from child" end, trap, false,
             options or { settings = { data_dir = "/data" } }) }
+        if type(trap) == "table" and trap.keep_waiting then
+            coroutine.yield()
+            trap.resumed = true
+        end
     end)
     expect(coroutine.resume(co), "coroutine failed")
     return co, function() return outcome end
 end
 local ok, err = xpcall(function()
-    local first, second = {}, {}
+    local first, second = { keep_waiting = true }, {}
     local co_a, result_a = start(first)
     local old_dismiss = first.dismiss_callback
     local co_b, result_b = start(second)
@@ -89,15 +93,18 @@ local ok, err = xpcall(function()
     pump(3)
     expect(launched == 1, "waiting coroutine spawned while first child was alive")
     first.dismiss_callback()
-    expect(coroutine.status(co_a) == "dead" and result_a()[1] == false,
+    expect(coroutine.status(co_a) == "suspended" and result_a()[1] == false,
         "cancel did not return control to the parent")
     expect(signalled[1] == 1 and not Budget.available(), "cancel released an unreaped process")
     pump(3)
     expect(launched == 1, "terminate-no-op admitted another child")
     children[1].done = true
     pump(8)
+    expect(not first.resumed, "late cancelled worker resumed its parent during another wait")
     expect(launched == 2 and children[1].reaped, "waiting task did not start after exact reaping")
     old_dismiss()
+    expect(not first.resumed, "stale dismissal resumed its parent during another wait")
+    expect(coroutine.resume(co_a) and first.resumed, "parent could not finish its independent wait")
     expect(#signalled == 1 and not Budget.available(), "stale cancellation signalled the new child")
     children[2].task()
     children[2].done = true
@@ -206,6 +213,16 @@ local ok, err = xpcall(function()
                 "same-account annotation did not retain its original context")
         end
     end
+    local subsequent_wait = { keep_waiting = true }
+    local co_waiting, waiting_result = start(subsequent_wait)
+    local completed_dismiss = subsequent_wait.dismiss_callback
+    children[launched].task(); children[launched].done = true
+    pump(10)
+    expect(waiting_result()[1] and coroutine.status(co_waiting) == "suspended",
+        "successful operation did not enter its next independent wait")
+    completed_dismiss()
+    expect(not subsequent_wait.resumed, "completed trap resumed a later parent wait")
+    expect(coroutine.resume(co_waiting) and subsequent_wait.resumed, "later parent wait was stranded")
     local failed_parent = coroutine.create(function()
         Process.run(function() return true end, {}, false, { settings = { data_dir = "/data" } })
         error("synthetic-private-auth")

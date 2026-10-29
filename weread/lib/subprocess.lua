@@ -36,7 +36,7 @@ function Process.run(task, trap, _simple_string, options)
         if trap.text then UIManager:forceRePaint() end
     end
     local previous = trap.dismiss_callback
-    local cancelled, result, request
+    local cancelled, finished, result, request
     local function wake()
         if coroutine.status(co) == "suspended" then
             local ok = coroutine.resume(co)
@@ -44,6 +44,7 @@ function Process.run(task, trap, _simple_string, options)
         end
     end
     local dismiss = function()
+        if finished then return end
         cancelled = true
         if request then
             worker:cancel(request, "cancelled")
@@ -64,11 +65,15 @@ function Process.run(task, trap, _simple_string, options)
             if options.required_memory_kb then worker.min_available_kb = options.required_memory_kb() end
             return true
         end,
-        on_done = function(value) result = value; wake() end,
+        on_done = function(value)
+            if finished or cancelled then return end
+            result = value; wake()
+        end,
     }
     if started then request = handle end
     if not started and not result then result = { error = handle } end
     while not result and not cancelled do coroutine.yield() end
+    finished = true
     if trap.dismiss_callback == dismiss then trap.dismiss_callback = previous end
     if owned then UIManager:close(trap) end
     if cancelled then return false end
