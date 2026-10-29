@@ -20,7 +20,7 @@ local function test(name, fn)
     H.clear_logs()
     H.reset_content()
     CatalogMemo.written = {}
-    local ok, err = pcall(fn)
+    local ok, err = H.with_memory(fn)
     H.finish_runners()
     if not ok then error(name .. ": " .. tostring(err), 0) end
 end

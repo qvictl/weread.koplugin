@@ -30,6 +30,17 @@ package.preload["logger"] = function()
     }
 end
 
+-- Admission is exercised with fake OS children, so host memory must not
+-- decide whether they launch. Each case restores even after an assertion.
+function H.with_memory(fn)
+    local memory = require("weread.lib.memory_gate")
+    local read_memory = memory.read_meminfo
+    memory.read_meminfo = function() return "MemAvailable: 1048576 kB\n" end
+    local ok, err = pcall(fn)
+    memory.read_meminfo = read_memory
+    return ok, err
+end
+
 function H.clear_logs()
     H.logs = {}
 end
