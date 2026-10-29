@@ -304,8 +304,8 @@ expect(#cover_requests == requests_before_qlogo + 1
         and cover_requests[#cover_requests].url == "https://wx.qlogo.cn/avatar",
     "public-account avatar cover was not upgraded to HTTPS and fetched")
 
--- Low memory keeps the visible book pending; recovery retries that exact
--- cover instead of advancing the batch to its end without fetching it.
+-- Low memory stops background wakeups. Rebuilding the visible page retries
+-- the uncached cover after memory has recovered.
 do
     local ui = package.loaded["ui/uimanager"]
     local schedule = ui.scheduleIn
@@ -313,19 +313,20 @@ do
     ui.scheduleIn = function(_, _, fn) queued[#queued + 1] = fn end
     local ok, err = pcall(function()
         local book = { bookId = "memory-retry", cover = "https://cdn.example/memory-retry" }
-        local view = { page = 1, page_size = 1 }
-        host.shelf_view = view
-        host.shelf_cover_generation = host.shelf_cover_generation + 1
         local before = #cover_requests
         Memory.read_meminfo = function() return "MemAvailable: 1 kB\n" end
-        host:fetchVisibleShelfCovers(view, { book }, {})
-        expect(#cover_requests == before and host.shelf_cover_job and #queued == 1,
-            "low-memory cover did not retain a waiting batch")
+        host:showShelfView("books", nil, nil, {
+            page = 1, prepared_shelf = { books = { book }, accounts = {} },
+        })
+        local paused = shown[#shown]
+        expect(#cover_requests == before and not host.shelf_cover_job and #queued == 0,
+            "persistent low memory retained a cover batch or wakeup timer")
         Memory.read_meminfo = enough_memory
+        paused.callbacks.on_page_changed(1)
         for _ = 1, 8 do local fn = table.remove(queued, 1); if fn then fn() end end
         expect(#cover_requests == before + 1 and cached_covers[book]
             and not host.shelf_cover_job and #queued == 0,
-            "cover was skipped instead of retried after memory recovery")
+            "existing page callback did not retry the cover after memory recovery")
     end)
     Memory.read_meminfo = enough_memory
     ui.scheduleIn = schedule
