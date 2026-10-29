@@ -66,6 +66,8 @@ jobs:
           fi
           ls -la "$RUNNER_TEMP/baseline"
 
+      # Pin dispatch/historical-head tooling to this workflow revision. A PR can
+      # still edit its workflow and policy; latest-head review is the trust boundary.
       - name: Checkout coverage tooling
         run: |
           tools="$RUNNER_TEMP/coverage-tooling"

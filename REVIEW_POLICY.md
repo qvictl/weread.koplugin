@@ -153,6 +153,9 @@ gh api -X PATCH repos/$R/branches/main/protection/required_pull_request_reviews 
 
 - **No human gate** (owner decision, 2026-10-28): if the agent and the AI review think it is fine, it merges; regressions
   are fixed forward. Releases, version bumps, CI and policy changes follow the same flow.
+- **CI trust boundary:** PR workflows, coverage tools and policy remain reviewable PR code. The workflow-revision
+  pin keeps manual dispatch and historical-head checks on the selected workflow tooling; it does not make PR tooling
+  immutable. Latest-head AI review and protected main govern changes to those files, as they do other PR changes.
 - **Reviewer:** CodeRabbit (requests changes for blocking findings and auto-approves once resolved — its approval may
   satisfy the required approval). Gemini Code Assist was dropped.
 - **Review comments:** potential issues / bugs are fixed or answered with a justification; then the agent resolves the

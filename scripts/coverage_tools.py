@@ -352,8 +352,8 @@ def git_merge_base(base: str, head: str, cwd=REPO) -> str:
     return subprocess.check_output(["git", "merge-base", base, head], cwd=cwd, text=True).strip()
 
 
-def git_ancestors(sha: str, cwd=REPO, limit: int = 5000) -> list:
-    """sha itself, then its ancestors, nearest first (empty if git cannot resolve it)."""
+def git_ancestors(sha: str, cwd=REPO, limit: int = 5000, strict=False) -> list:
+    """Walk ancestors; release gates fail closed on unreadable Git history."""
     if not sha:
         return []
     try:
@@ -361,6 +361,8 @@ def git_ancestors(sha: str, cwd=REPO, limit: int = 5000) -> list:
         out = subprocess.check_output(["git", "rev-list", *limit_args, sha, "--"],
                                       cwd=cwd, text=True, stderr=subprocess.DEVNULL)
     except subprocess.CalledProcessError:
+        if strict:
+            raise
         return [sha]
     return out.split() or [sha]
 
@@ -427,7 +429,7 @@ def gate(args) -> int:
     if mode == "release":
         # A version commit or a repeated candidate validation must cover the
         # entire batch since the previous authentic combined measurement.
-        ancestors = git_ancestors(args.head, limit=None)
+        ancestors = git_ancestors(args.head, limit=None, strict=True)
         previous = ancestors[1:]
         base_sha = ancestors[0]
         baseline, match = select_baseline(records, base_sha, ancestors)

@@ -102,15 +102,15 @@ jobs:
             echo "No scenario summary was produced." >> "$GITHUB_STEP_SUMMARY"
           fi
 
-      # The commit these line counts belong to: for a pull_request run the
-      # merge commit refs/pull/N/merge pointed at (github.sha), whose first
-      # parent is the main commit the tests-policy ratchet compares with.
+      # A reusable workflow keeps the caller's github.sha, which can differ
+      # from the exact release candidate checked out above.
       - name: Record the measured commit
         if: always() && steps.tools.outputs.out != ''
         env:
           OUT: ${{ steps.tools.outputs.out }}
-          MEASURED_SHA: ${{ github.sha }}
+          MEASURED_SHA: ${{ inputs.target_sha }}
         run: |
+          test "$(git rev-parse HEAD)" = "$MEASURED_SHA"
           mkdir -p "$OUT/coverage"
           echo "$MEASURED_SHA" > "$OUT/coverage/measured-commit.txt"
 

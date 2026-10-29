@@ -401,6 +401,25 @@ class CoveragePhaseTest(unittest.TestCase):
         self.assertEqual(data["baseline_combined"], 100)
         self.assertEqual(code, 1, "same-source coverage fell but an older low floor hid it")
 
+    def test_release_git_history_failure_cannot_lower_the_ratchet(self):
+        import shutil
+        binary = self.root / "bin"
+        binary.mkdir()
+        wrapper = binary / "git"
+        wrapper.write_text('#!/bin/sh\nif [ "$1" = rev-list ]; then exit 9; fi\nexec "' + shutil.which("git") + '" "$@"\n')
+        wrapper.chmod(0o755)
+        history = self.root / "history.jsonl"
+        history.write_text(json.dumps(self.history_record(self.base, 95)) + "\n")
+        output = self.root / "gate.json"
+        env = dict(self.env, PATH=str(binary) + os.pathsep + self.env["PATH"])
+        process = subprocess.run([sys.executable, ct.__file__, "gate", "--mode", "release",
+                                  "--unit", str(self.unit), "--combined", str(self.report("combined", [9])),
+                                  "--base", self.base, "--head", self.candidate, "--history", str(history),
+                                  "--today", "2026-10-28", "--json", str(output)],
+                                 cwd=self.root, env=env, capture_output=True, text=True)
+        self.assertNotEqual(process.returncode, 0, "Git failure was reclassified as a first release")
+        self.assertFalse(output.exists(), "unreadable history produced a passing measurement")
+
     def test_first_release_counts_all_code_and_never_fakes_combined(self):
         code, data = self.run_gate("release", self.report("combined", [9]), records=[])
         self.assertEqual(code, 0, data)

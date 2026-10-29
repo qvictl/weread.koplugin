@@ -167,6 +167,36 @@ class CoverageArtifactsTest(unittest.TestCase):
                         self.assertIn(b"not an ancestor of main", result.stdout)
 
 
+    def test_integration_records_the_candidate_when_caller_main_advanced(self):
+        workflow = Path(__file__).resolve().parent.parent / ".github/workflows/integration.yml"
+        step = workflow.read_text().split("- name: Record the measured commit\n", 1)[1].split("\n      - name:", 1)[0]
+        declared = next(line.split("MEASURED_SHA:", 1)[1].strip() for line in step.splitlines() if "MEASURED_SHA:" in line)
+        command = textwrap.dedent(step.split("run: |\n", 1)[1])
+        with tempfile.TemporaryDirectory() as directory:
+            repository = Path(directory) / "repository"
+            repository.mkdir()
+            def git(*args):
+                return subprocess.check_output(["git", "-C", str(repository), *args], text=True).strip()
+            git("init", "-q")
+            revisions = []
+            for value in ["candidate", "newer caller workflow"]:
+                (repository / "fixture").write_text(value)
+                git("add", ".")
+                git("-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", value)
+                revisions.append(git("rev-parse", "HEAD"))
+            candidate, caller = revisions
+            context = {"${{ inputs.target_sha }}": candidate, "${{ github.sha }}": caller}
+            git("checkout", "-q", "--detach", candidate)
+            output = Path(directory) / "output"
+            env = dict(os.environ, OUT=str(output), MEASURED_SHA=context[declared], GITHUB_SHA=caller)
+            result = subprocess.run(["bash", "-e", "-c", command], cwd=repository, env=env, capture_output=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual((output / "coverage/measured-commit.txt").read_text().strip(), candidate)
+            git("checkout", "-q", "--detach", caller)
+            env["OUT"] = str(Path(directory) / "mismatch")
+            result = subprocess.run(["bash", "-e", "-c", command], cwd=repository, env=env, capture_output=True)
+            self.assertNotEqual(result.returncode, 0, "different checkout was labelled as the candidate")
+
     def test_release_requires_real_history_fetch_but_accepts_unit_only_history(self):
         workflow = Path(__file__).resolve().parent.parent / ".github/workflows/release.yml"
         step = workflow.read_text().split("- name: Fetch authentic coverage history\n", 1)[1].split("\n      - name:", 1)[0]
