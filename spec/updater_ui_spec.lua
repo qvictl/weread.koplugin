@@ -271,4 +271,44 @@ expect(UpdaterUI.display_error("HTTP 503") == "Server returned HTTP 503"
     and UpdaterUI.display_error("") == "Unknown error",
     "English fallback for variable messages")
 
+-- Exercise the actual process boundary instead of the display-test override.
+do
+    local old_trapper = package.loaded["ui/trapper"]
+    package.loaded["ui/trapper"] = {
+        wrap = function(_, fn) local ok, err = coroutine.resume(coroutine.create(fn)); assert(ok, err) end,
+        dismissableRunInSubprocess = function() end,
+    }
+    local mode, task_calls = "cancel", 0
+    local restore = require("spec.helpers.subprocess_stub").install(function(task)
+        if mode == "cancel" then return false end
+        if mode == "low_memory" then return false, nil, "low_memory" end
+        if mode == "start_failed" then return false, "fork failed", "start_failed" end
+        return true, task()
+    end)
+    local probe = UpdaterUI:new{ updater = core, settings = settings }
+    for _, value in ipairs({ "cancel", "low_memory", "start_failed", "success" }) do
+        mode = value
+        local received
+        probe:_run_subprocess(nil, function() task_calls = task_calls + 1; return { value = "ok" } end,
+            function(result) received = result end, {})
+        table.remove(scheduled).callback()
+        expect(received ~= nil, "updater did not finish " .. mode)
+        if mode == "cancel" then
+            expect(received.cancelled == true, "user cancellation was reported as a failure")
+        elseif mode == "success" then
+            expect(received.value == "ok" and not received.error, "updater lost the successful task result")
+        else
+            expect(not received.cancelled and received.error == (mode == "low_memory" and "low_memory" or "fork failed"),
+                "updater hid the worker failure as cancellation")
+        end
+    end
+    expect(task_calls == 1, "updater ran a failed worker task on the UI loop")
+    saved_language = "zh_CN"
+    expect(UpdaterUI.display_error("low_memory") == "可用内存不足，请关闭正在阅读的书后重试。",
+        "updater exposed an internal memory code instead of a translated explanation")
+    saved_language = nil
+    restore()
+    package.loaded["ui/trapper"] = old_trapper
+end
+
 print(("updater_ui_spec: %d checks"):format(checks))

@@ -9,10 +9,15 @@ function Process.run(task, trap, _simple_string, options)
     if not co or is_main then return false, nil, "start_failed" end
     local UIManager = require("ui/uimanager")
     local Worker = require("weread.lib.background_worker")
+    local ok_codec, codec = pcall(require, "string.buffer")
+    if not ok_codec then return false, nil, "start_failed" end
     local directory = options.settings and options.settings.data_dir
     if not directory then return false, nil, "start_failed" end
     local worker = Worker:new{
         temp_dir = directory .. "/workers",
+        -- Chapter results contain raw images. Use the same binary codec as
+        -- KOReader's Trapper rather than treating arbitrary bytes as JSON text.
+        result_codec = codec,
         poll_interval = 0.125,
         cancel_grace = 0,
         -- The task retains its existing request timeouts. A generic worker
@@ -33,7 +38,10 @@ function Process.run(task, trap, _simple_string, options)
     local previous = trap.dismiss_callback
     local cancelled, result, request
     local function wake()
-        if coroutine.status(co) == "suspended" then coroutine.resume(co) end
+        if coroutine.status(co) == "suspended" then
+            local ok = coroutine.resume(co)
+            if not ok then require("weread.lib.logger").warn("worker parent coroutine failed") end
+        end
     end
     local dismiss = function()
         cancelled = true
@@ -63,7 +71,8 @@ function Process.run(task, trap, _simple_string, options)
     while not result and not cancelled do coroutine.yield() end
     if trap.dismiss_callback == dismiss then trap.dismiss_callback = previous end
     if owned then UIManager:close(trap) end
-    if cancelled or (result and result.cancelled) then
+    if cancelled then return false end
+    if result and result.cancelled then
         return false, nil, result and result.error
     end
     if not result or not result.ok then

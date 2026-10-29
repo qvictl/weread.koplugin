@@ -1,5 +1,8 @@
 package.path = "./?.lua;./?/init.lua;" .. package.path
 local Budget = require("weread.lib.fork_budget")
+local Memory = require("weread.lib.memory_gate")
+local read_memory = Memory.read_meminfo
+Memory.read_meminfo = function() return "MemAvailable: 1048576 kB\n" end
 local checks, next_pid, exits, signals = 0, 100, {}, {}
 local function expect(value, message)
     checks = checks + 1
@@ -14,6 +17,7 @@ local runner = {
     end,
     terminate = function(pid) signals[#signals + 1] = pid end,
 }
+local succeeded, failure_message = xpcall(function()
 local pid, fd, first = Budget.run(runner, function() end)
 expect(pid == 101 and fd == 7 and not Budget.available(), "live child owns the budget")
 local second, reason = Budget.run(runner, function() end)
@@ -48,8 +52,6 @@ expect(admitted and not Budget.available(newer), "second queued task overlapped 
 Budget.withdraw(newer)
 exits[admitted.pid] = true
 expect(Budget.available(), "cancelled waiter blocked all later work")
-local Memory = require("weread.lib.memory_gate")
-local read_memory = Memory.read_meminfo
 Memory.read_meminfo = function() return "MemAvailable: 64000 kB\n" end
 local before = next_pid
 local denied, memory_reason = Budget.run(runner, function() end)
@@ -60,5 +62,7 @@ local _, _, unknown = Budget.run(runner, function() end)
 expect(unknown ~= nil, "unknown memory permanently blocked the budget")
 exits[unknown.pid] = true
 expect(Budget.available(), "unknown-memory task did not release its slot")
+end, debug.traceback)
 Memory.read_meminfo = read_memory
+if not succeeded then error(failure_message, 0) end
 print("fork_budget_spec: " .. checks .. " checks")

@@ -663,6 +663,10 @@ end
 -- while a child from another producer still shares the parent's COW pages.
 do
     local Budget = require("weread.lib.fork_budget")
+    local Memory = require("weread.lib.memory_gate")
+    local read_memory = Memory.read_meminfo
+    Memory.read_meminfo = function() return "MemAvailable: 1048576 kB\n" end
+    local ok, err = xpcall(function()
     local exited, gate_calls = false, 0
     local runner = { run = function() return 989898 end,
         is_done = function(pid) assert(pid == 989898); return exited end }
@@ -690,6 +694,9 @@ do
     expect(gate_calls == 0 and waiting.cancelled, "cancellation during slot waiting collected the heap")
     exited = true
     expect(Budget.available(), "cancelled wait interfered with the other producer's reaping")
+    end, debug.traceback)
+    Memory.read_meminfo = read_memory
+    if not ok then error(err, 0) end
 end
 
 print(("downloader_lifecycle_spec: %d checks"):format(checks))
