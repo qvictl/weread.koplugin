@@ -55,21 +55,23 @@ run independently.
 
 ## 3. KOReader integration / KOReader 集成测试
 
-The `Integration` workflow (`.github/workflows/integration.yml`) runs on every
-PR, on pushes to `main`, weekly, and on demand (the upstream-sync workflow
-also dispatches it for its PR branch). Two aggregate jobs are required status
-checks for `main`, and `Release` publishes only after the whole workflow
-succeeds on `main`:
+`Integration` is a reusable workflow called only by `Release`, at an exact
+candidate SHA. It has no PR, ordinary-main-push, scheduled or standalone
+manual trigger; upstream-sync does not dispatch it. A new untagged version
+commit or an explicit manual Release candidate starts the full matrix.
 
-| Required check | Jobs | KOReader |
+| Release gate | Jobs | KOReader |
 | --- | --- | --- |
-| `integration` | `Emulator · qvictl/koreader fork build (shard 1-3/3)` + `PluginLoader (pinned KOReader)` | the [qvictl/koreader](https://github.com/qvictl/koreader) fork's emulator build (release `nightly`), in the `koreader/kobase:5.0.0-22.04` container; LuaCov coverage for `tests-policy` |
-| `integration-official` | `Emulator · official KOReader v2026.07.1 (shard 1-2/2)` | the official `koreader-linux-x86_64-v2026.07.1` release, which many devices still run; plain runner with SDL 2, no coverage |
+| `integration` | fork emulator shards1–3 and pinned PluginLoader | qvictl/koreader nightly in kobase; real LuaCov coverage |
+| `integration-official` | official emulator shards1–2 | official KOReader v2026.07.1, with separate evidence |
 
-`Integration` 工作流在每个 PR、`main` 推送、每周定时和手动触发时运行（upstream-sync 也会为
-同步分支触发）。`integration`（qvictl/koreader 分支构建的模拟器场景，在
-`koreader/kobase:5.0.0-22.04` 容器中运行，并采集覆盖率；以及固定版本 PluginLoader）和
-`integration-official`（同一组场景在官方 KOReader v2026.07.1 上运行）都是 `main` 的必需检查。
+Both gates and the release combined-coverage job must pass before package
+publication. PR required checks are `ci` and `tests-policy`; all existing lint,
+unit, package, mock-contract and secret checks remain. Manual candidate runs
+use **Actions → Release**, with `publish` off to validate without publishing.
+
+真实集成仅在发版候选执行；普通PR/main/上游同步不会启动，也不会等待集成产物。
+官方、fork、PluginLoader及真实combined门禁全部成功，才允许发布。
 
 ### 3.1 Emulator scenarios / 模拟器场景
 
@@ -220,10 +222,10 @@ The `PR policy` workflow's `tests-policy` job is a required check:
   update an emulator scenario. Waivers: `no-tests-needed` (maintainers;
   docs, comments or log wording only), `upstream-sync`.
 - **Coverage gates** (`scripts/coverage_tools.py gate`, thresholds and dated
-  targets in `.ci/coverage-policy.json`): unit diff coverage ≥ 80%, unit +
-  emulator diff coverage ≥ 90%, overall unit and combined coverage not below
-  `main`'s baseline, and dated targets (overall unit, overall combined, a
-  per-file unit floor for `weread/lib/*`) that turn blocking on their date.
+  targets in `.ci/coverage-policy.json`): PR mode enforces unit diff ≥ 80%,
+  its own-base unit ratchet and dated unit/module floors. Release mode
+  requires authentic combined diff ≥ 90%, combined overall ratchet and
+  the existing dated combined floors. Unit floors remain in force.
   See [CONTRIBUTING.md](../CONTRIBUTING.md#coverage-policy--覆盖率策略) and the
   roadmap in [coverage-plan.md](coverage-plan.md); the tooling itself is
   tested by `python3 scripts/test_coverage_tools.py`.
@@ -239,8 +241,15 @@ How coverage is measured:
   download/login workers (per-PID stats). `@no_coverage` scenarios (timing
   budgets) run without it. CI measures it on the fork build only and uploads
   `coverage-emulator-shard-*` (the official-build job collects no coverage);
-- the gate waits for the PR's `Integration` run, merges both and reports diff
-  unit, diff combined, overall, ratchet, targets and the trend on `main`.
+- PR policy never waits for integration and reports unit-only measurements;
+- Release merges unit stats with all three fork shards from its own outer
+  run, requiring every measured SHA to equal the declared candidate. Its
+  diff starts at the nearest real combined ancestor, skipping unit-only
+  records and excluding the candidate itself. Overall combined ratchet
+  includes any previous measurement for the same candidate;
+- main CI publishes unit-only history. Release synchronously persists
+  genuine combined history before packaging; absent combined values are never copied from unit.
+  Publishing checks actual main ancestry and preserves prior same-SHA combined data.
 
 Locally (LuaCov checkout on `LUA_PATH`):
 
@@ -252,12 +261,14 @@ python3 scripts/run_emulator_scenarios.py --koreader /tmp/koreader/fork/extract 
 python3 scripts/coverage_tools.py merge --all-files --out coverage/combined.stats.out \
     coverage/unit.stats.out /tmp/emu/coverage/emulator.stats.out
 python3 scripts/coverage_tools.py report coverage/combined.stats.out coverage/combined.report.out
-python3 scripts/coverage_tools.py gate --unit coverage/unit.report.out \
-    --combined coverage/combined.report.out --base origin/main
+git fetch --no-tags origin coverage:refs/remotes/origin/coverage
+git show origin/coverage:history.jsonl > coverage/history.jsonl
+python3 scripts/coverage_tools.py gate --mode release --unit coverage/unit.report.out \
+    --combined coverage/combined.report.out --base origin/main --history coverage/history.jsonl
 ```
 
 修改 Lua 代码的 PR 必须修改 `spec/`，`feat`/`fix` 类 PR 必须新增或更新模拟器场景；改动行
-覆盖率单元 ≥ 80%、单元 + 模拟器 ≥ 90%，整体覆盖率不得低于 `main`，并按日期执行整体目标。
+覆盖率在普通PR执行单元≥80%及自身unit基线棘轮；发版候选执行整批改动合计≥90%、真实combined棘轮及相应日期目标。无真实combined祖先时全生产代码从空树比较；history下载或读取失败会阻止发布。
 
 ## Updater simulator regression / 更新弹窗模拟器回归
 

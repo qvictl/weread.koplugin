@@ -1,48 +1,15 @@
 name: Integration
 
-# Runs the plugin inside real KOReader. Required status checks for main:
-# `integration` and `integration-official`.
-#
-# integration (required) = emulator-fork + plugin-loader:
-# - emulator-fork: the qvictl/koreader fork's emulator build (release
-#   `nightly`, asset koreader-emulator-x86_64-latest.tar.xz) - the KOReader
-#   this plugin is built for. It links the system's SDL3, so the job runs in
-#   the koreader/kobase:5.0.0-22.04 image like the fork's own integration
-#   tests. scripts/fetch_koreader_emulator.sh runs in `fork` mode: if the
-#   build cannot be downloaded, verified or started, the job fails (no
-#   fallback to the official build). The headless app (reader.lua, SDL dummy
-#   video) runs the candidate package through spec/emulator/scenarios against
-#   the local mock WeRead service (scripts/run_emulator_scenarios.py) under
-#   LuaCov (except `@no_coverage` timing budgets); the per-shard line counts
-#   are uploaded as coverage-emulator-shard-* for the tests-policy gate and
-#   the Coverage workflow. The step summary names the fork build tested.
-# - plugin-loader: KOReader's own Busted environment and PluginLoader at the
-#   pinned upstream commit (scripts/run_koreader_integration.sh).
-#
-# integration-official (required) = emulator-official: the same scenarios on
-# the official KOReader v2026.07.1 linux release (plain runner + SDL 2),
-# which many devices still run and Release.yml publishes to. No coverage;
-# evidence goes to emulator-official-evidence-shard-*.
-#
-# Release.yml publishes after this whole workflow succeeds on main.
+# Real KOReader tests run only through Release, at its exact candidate SHA.
+# Artifacts belong to the outer Release run. All three test families remain.
 
 on:
-  pull_request:
-  push:
-    branches:
-      - main
-  schedule:
-    # Weekly, so a new fork build or KOReader drift shows up even without
-    # plugin changes (the fork nightly is also picked up by every run).
-    - cron: "23 18 * * 1"
-  # Also dispatched by the upstream-sync workflow for its PR branch.
-  workflow_dispatch:
+  workflow_call:
     inputs:
+      target_sha:
+        required: true
+        type: string
       fork_release:
-        description: >-
-          qvictl/koreader release for the fork emulator job: `nightly` (rolling,
-          default) or a stable fork tag such as v2026.10.q1. The official
-          v2026.07.1 job always runs too.
         type: string
         default: nightly
 
@@ -53,8 +20,8 @@ env:
   LUACOV_VERSION: v0.16.0
 
 concurrency:
-  group: integration-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: release-integration-${{ github.run_id }}
+  cancel-in-progress: false
 
 jobs:
   emulator-fork:
@@ -95,6 +62,9 @@ jobs:
 
       - name: Checkout plugin
         uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.target_sha }}
+          persist-credentials: false
 
       - name: Install LuaCov
         run: |
@@ -132,15 +102,15 @@ jobs:
             echo "No scenario summary was produced." >> "$GITHUB_STEP_SUMMARY"
           fi
 
-      # The commit these line counts belong to: for a pull_request run the
-      # merge commit refs/pull/N/merge pointed at (github.sha), whose first
-      # parent is the main commit the tests-policy ratchet compares with.
+      # A reusable workflow keeps the caller's github.sha, which can differ
+      # from the exact release candidate checked out above.
       - name: Record the measured commit
         if: always() && steps.tools.outputs.out != ''
         env:
           OUT: ${{ steps.tools.outputs.out }}
-          MEASURED_SHA: ${{ github.sha }}
+          MEASURED_SHA: ${{ inputs.target_sha }}
         run: |
+          test "$(git rev-parse HEAD)" = "$MEASURED_SHA"
           mkdir -p "$OUT/coverage"
           echo "$MEASURED_SHA" > "$OUT/coverage/measured-commit.txt"
 
@@ -180,6 +150,9 @@ jobs:
     steps:
       - name: Checkout plugin
         uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.target_sha }}
+          persist-credentials: false
 
       - name: Install runtime dependencies
         run: |
@@ -238,11 +211,15 @@ jobs:
     steps:
       - name: Checkout plugin
         uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.target_sha }}
+          persist-credentials: false
 
       - name: Checkout pinned KOReader
         uses: actions/checkout@v6
         with:
           repository: koreader/koreader
+          persist-credentials: false
           ref: ${{ env.KOREADER_COMMIT }}
           path: .koreader-integration
           submodules: recursive

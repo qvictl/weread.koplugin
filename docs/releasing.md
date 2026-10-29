@@ -44,7 +44,7 @@ controls the filename:
 - enter a label such as `preview-1` to create
   `weread.koplugin-preview-1.zip`.
 
-A manual run validates the current version, builds the zip and SHA-256
+A manual candidate requires successful CI at the selected SHA, runs fork and official emulators plus PluginLoader, enforces release coverage, then builds the zip and SHA-256
 checksum, and uploads them as two separate workflow artifacts retained for 14
 days. It does not create a tag or GitHub Release.
 
@@ -58,11 +58,12 @@ To publish a release:
    `## 新功能与改进` heading automatically.
 3. Complete the pre-release validation above, then merge the change into
    `main` through a pull request (`main` is protected).
-4. The `CI` and `Integration` (emulator scenarios on the qvictl/koreader fork
-   build and on official KOReader v2026.07.1, + pinned PluginLoader)
-   workflows run on the merge commit.
-5. After `Integration` succeeds, the `Release` workflow confirms that `CI` and
-   `Integration` both passed for the same commit.
+4. Normal `CI` runs on the merge commit. On success, `Release` compares the
+   version with its first parent and checks that the tag is new. Only this
+   version change starts the reusable integration matrix.
+5. Fork and official emulators, pinned PluginLoader and real combined
+   coverage must all pass at the same candidate SHA. Accepted coverage is
+   persisted before packaging/publication.
 6. If `vX.Y.Z` does not already exist, it creates the package, checksum, tag,
    and GitHub Release on `qvictl/weread.koplugin`, marks it latest, and
    re-downloads the assets to verify the checksum. The asset names
@@ -73,7 +74,7 @@ If an automatic run was missed, **Actions → Release → Run workflow** on `mai
 with `publish` checked publishes the current version when its tag does not
 exist yet (same checks as the automatic path).
 
-Pushes that keep an existing version do not publish anything. Reusing an
+Pushes that keep the same version do not start integration or publish anything, even if that version is still untagged. Use a manual Release candidate to retry failed validation/publication. Reusing an
 existing release tag fails deliberately; bump to a new version instead.
 Automatic packages use the versioned filename
 `weread.koplugin-vX.Y.Z.zip`. The zip and its `.sha256` checksum are separate
@@ -86,3 +87,59 @@ requests. The generated part still includes **What's Changed**, **New
 Contributors** when applicable, and a **Full Changelog** comparison link.
 CI and the release workflow both fail if the current version has no non-empty
 changelog section.
+
+## Coverage and provenance / 覆盖率与来源
+
+PRs retain unit diff ≥ 80%, their own-base unit ratchet and existing unit/module
+targets. Only Release candidates run integration and enforce combined diff ≥ 90%,
+combined overall ratchet and dated combined targets. The diff covers the batch
+since the nearest real combined ancestor (skipping unit-only records and excluding
+the candidate); the overall ratchet includes an existing measurement for the
+same candidate. With no earlier combined ancestor, all production lines must
+meet the combined diff floor. Missing or unreadable history aborts validation.
+
+The outer Release workflow head can differ from the selected CI source when main
+advances. The candidate manifest binds its exact source and successful CI run;
+all three coverage shards must measure that source. Reruns select artifacts by
+latest creation time and reject partial, ambiguous or mismatched data. Publication
+keeps main ancestry checks, fixed-workflow tooling and non-persistent checkout
+credentials. Daily unit history never fabricates or erases combined coverage.
+
+Version resolution runs without a concurrency lock. Only a confirmed candidate
+enters the reusable `release-candidate.yml` call, whose lock covers integration,
+coverage, persistence and publication. A normal main CI completion cannot replace
+a candidate in the pending queue. GitHub retains only the newest pending
+candidate when several real candidates queue; manually redispatch a superseded
+version if it still needs publication.
+
+A dedicated
+job validates the exact accepted reports, fetches main ancestry and current
+history again, rechecks the gate, and pushes the measurement before packaging.
+A main candidate cannot finish successfully while its combined record is still
+pending in a separate workflow. Package-only candidates from non-main refs do not
+write main history, even when their SHA is an ancestor of main. Daily Coverage runs publish unit records only; manual
+historical backfills remain available.
+
+A failed or cancelled Release with a previously successful combined gate must
+have that ancestor measurement in history before a later candidate proceeds.
+Retry the failed candidate's persistence first: it downloads the API's latest
+successful gate attempt, then selects the unique newest artifact within that
+identity. A later failed full rerun's lower report cannot hide that accepted
+report, so recovery does not require another integration run.
+
+History stores small `release_checks` run/attempt watermarks and genuine accepted
+floors. Already acknowledged failed-package runs need no old artifacts. Only new
+or changed attempts require jobs/artifact queries; queued runs are never
+acknowledged before they can execute their candidate. A persistence-only retry
+advances its durable watermark without rerunning tests. Unit publication retains
+these proofs and rejects damaged existing history before changing any files.
+
+An unacknowledged higher successful gate still needs its authentic evidence.
+Revalidating the same candidate respects the existing policy tolerance (0.1
+percentage points). History records the actual new measurement, while durable
+proofs retain the earlier genuine high floor; 95→94.95 is allowed and
+95→94.89 is rejected. If unacknowledged
+accepted evidence expires, publication stops until its genuine source and
+measurement can be recovered from retained evidence and restored to history.
+Do not discard the check, infer combined from unit, or treat a lower fresh run as
+proof of the missing earlier maximum.
