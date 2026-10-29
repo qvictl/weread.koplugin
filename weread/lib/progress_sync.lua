@@ -389,6 +389,7 @@ function ProgressSync:_apply_remote(remote, context, options)
             remote = copy(remote),
             notify = options.manual == true,
             created_at = self.now(),
+            owner_digest = RequestOwner.digest(self.session_owner),
         }
         -- Opening the chapter file replaces this ReaderUI and this plugin
         -- instance; the new one picks the jump up from the book record (F8).
@@ -1300,18 +1301,18 @@ function ProgressSync:_apply_pending_jump(book_id)
         local ok, book = pcall(stored_book, self.settings, tostring(book_id))
         pending = ok and type(book) == "table" and type(book.pending_jump) == "table"
             and book.pending_jump or nil
-        if pending then
-            if self.now() - (tonumber(pending.created_at) or 0)
-                > PENDING_JUMP_TTL_SECONDS then
-                self:_persist(book_id, { pending_jump = false })
-                return false
-            end
-            pending.book_id = pending.book_id or book_id
-        end
     end
-    if not pending or tostring(pending.book_id) ~= tostring(book_id) then
+    if not pending or tostring(pending.book_id or book_id) ~= tostring(book_id) then
         return false
     end
+    -- A chapter-open transaction may survive its plugin instance, but not
+    -- a cookie/gateway owner change. Preserve unsigned legacy records.
+    if pending.owner_digest ~= RequestOwner.digest(self.session_owner) then return false end
+    if self.now() - (tonumber(pending.created_at) or 0) > PENDING_JUMP_TTL_SECONDS then
+        self:_persist(book_id, { pending_jump = false })
+        return false
+    end
+    pending.book_id = pending.book_id or book_id
     local local_position, _reason, context = self:capture_local()
     if not context or not context.current_chapter
         or tostring(context.current_chapter.chapterUid or context.current_chapter.chapterId)

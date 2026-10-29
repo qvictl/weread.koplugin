@@ -1481,6 +1481,7 @@ test("a stale persisted chapter jump is ignored", function()
     f.sync.get_file_context = function() return 2, chapters[2], false end
     f.values.books.book.pending_jump = {
         book_id = "book", chapter_uid = 22, fraction = 0.5, created_at = 0,
+        owner_digest = require("weread.lib.request_owner").digest(f.sync.session_owner),
     }
     f.sync:on_reader_ready()
     f.drain()
@@ -1715,6 +1716,32 @@ test("pending owner digest restores only a proven account across instances", fun
     eq(f.values.books.book.pending_upload_owner, Owner.digest(Owner.capture(f.sync.settings)),
         "fresh pending position is owned by current account")
 end)
+
+for _, change in ipairs({ "unsigned", "uid", "api_key", "ticket" }) do
+    test("persisted chapter jump owner " .. change, function()
+        local Owner = require("weread.lib.request_owner")
+        local f = fixture({})
+        f.values.account, f.values.api_key = { user_vid = "42" }, "synthetic-api-one"
+        f.sync.session_owner = Owner.capture(f.sync.settings)
+        f.sync.get_file_context = function() return 2, chapters[2], false end
+        local pending = {
+            book_id = "book", chapter_uid = 22, fraction = 0.5, created_at = f.sync.now(),
+            owner_digest = Owner.digest(f.sync.session_owner),
+        }
+        f.values.books.book.pending_jump = pending
+        if change == "unsigned" then pending.owner_digest = nil
+        elseif change == "uid" then f.values.account.user_vid = "other"
+        elseif change == "api_key" then f.values.api_key = "synthetic-api-two"
+        else f.values.wr_ticket = "rotated" end
+        f.sync.session_owner = Owner.capture(f.sync.settings)
+        local applied = f.sync:_apply_pending_jump("book")
+        eq(applied, change == "ticket", "only same-owner chapter transaction resumes")
+        eq(#f.jumps, change == "ticket" and 1 or 0, "foreign transaction cannot move reader")
+        if change ~= "ticket" then
+            eq(f.values.books.book.pending_jump, pending, "unproven transaction remains on disk")
+        end
+    end)
+end
 
 print(string.format(
     "progress_sync_spec: %d checks, %d failure(s)", checks, failures))
