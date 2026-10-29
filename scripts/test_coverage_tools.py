@@ -433,6 +433,7 @@ class CoveragePhaseTest(unittest.TestCase):
         output = self.root / "corrupt-gate.json"
         for broken in invalid:
             with self.subTest(history=repr(broken)):
+                output.unlink(missing_ok=True)
                 if broken == "":
                     history.write_text("")
                 else:

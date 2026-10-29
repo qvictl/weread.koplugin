@@ -101,8 +101,9 @@ class CoverageArtifactsTest(unittest.TestCase):
         commands = []
         for name in ["pr-policy.yml", "coverage.yml", "release.yml"]:
             source = (workflows / name).read_text()
-            step = source.split("- name: Checkout coverage tooling\n", 1)[1].split("\n      - name:", 1)[0]
-            commands.append(textwrap.dedent(step.split("run: |\n", 1)[1]))
+            for part in source.split("- name: Checkout coverage tooling\n")[1:]:
+                step = part.split("\n      - name:", 1)[0]
+                commands.append(textwrap.dedent(step.split("run: |\n", 1)[1]))
         self.assertTrue(all(command == commands[0] for command in commands[1:]))
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -265,6 +266,7 @@ class CoverageArtifactsTest(unittest.TestCase):
             current_gate = root / "current-gate.json"
             current_gate.write_text(json.dumps(dict(passed=True, measured_sha=target, overall_combined={"percent": 90})))
             gate_succeeded = True
+            evidence_expired = False
             def zipped(name, value):
                 output = io.BytesIO()
                 with zipfile.ZipFile(output, "w") as archive:
@@ -273,21 +275,25 @@ class CoverageArtifactsTest(unittest.TestCase):
             def api(endpoint, *_):
                 if "/workflows/release.yml/runs?" in endpoint:
                     return json.dumps([{"workflow_runs": [
-                        {"id": 20, "conclusion": None}, {"id": 10, "conclusion": "failure"},
-                        {"id": 5, "conclusion": "success"}]}]).encode()
+                        {"id": 20, "conclusion": None}, {"id": 5, "conclusion": "success"}]},
+                        {"workflow_runs": [{"id": 10, "conclusion": "failure"}]}]).encode()
                 if "/20/jobs?" in endpoint:
                     return json.dumps([{"jobs": []}]).encode()
                 if "/10/jobs?" in endpoint:
-                    return json.dumps([{"jobs": [{"name": "Release combined coverage gate",
+                    return json.dumps([{"jobs": [{"name": "unrelated job", "conclusion": "success"}]},
+                        {"jobs": [{"name": "Release combined coverage gate",
                         "conclusion": "success" if gate_succeeded else "failure"}]}]).encode()
                 if "/10/artifacts?" in endpoint:
                     return json.dumps([{"artifacts": [
                         {"id": 100, "name": "release-candidate", "created_at": "2026-10-29T00:00:00Z"},
-                        {"id": 101, "name": "release-coverage", "created_at": "2026-10-29T00:00:00Z"}]}]).encode()
+                        {"id": 101, "name": "release-coverage", "created_at": "2026-10-29T00:00:00Z", "expired": evidence_expired}]},
+                        {"artifacts": [{"id": 102, "name": "release-coverage", "created_at": "2026-10-29T01:00:00Z", "expired": evidence_expired}]}]).encode()
                 if "/100/zip" in endpoint:
                     return zipped("candidate.json", manifest)
                 if "/101/zip" in endpoint:
                     return zipped("release-gate.json", gate)
+                if "/102/zip" in endpoint:
+                    return zipped("release-gate.json", dict(gate, overall_combined={"percent": 94}))
                 self.fail("Unexpected endpoint: " + endpoint)
             with mock.patch.object(dc, "gh_api", side_effect=api):
                 for percent in [None, 94]:
@@ -297,15 +303,23 @@ class CoverageArtifactsTest(unittest.TestCase):
                 for percent in [95, 96]:
                     persist(percent)
                     dc.require_release_history("owner/plugin", 20, target, history, current_gate, cwd=root)
+                persist(95)
+                evidence_expired = True
+                with self.assertRaisesRegex(ValueError, "missing or inconsistent"):
+                    dc.require_release_history("owner/plugin", 20, target, history, current_gate, cwd=root)
+                evidence_expired = False
                 persist()
+                with self.assertRaisesRegex(ValueError, "not persisted"):
+                    dc.require_release_history("owner/plugin", 5, target, history, current_gate, cwd=root)
                 gate_succeeded = False
                 dc.require_release_history("owner/plugin", 20, target, history, current_gate, cwd=root)
                 gate_succeeded = True
                 current_gate.write_text(json.dumps(dict(passed=True, measured_sha=ancestor, overall_combined={"percent": 96})))
                 dc.require_release_history("owner/plugin", 20, ancestor, history, current_gate, cwd=root)
+                dc.require_release_history("owner/plugin", 10, ancestor, history, current_gate, cwd=root)
                 current_gate.write_text(json.dumps(dict(passed=True, measured_sha=ancestor, overall_combined={"percent": 94})))
                 with self.assertRaisesRegex(ValueError, "not persisted"):
-                    dc.require_release_history("owner/plugin", 20, ancestor, history, current_gate, cwd=root)
+                    dc.require_release_history("owner/plugin", 10, ancestor, history, current_gate, cwd=root)
                 manifest["target_sha"] = target
                 gate["measured_sha"] = target
                 # Revalidating old A must not acquire a floor from its descendant B.
