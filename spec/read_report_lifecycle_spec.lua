@@ -809,6 +809,24 @@ test("account invalidation cancels jobs and caches without writing new settings"
     expect(settings.flushes == flushes, "account invalidation wrote new-owner settings")
 end)
 
+test("account change rebuilds the same book context and enters a new server session", function()
+    local settings = H.settings()
+    settings.store.account = { user_vid = "first" }
+    local report, env = H.new_report{ inline = true, settings = settings }
+    local book = H.ready_book(report, { read_context_updated_at = env.clock.t,
+        chapters = { { chapterUid = 5, chapterIdx = 1, wordCount = 100 } } })
+    settings:put_book("book", book)
+    local old_session = report.session_id
+    settings.store.account.user_vid = "second"
+    report:on_account_changed()
+    local accepted = report:upload_position("book", { chapter_uid = 5, percent = 4 }, 0)
+    expect(accepted and env.client.sent[1].kind == "enter", "new owner skipped enter for the old book session")
+    expect(report.session_id ~= old_session and H.content.reader_states == 1,
+        "old owner context was reused before its TTL expired")
+    expect(settings:get_book("book").read_session_id == report.session_id,
+        "new session context did not reach parent persistence")
+end)
+
 test("old owner cannot write context or renewed auth", function()
     local report, env = H.new_report()
     local job = job_for(report)

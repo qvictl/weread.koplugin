@@ -645,6 +645,7 @@ end
 function ReadReport:on_account_changed()
     self:stop("account_changed")
     self.owner = RequestOwner.capture(self.settings)
+    self.session_id = tostring({}) .. ":" .. tostring(self.now()) .. ":" .. tostring(self.generation)
     self.upload_result, self.report_floor = nil, nil
     self.current_book_id, self.current_book_title, self.current_book_source = nil, nil, nil
     self.server_session_book_id, self.server_session_ready, self.server_session_ready_at = nil, false, nil
