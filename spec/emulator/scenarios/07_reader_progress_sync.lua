@@ -17,6 +17,7 @@ local BOOK_ID = "900001"
 local TOTAL_WORDS = 6 * 1800
 
 return function(H)
+    local without_ui_dns = dofile(os.getenv("WEREAD_TEST_HARNESS_DIR") .. "/no_ui_dns.lua")
     local tr = H.tr
     local Event = require("ui/event")
     local UIManager = require("ui/uimanager")
@@ -254,7 +255,7 @@ return function(H)
                 return ok, err
             end
         end)
-        H.call(function() plugin:onWeReadSyncProgress() end)
+        without_ui_dns(H, function() plugin:onWeReadSyncProgress() end)
         H.wait_until("manual sync dialog", dialog_shown, 20)
         tap_exact(tr("Use WeRead progress"))
         H.wait_until("page turned right after the cloud jump", function()

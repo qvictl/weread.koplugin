@@ -1354,7 +1354,7 @@ test("resume network work waits for Wi-Fi and gives up quietly (F4)", function()
     eq(#f.uploads, 1, "sent after the next resume")
 end)
 
-test("automatic pulls never do a DNS check, manual ones may", function()
+test("automatic and manual pulls never do a UI DNS check", function()
     local seen = {}
     local f = fixture({
         bookId = "book",
@@ -1374,7 +1374,7 @@ test("automatic pulls never do a DNS check, manual ones may", function()
     f.drain()
     eq(seen[1].link_only, true, "automatic pull checks the link only")
     f.sync:sync_now()
-    eq(seen[2].link_only, false, "manual pull keeps the full check")
+    eq(seen[2].link_only, true, "manual pull also checks the link only")
 end)
 
 test("resume sends positions other books left pending", function()

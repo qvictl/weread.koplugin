@@ -105,7 +105,9 @@ end
 function M:isNetworkConnected()
     local ok, NetworkMgr = pcall(require, "ui/network/manager")
     if not ok or not NetworkMgr or not NetworkMgr.isConnected then
-        return self.settings and self.settings.mock_endpoint and true or self:isNetworkOnline()
+        -- An older runtime cannot inspect the link. Let the network task
+        -- report reachability rather than resolving DNS on the UI thread.
+        return true
     end
     local ok_connected, connected = pcall(function()
         return NetworkMgr:isConnected()
@@ -124,15 +126,10 @@ function M:showOffline(label)
 end
 
 -- options.silent_offline: no offline notice (background work).
--- options.link_only: check the interface link only, never a blocking DNS
--- lookup; for lifecycle-triggered work, where the request itself fails fast.
+-- Every UI gate checks the link only; the task reports DNS/HTTP failures.
+-- Existing callers may still pass link_only for compatibility.
 function M:runOnlineTask(label, callback, delay, options)
-    local online
-    if options and options.link_only then
-        online = self:isNetworkConnected()
-    else
-        online = self:isNetworkOnline()
-    end
+    local online = self:isNetworkConnected()
     if not online then
         if not (options and options.silent_offline) then
             self:showOffline(label)

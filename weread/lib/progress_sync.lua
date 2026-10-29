@@ -1174,9 +1174,8 @@ function ProgressSync:_pull(options)
         end
     end, {
         silent_offline = true,
-        -- Automatic pulls run right after open/resume: check the link state
-        -- only, never a blocking DNS lookup on the UI loop (F4).
-        link_only = options.manual ~= true,
+        -- Manual and automatic pulls must never resolve DNS on the UI loop.
+        link_only = true,
     })
     if not started then
         self.pulling = false
