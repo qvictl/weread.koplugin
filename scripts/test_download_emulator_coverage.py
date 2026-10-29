@@ -134,6 +134,38 @@ class CoverageArtifactsTest(unittest.TestCase):
                     self.assertEqual((tooling / "scripts/download_emulator_coverage.py").read_text(), "# trusted workflow tooling\n")
                     self.assertFalse((tooling / "old.txt").exists())
 
+    def test_publisher_accepts_historical_main_but_rejects_unmerged_sources(self):
+        workflow = Path(__file__).resolve().parent.parent / ".github/workflows/coverage.yml"
+        source = workflow.read_text()
+        step = source.split("- name: Validate measured main ancestry\n", 1)[1].split("\n      - name:", 1)[0]
+        command = textwrap.dedent(step.split("run: |\n", 1)[1])
+        with tempfile.TemporaryDirectory() as directory:
+            repository = Path(directory)
+            def git(*args):
+                return subprocess.check_output(["git", "-C", str(repository), *args], text=True).strip()
+            git("init", "--quiet", "--initial-branch=main")
+            path = repository / "fixture.txt"
+            revisions = []
+            for value in ["historical main", "current main"]:
+                path.write_text(value)
+                git("add", ".")
+                git("-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "--quiet", "-m", value)
+                revisions.append((git("rev-parse", "HEAD"), True))
+            git("checkout", "--quiet", "-b", "feature")
+            for value in ["feature source", "pull request source"]:
+                path.write_text(value)
+                git("add", ".")
+                git("-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "--quiet", "-m", value)
+                revisions.append((git("rev-parse", "HEAD"), False))
+            git("remote", "add", "origin", repository.as_uri())
+            for revision, accepted in revisions:
+                with self.subTest(revision=revision, accepted=accepted):
+                    git("checkout", "--quiet", "--detach", revision)
+                    result = subprocess.run(["bash", "-e", "-c", command], cwd=repository, capture_output=True)
+                    self.assertEqual(result.returncode == 0, accepted)
+                    if not accepted:
+                        self.assertIn(b"not an ancestor of main", result.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()

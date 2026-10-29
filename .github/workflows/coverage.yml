@@ -45,7 +45,7 @@ env:
 jobs:
   publish:
     name: Publish main coverage
-    if: github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event != 'pull_request')
+    if: github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event != 'pull_request' && github.event.workflow_run.head_branch == 'main')
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -62,7 +62,12 @@ jobs:
             run_id="$EVENT_RUN"; sha="$EVENT_SHA"
           elif [[ -n "${INPUT_RUN:-}" ]]; then
             run_id="$INPUT_RUN"
-            sha="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run_id" --jq .head_sha)"
+            run_json="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run_id")"
+            if ! jq -e '.event != "pull_request" and .head_branch == "main"' <<<"$run_json" >/dev/null; then
+              echo "::error::Coverage backfills require an Integration run on main."
+              exit 1
+            fi
+            sha="$(jq -r .head_sha <<<"$run_json")"
           else
             read -r run_id sha < <(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/integration.yml/runs?branch=main&status=success&per_page=20" \
               --jq '[.workflow_runs[] | select(.event != "pull_request")][0] | "\(.id) \(.head_sha)"')
@@ -95,6 +100,14 @@ jobs:
           ref: ${{ steps.run.outputs.sha }}
           fetch-depth: 0
           persist-credentials: false
+
+      - name: Validate measured main ancestry
+        run: |
+          git fetch --quiet --no-tags origin main:refs/remotes/origin/main
+          if ! git merge-base --is-ancestor HEAD origin/main; then
+            echo "::error::The measured coverage source is not an ancestor of main."
+            exit 1
+          fi
 
       - name: Install LuaJIT and LuaCov
         run: |
