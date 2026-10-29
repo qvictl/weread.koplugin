@@ -153,14 +153,14 @@ def require_release_history(repo, run_id, target_sha, history, current_gate, cwd
         previous = known.get(key, {})
         if "sha" in previous:
             enforce(previous["sha"], previous["combined"])
-        if run["id"] != int(run_id) and run.get("status") != "completed" and run.get("conclusion") is None:
-            continue  # A queued resolver may later run a candidate at this same attempt.
-        if previous.get("attempt", 0) >= attempt:
+        pending = run["id"] != int(run_id) and run.get("status") != "completed" and run.get("conclusion") is None
+        horizon = attempt - 1 if pending else attempt
+        if horizon <= 0 or previous.get("attempt", 0) >= horizon:
             continue
         accepted = accepted_attempts(repo, run["id"])
-        missing = {value for value in accepted if value > previous.get("attempt", 0)}
+        missing = {value for value in accepted if previous.get("attempt", 0) < value <= horizon}
         if not missing:
-            checked[key] = dict(previous, attempt=attempt)
+            checked[key] = dict(previous, attempt=horizon)
             continue
         manifest = release_manifest(repo, run["id"])
         sha = manifest.get("target_sha", "")
@@ -173,7 +173,7 @@ def require_release_history(repo, run_id, target_sha, history, current_gate, cwd
             raise ValueError("Invalid earlier combined measurement")
         floor = max([previous.get("combined", 0), *measured])
         enforce(sha, floor)
-        checked[key] = dict(attempt=attempt, sha=sha, combined=floor)
+        checked[key] = dict(attempt=horizon, sha=sha, combined=floor)
     own = merge_release_checks({str(run_id): known[str(run_id)]} if str(run_id) in known else {},
                                {str(run_id): dict(attempt=current_attempt, sha=target_sha, combined=current)})
     checked = merge_release_checks(checked, own)

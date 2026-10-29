@@ -383,6 +383,7 @@ class CoverageArtifactsTest(unittest.TestCase):
             gate_succeeded = True
             evidence_expired = False
             run_attempt = 2
+            run_conclusion = "failure"
             third_succeeded = False
             def zipped(name, value):
                 output = io.BytesIO()
@@ -393,7 +394,7 @@ class CoverageArtifactsTest(unittest.TestCase):
                 if "/workflows/release.yml/runs?" in endpoint:
                     return json.dumps([{"workflow_runs": [
                         {"id": 20, "conclusion": None, "run_attempt": 1}, {"id": 5, "conclusion": "success", "run_attempt": 1}]},
-                        {"workflow_runs": [{"id": 10, "conclusion": "failure", "run_attempt": run_attempt}]}]).encode()
+                        {"workflow_runs": [{"id": 10, "conclusion": run_conclusion, "run_attempt": run_attempt}]}]).encode()
                 if "/20/jobs?" in endpoint or "/5/jobs?" in endpoint:
                     return json.dumps([{"jobs": []}]).encode()
                 if "/10/jobs?" in endpoint:
@@ -417,6 +418,20 @@ class CoverageArtifactsTest(unittest.TestCase):
                     return zipped("release-gate.json", dict(gate, run_attempt=2, overall_combined={"percent": 94}))
                 self.fail("Unexpected endpoint: " + endpoint)
             with mock.patch.object(dc, "gh_api", side_effect=api) as requests:
+                persist()
+                run_conclusion = None
+                with self.assertRaisesRegex(ValueError, "not persisted"):
+                    dc.require_release_history("owner/plugin", 20, target, history, current_gate, cwd=root)
+                persist(95)
+                pending = dc.require_release_history("owner/plugin", 20, target, history, current_gate, cwd=root)
+                self.assertEqual(pending["10"]["attempt"], 1, "pending attempt 2 was prematurely acknowledged")
+                run_attempt = 1
+                gate_succeeded = False
+                pending = dc.require_release_history("owner/plugin", 20, target, history, current_gate, cwd=root)
+                self.assertNotIn("10", pending, "a first pending attempt created a watermark")
+                run_attempt = 2
+                gate_succeeded = True
+                run_conclusion = "failure"
                 for percent in [None, 94]:
                     persist(percent)
                     with self.subTest(persisted=percent), self.assertRaisesRegex(ValueError, "not persisted"):
