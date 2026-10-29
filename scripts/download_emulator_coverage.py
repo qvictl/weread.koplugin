@@ -105,7 +105,8 @@ def download_accepted(repo, run_id, output, expected_sha):
     checks = validate_release_checks(json.loads(files["release-checks.json"]))
     own = checks.get(str(run_id), {})
     if (own.get("attempt", 0) < max(attempts) or own.get("sha") != expected_sha
-            or own.get("combined") != gate.get("overall_combined", {}).get("percent")):
+            or type(gate.get("overall_combined", {}).get("percent")) not in (int, float)
+            or not 0 <= gate["overall_combined"]["percent"] <= own.get("combined", -1)):
         raise ValueError("Accepted release watermark does not match its measurement")
     if any(not content.strip() for content in files.values()):
         raise ValueError("Accepted coverage reports are incomplete")
@@ -117,7 +118,8 @@ def download_accepted(repo, run_id, output, expected_sha):
 def require_release_history(repo, run_id, target_sha, history, current_gate, cwd=None,
                             checks_out=None, current_attempt=1):
     """Only new run attempts need jobs/artifact queries; durable proofs survive expiry."""
-    from coverage_tools import read_history, merge_release_checks
+    from coverage_tools import read_history, merge_release_checks, load_policy
+    tolerance = float(load_policy().get("ratchet_tolerance_pp", 0))
     records = read_history(history, strict=True)
     known = merge_release_checks(*(record.get("release_checks", {}) for record in records))
     candidate = json.loads(Path(current_gate).read_text())
@@ -131,11 +133,11 @@ def require_release_history(repo, run_id, target_sha, history, current_gate, cwd
             return
         if ancestry.returncode != 0:
             raise ValueError("Cannot resolve earlier release ancestry")
+        if current + tolerance < floor:
+            raise ValueError("Current measurement is below the accepted floor beyond policy tolerance")
         if sha == target_sha:
-            if current < floor:
-                raise ValueError("Current measurement is below this candidate's accepted floor")
             return
-        if any(record["sha"] == sha and record.get("combined", {}).get("percent", -1) >= floor for record in records):
+        if any(record["sha"] == sha and record.get("combined", {}).get("percent", -1) + tolerance >= floor for record in records):
             return
         raise ValueError("An accepted combined floor is not persisted; rerun that candidate first")
     pages = json.loads(gh_api(
@@ -172,7 +174,9 @@ def require_release_history(repo, run_id, target_sha, history, current_gate, cwd
         floor = max([previous.get("combined", 0), *measured])
         enforce(sha, floor)
         checked[key] = dict(attempt=attempt, sha=sha, combined=floor)
-    checked = merge_release_checks(checked, {str(run_id): dict(attempt=current_attempt, sha=target_sha, combined=current)})
+    own = merge_release_checks({str(run_id): known[str(run_id)]} if str(run_id) in known else {},
+                               {str(run_id): dict(attempt=current_attempt, sha=target_sha, combined=current)})
+    checked = merge_release_checks(checked, own)
     if checks_out:
         Path(checks_out).write_text(json.dumps(checked, indent=2) + "\n", encoding="utf-8")
     return checked

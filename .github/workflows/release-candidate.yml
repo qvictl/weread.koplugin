@@ -106,6 +106,7 @@ jobs:
 
       - name: Reject unpersisted earlier release floors
         env:
+          COVERAGE_REPO: ${{ github.workspace }}
           GH_TOKEN: ${{ github.token }}
           TARGET_SHA: ${{ inputs.target_sha }}
         run: |

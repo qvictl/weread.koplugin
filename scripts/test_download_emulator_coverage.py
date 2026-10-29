@@ -202,6 +202,12 @@ class CoverageArtifactsTest(unittest.TestCase):
             with tempfile.TemporaryDirectory() as directory:
                 dc.download_accepted("owner/plugin", 123, directory, COMMIT)
                 self.assertEqual(json.loads((Path(directory) / "release-gate.json").read_text())["run_attempt"], 2)
+            latest["overall_combined"] = {"percent": 99.95}
+            with tempfile.TemporaryDirectory() as directory:
+                dc.download_accepted("owner/plugin", 123, directory, COMMIT)
+                self.assertEqual(json.loads((Path(directory) / "release-gate.json").read_text())["overall_combined"]["percent"], 99.95)
+                self.assertEqual(json.loads((Path(directory) / "release-checks.json").read_text())["123"]["combined"], 100)
+            latest["overall_combined"] = {"percent": 100}
             for changed in [dict(run_attempt=1), dict(run_id=456), dict(measured_sha="b" * 40), dict(passed=False)]:
                 original = dict(latest)
                 latest.update(changed)
@@ -373,7 +379,7 @@ class CoverageArtifactsTest(unittest.TestCase):
             gate = dict(mode="release", passed=True, measured_sha=ancestor, run_id=10, run_attempt=1, overall_combined={"percent": 95})
             manifest = dict(run_id=10, candidate=True, target_sha=ancestor, ci_run=9)
             current_gate = root / "current-gate.json"
-            current_gate.write_text(json.dumps(dict(passed=True, measured_sha=target, overall_combined={"percent": 90})))
+            current_gate.write_text(json.dumps(dict(passed=True, measured_sha=target, overall_combined={"percent": 96})))
             gate_succeeded = True
             evidence_expired = False
             run_attempt = 2
@@ -426,10 +432,13 @@ class CoverageArtifactsTest(unittest.TestCase):
                 requests.reset_mock()
                 dc.require_release_history("owner/plugin", 20, target, history, current_gate, cwd=root)
                 self.assertFalse(any("/10/jobs?" in call.args[0] or "/10/artifacts?" in call.args[0] for call in requests.call_args_list))
-                current_gate.write_text(json.dumps(dict(passed=True, measured_sha=ancestor, overall_combined={"percent": 94.99})))
+                current_gate.write_text(json.dumps(dict(passed=True, measured_sha=ancestor, overall_combined={"percent": 94.95})))
+                proof = dc.require_release_history("owner/plugin", 10, ancestor, history, current_gate, cwd=root)
+                self.assertEqual(proof["10"]["combined"], 95)
+                current_gate.write_text(json.dumps(dict(passed=True, measured_sha=ancestor, overall_combined={"percent": 94.89})))
                 with self.assertRaisesRegex(ValueError, "accepted floor"):
                     dc.require_release_history("owner/plugin", 10, ancestor, history, current_gate, cwd=root)
-                current_gate.write_text(json.dumps(dict(passed=True, measured_sha=target, overall_combined={"percent": 90})))
+                current_gate.write_text(json.dumps(dict(passed=True, measured_sha=target, overall_combined={"percent": 96})))
                 run_attempt = 3
                 third_succeeded = True
                 with self.assertRaisesRegex(ValueError, "missing or inconsistent"):

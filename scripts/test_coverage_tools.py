@@ -482,6 +482,10 @@ class CoveragePhaseTest(unittest.TestCase):
         self.assertEqual({path.name: path.read_bytes() for path in site.iterdir()}, before)
 
     def test_durable_release_checks_survive_unit_updates_and_keep_accepted_floors(self):
+        self.rows = ["row_%d()" % index for index in range(10000)]
+        self.module.write_text("\n".join(self.rows) + "\n")
+        self.candidate = self.commit("coverage precision fixture")
+        self.unit = self.report("unit", [])
         site = self.root / "site"
         site.mkdir()
         record = self.history_record(self.candidate, 95)
@@ -494,13 +498,22 @@ class CoveragePhaseTest(unittest.TestCase):
         self.assertEqual(saved, record, "late unit publication erased accepted release evidence")
         checks = self.root / "checks.json"
         checks.write_text(json.dumps({"10": {"attempt": 3}}))
-        combined = self.report("combined", [])
+        combined = self.report("combined", range(9495, 10000))
         subprocess.run(args + ["--combined", str(combined), "--release-checks", str(checks)],
                        cwd=self.root, env=self.env, capture_output=True, check=True)
         saved = ct.read_history(site / "history.jsonl", strict=True)[0]
+        self.assertEqual(saved["combined"]["percent"], 94.95)
         self.assertEqual(saved["release_checks"]["10"], {"attempt": 3, "sha": self.candidate, "combined": 95})
         before = {path.name: path.read_bytes() for path in site.iterdir()}
-        lower = self.report("lower", [8, 9])
+        lower = self.report("lower", range(9489, 10000))
+        for measured, expected in [(combined, 0), (lower, 1)]:
+            output = self.root / "proof-gate.json"
+            gate = subprocess.run([sys.executable, ct.__file__, "gate", "--mode", "release", "--unit", str(self.unit),
+                                   "--combined", str(measured), "--base", self.base, "--head", self.candidate,
+                                   "--history", str(site / "history.jsonl"), "--today", "2026-10-28", "--json", str(output)],
+                                  cwd=self.root, env=self.env, capture_output=True)
+            self.assertEqual(gate.returncode, expected, gate.stderr)
+            self.assertEqual(json.loads(output.read_text())["baseline_combined"], 95)
         process = subprocess.run(args + ["--combined", str(lower)], cwd=self.root, env=self.env, capture_output=True)
         self.assertNotEqual(process.returncode, 0)
         self.assertEqual({path.name: path.read_bytes() for path in site.iterdir()}, before)

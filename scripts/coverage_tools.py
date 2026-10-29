@@ -524,6 +524,10 @@ def gate(args) -> int:
     combined_floor = policy["day_one_baseline"]["combined"]
     if combined_baseline:
         combined_floor = combined_baseline["combined"]["percent"]
+    if mode == "release":
+        proofs = merge_release_checks(*(record.get("release_checks", {}) for record in records))
+        combined_floor = max([combined_floor, *(proof["combined"] for proof in proofs.values()
+                                                if proof.get("sha") in ancestors)])
     if mode == "release" and o_comb is not None:
         add("Overall unit + emulator coverage does not drop (ratchet)",
             o_comb["percent"] + float(policy.get("ratchet_tolerance_pp", 0)) >= combined_floor, True,
@@ -619,6 +623,8 @@ def is_newest_publish(baseline_path: Path, sha: str, cwd=REPO) -> bool:
 
 
 def baseline(args) -> int:
+    policy = load_policy()
+    tolerance = float(policy.get("ratchet_tolerance_pp", 0))
     unit = overall(parse_report(Path(args.unit)))
     combined = overall(parse_report(Path(args.combined))) if args.combined else None
     now = dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat()
@@ -638,12 +644,13 @@ def baseline(args) -> int:
         run_id = (args.run_url or "").rstrip("/").split("/")[-1]
         own = checks.get(run_id, {})
         if (publication_attempt <= 0 or own.get("sha") != args.sha or combined is None
-                or own.get("combined") != combined["percent"]):
+                or own.get("combined", -1) < combined["percent"]
+                or combined["percent"] + tolerance < own.get("combined", 101)):
             raise ValueError("persistence retry does not match the accepted release")
         checks[run_id] = dict(own, attempt=max(own["attempt"], publication_attempt))
     all_checks = merge_release_checks(*(entry.get("release_checks", {}) for entry in previous), checks)
     for check in all_checks.values():
-        if combined is not None and check.get("sha") == args.sha and combined["percent"] < check["combined"]:
+        if combined is not None and check.get("sha") == args.sha and combined["percent"] + tolerance < check["combined"]:
             raise ValueError("publication would erase a durable accepted release floor")
     existing = next((entry for entry in reversed(previous) if entry["sha"] == args.sha), None)
     if combined is None and existing and existing.get("combined"):

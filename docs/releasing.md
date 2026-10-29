@@ -135,7 +135,10 @@ advances its durable watermark without rerunning tests. Unit publication retains
 these proofs and rejects damaged existing history before changing any files.
 
 An unacknowledged higher successful gate still needs its authentic evidence.
-Revalidating the same candidate must retain that earlier floor. If unacknowledged
+Revalidating the same candidate respects the existing policy tolerance (0.1
+percentage points). History records the actual new measurement, while durable
+proofs retain the earlier genuine high floor; 95→94.95 is allowed and
+95→94.89 is rejected. If unacknowledged
 accepted evidence expires, publication stops until its genuine source and
 measurement can be recovered from retained evidence and restored to history.
 Do not discard the check, infer combined from unit, or treat a lower fresh run as
