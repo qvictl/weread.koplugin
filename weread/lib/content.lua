@@ -230,6 +230,8 @@ local function asset_name_taken(used, candidate)
     return used[key] or used[candidate] or key:match("^cover%.") ~= nil
 end
 
+local MAX_ASSET_SUFFIX_CURSORS = 1024
+
 local function unique_asset_name(used, name, ext)
     local base = filename_safe(name):gsub("[^%w%._-]", "_"):gsub("_+", "_")
     if base:gsub("[_%.]", "") == "" then base = "img" end
@@ -237,11 +239,31 @@ local function unique_asset_name(used, name, ext)
         base = base .. ext
     end
     local candidate = base
-    local index = 2
+    -- This set travels between chapter workers. Keep the next suffix with it
+    -- so repeated names do not rescan every previously allocated image.
+    local suffixes = used.__next_asset_suffix
+    local key = base:lower()
+    local index = suffixes and suffixes[key] or 2
+    local stem = base:gsub("%.[^%.]+$", "")
+    -- A mismatched extension (cover.jpg.png) must also escape cover.*;
+    -- appending a numeric suffix alone would leave every candidate reserved.
+    if stem:lower():match("^cover%.") then stem = stem:gsub("%.", "-", 1) end
     while asset_name_taken(used, candidate) do
-        local stem = base:gsub("%.[^%.]+$", "")
         candidate = stem .. "-" .. tostring(index) .. ext
         index = index + 1
+    end
+    if index > 2 then
+        suffixes = suffixes or { __count = 0 }
+        if suffixes[key] == nil then
+            -- The authoritative used-name set remains intact. Evicted
+            -- cursors can safely rediscover their next suffix from it.
+            if suffixes.__count >= MAX_ASSET_SUFFIX_CURSORS then
+                suffixes = { __count = 0 }
+            end
+            suffixes.__count = suffixes.__count + 1
+        end
+        suffixes[key] = index
+        used.__next_asset_suffix = suffixes
     end
     used[candidate:lower()] = true
     return candidate
@@ -1416,6 +1438,8 @@ local FILE_COPY_CHUNK_BYTES = 64 * 1024
 local function discard_extracted_images(paths, names, used_names)
     for _, path in ipairs(paths) do os.remove(path) end
     for _, name in ipairs(names) do used_names[name:lower()] = nil end
+    -- Rolled-back names become available again; retries keep the same names.
+    used_names.__next_asset_suffix = nil
 end
 
 -- WeRead's catalog field is named `tar`, but cloud-converted documents may

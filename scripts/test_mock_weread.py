@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Run with python3 scripts/test_mock_weread.py; no KOReader or network account."""
+import io
 import json
+import tarfile
 import threading
 import time
 import unittest
@@ -40,6 +42,25 @@ class ObservedGate:
 
 
 class MockTests(unittest.TestCase):
+    def test_resource_archives_download_over_http(self):
+        def download(stage):
+            with self.opener.open(self.base + "/__proxy?url=https://weread.qq.com/mock/resource-archive/"
+                                  + stage + ".tar", timeout=5) as response:
+                self.assertEqual(response.headers["Content-Type"], "application/x-tar")
+                return response.read()
+
+        with tarfile.open(fileobj=io.BytesIO(download("bulk"))) as archive:
+            self.assertEqual(len(archive.getmembers()), 512)
+            self.assertEqual(archive.extractfile("directory-512/existing.png").read(), b"\x89PNG\r\n\x1a\n512")
+        with tarfile.open(fileobj=io.BytesIO(download("cover"))) as archive:
+            self.assertEqual(archive.getnames(), ["Cover.jpg"])
+            self.assertTrue(archive.extractfile("Cover.jpg").read().startswith(b"\x89PNG"))
+        with tarfile.open(fileobj=io.BytesIO(download("retry"))) as archive:
+            self.assertEqual(len(archive.getmembers()), 2)
+        with self.assertRaises(tarfile.ReadError):
+            with tarfile.open(fileobj=io.BytesIO(download("initial"))) as archive:
+                archive.getmembers()
+
     @classmethod
     def setUpClass(cls):
         cls.server = MockServer(0, now=lambda: 1710343800)
