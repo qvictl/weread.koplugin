@@ -177,6 +177,12 @@ function Worker:_launch(request)
         self:_schedule()
         return true
     end
+    local now = self.now()
+    if self.memory_cooldown_until and now < self.memory_cooldown_until then
+        self:_complete(request, { ok = false, error = "low_memory" })
+        return false, "low_memory"
+    end
+    collectgarbage("collect")
     if request.options.before_launch then
         local ok, current, reason = pcall(request.options.before_launch)
         if not ok or not current then
@@ -185,12 +191,6 @@ function Worker:_launch(request)
             return false, ok and reason or current
         end
     end
-    local now = self.now()
-    if self.memory_cooldown_until and now < self.memory_cooldown_until then
-        self:_complete(request, { ok = false, error = "low_memory" })
-        return false, "low_memory"
-    end
-    collectgarbage("collect")
     local free_kb = self:availableMemoryKB()
     if free_kb and free_kb < self.min_available_kb then
         self:_complete(request, {

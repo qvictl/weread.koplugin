@@ -2,6 +2,7 @@
 -- @timeout 90
 -- @no_coverage Timing measures the real event loop, without LuaCov overhead.
 return function(H)
+    local prepare_login = dofile(os.getenv("WEREAD_TEST_HARNESS_DIR") .. "/qr_credentials.lua")
     local UIManager = require("ui/uimanager")
     local TrapWidget = require("ui/widget/trapwidget")
     local plugin, book
@@ -96,6 +97,7 @@ return function(H)
         H.call(function() plugin:closeWeReadUI() end)
     end)
     H.step("queued QR completion cannot write an old shelf into the new account", function()
+        local apply_login = prepare_login(H, plugin)
         H.mock_control({ match = "/shelf/sync", delay = 1.5, times = 0 })
         H.call(function()
             -- The mock QR protocol signs in as 900000. Empty that account's
@@ -104,9 +106,7 @@ return function(H)
             plugin.settings:set("account", { user_vid = "900099" })
             plugin:refreshBookshelf()
             UIManager:scheduleIn(0.35, function()
-                plugin.qr_login:_complete({ succeed = true, webLoginVid = "900000",
-                    accessToken = "mock-access-token", refreshToken = "mock-refresh-token" },
-                    plugin.qr_login.generation)
+                apply_login()
             end)
         end)
         H.wait_until("real mock QR completion and old request finish", function()

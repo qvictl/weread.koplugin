@@ -2,6 +2,7 @@
 -- @timeout 100
 -- @no_coverage Timing measures the real event loop, without LuaCov overhead.
 return function(H)
+    local prepare_login = dofile(os.getenv("WEREAD_TEST_HARNESS_DIR") .. "/qr_credentials.lua")
     local UIManager = require("ui/uimanager")
     local TrapWidget = require("ui/widget/trapwidget")
     local Content = require("weread.lib.content")
@@ -180,6 +181,7 @@ return function(H)
         H.check(not callback, "cancelled staged catalog does not deliver parent callback")
     end)
     H.step("account switch discards a worker catalog before publication", function()
+        local apply_login = prepare_login(H, plugin)
         local original_prepare = Content.create_download_workspace
         local workspace, callback
         local path = Content.catalog_cache_path(plugin.settings, book)
@@ -196,9 +198,7 @@ return function(H)
                 end
                 plugin:loadChapters(book, function() callback = true end, true)
                 UIManager:scheduleIn(0.35, function()
-                    plugin.qr_login:_complete({ succeed = true, webLoginVid = "900000",
-                        accessToken = "mock-access-token", refreshToken = "mock-refresh-token" },
-                        plugin.qr_login.generation)
+                    apply_login()
                 end)
             end)
             H.wait_until("new account signed in and old catalog discarded", function()
@@ -217,6 +217,7 @@ return function(H)
         H.close_dialogs()
     end)
     H.step("QR completion after a real scan checkpoint isolates subsequent writes", function()
+        local apply_login = prepare_login(H, plugin)
         local root = H.env.evidence .. "/slow-cache"
         local attributes = lfs.attributes
         local schedule, refresh = UIManager.scheduleIn, plugin.refreshCacheManagement
@@ -244,9 +245,7 @@ return function(H)
                     if plugin._cache_import and not checkpoint_seen then
                         checkpoint_seen = true
                         schedule(self, delay, function()
-                            plugin.qr_login:_complete({ succeed = true, webLoginVid = "900000",
-                                accessToken = "mock-access-token", refreshToken = "mock-refresh-token" },
-                                plugin.qr_login.generation)
+                            apply_login()
                         end)
                     end
                     return schedule(self, delay, fn, ...)

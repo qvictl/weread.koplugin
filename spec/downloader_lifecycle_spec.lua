@@ -659,6 +659,39 @@ do
     end
 end
 
+-- The default memory gate performs a full collection. It must never run
+-- while a child from another producer still shares the parent's COW pages.
+do
+    local Budget = require("weread.lib.fork_budget")
+    local exited, gate_calls = false, 0
+    local runner = { run = function() return 989898 end,
+        is_done = function(pid) assert(pid == 989898); return exited end }
+    assert(Budget.run(runner, function() end))
+    local d = Downloader:new{ memory_gate = function()
+        gate_calls = gate_calls + 1
+        expect(Budget.available(), "memory gate collected the heap while another child was alive")
+        return true
+    end }
+    d._sleepInJob = function() coroutine.yield(); return true end
+    local co = coroutine.create(function() d:_waitForMemory({}) end)
+    assert(coroutine.resume(co))
+    expect(coroutine.status(co) == "suspended" and gate_calls == 0,
+        "waiting for the fork slot collected or blocked the UI")
+    exited = true
+    assert(coroutine.resume(co))
+    expect(coroutine.status(co) == "dead" and gate_calls == 1,
+        "memory was not checked after the slot became available")
+
+    exited, gate_calls = false, 0
+    assert(Budget.run(runner, function() end))
+    local waiting = {}
+    d._sleepInJob = function() waiting.cancelled = true; return true end
+    d:_waitForMemory(waiting)
+    expect(gate_calls == 0 and waiting.cancelled, "cancellation during slot waiting collected the heap")
+    exited = true
+    expect(Budget.available(), "cancelled wait interfered with the other producer's reaping")
+end
+
 print(("downloader_lifecycle_spec: %d checks"):format(checks))
 
 restore_process()
