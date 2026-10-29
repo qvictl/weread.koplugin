@@ -274,9 +274,9 @@ Spot checks:
 
 ## Bounded reader-session verification
 
-A manual or full download refreshes its first chapter, then reuses the accepted reader fields within that job. New jobs and resumed jobs start fresh. Readiness belongs to the download job and is not saved in the book record. Direct Content callers keep their existing fresh-reader behavior unless they explicitly opt in. A reused context rejected by an empty shard object or a shard checksum failure gets one fresh attempt; transport errors retain the existing downloader retries and delays.
+A manual or full download refreshes its first chapter, then reuses the accepted reader fields within that job. New jobs and resumed jobs start fresh. Readiness belongs to the download job and is not saved in the book record. Direct Content callers keep their existing fresh-reader behavior unless they explicitly opt in. A missing or nonnumeric catalog chapter index also uses the authoritative fresh reader, without guessing its position. A reused context rejected by an empty shard object or a shard checksum failure gets one fresh attempt; transport errors retain the existing downloader retries and delays.
 
-The offline HTTP scenario `30_reader_session` compares all EPUB entry bytes (apart from the publication timestamp) and checks actual reader requests: three chapters need four reader pages in the fresh control, two with reuse. Both counts include the unchanged download initialization. The scenario also covers rejection, transport failure, cancellation, checkpoint reuse and the UI heartbeat. These request counts are not a network latency benchmark.
+The offline HTTP scenario `30_reader_session` compares all EPUB entry bytes (apart from the publication timestamp) and checks actual reader requests: three chapters need four reader pages in the fresh control, two with reuse. Both counts include the unchanged download initialization. The scenario also covers missing catalog indices, rejection, transport failure, cancellation, checkpoint reuse and the UI heartbeat. These request counts are not a network latency benchmark.
 
 `scripts/probe_reader_session.py` independently compares the decoded XHTML and CSS for the first two catalog chapters of a local EPUB, alternating fresh/reused order. Its unit tests are offline:
 

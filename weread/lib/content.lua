@@ -1819,6 +1819,7 @@ end
 
 function Content.fetch_chapter_xhtml(client, settings, book, chapter, options)
     local reuse = options and options.reuse_reader_state and book.psvts and book.psvts ~= ""
+        and tonumber(chapter and chapter.chapterIdx) ~= nil
     if not reuse then
         Content.refresh_reader_state(client, book, chapter)
         return fetch_chapter_with_state(client, settings, book, chapter)

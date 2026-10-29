@@ -57,13 +57,17 @@ return function(H)
             return values
         end)
     end
-    local function start(name, size, force_fresh, fault, suffix)
+    local function start(name, size, force_fresh, fault, suffix, missing_index)
         phase = { name = name, sources = {}, retries = {}, force_fresh = force_fresh, fault = fault,
             readers_before = count("/web/reader/"), shards_before = count("/web/book/chapter/e_0"),
             started = H.now_ms() }
         H.call(function()
             local selected = {}
-            for index = 1, size do selected[index] = chapters[index] end
+            for index = 1, size do
+                selected[index] = {}
+                for key, value in pairs(chapters[index]) do selected[index][key] = value end
+                if index == missing_index then selected[index].chapterIdx = nil end
+            end
             H.check(plugin.downloader:start(book, selected, suffix or "session-probe", {
                 silent_completion = true, offer_read = false, include_annotations = false,
                 on_complete = function(ok, value) phase.result = { ok = ok, value = value } end,
@@ -122,7 +126,7 @@ return function(H)
                             "reused reader URL follows the current chapter")
                         H.equal(value.book.chapter_uid, job.chapters[job.index].chapterUid,
                             "returned reader chapter UID follows its URL")
-                        H.equal(value.book.chapter_idx, job.chapters[job.index].chapterIdx,
+                        H.equal(value.book.chapter_idx, chapters[job.index].chapterIdx,
                             "returned reader chapter index follows its URL")
                         phase.sources[job.index] = { xhtml = value.xhtml, was_ready = was_ready }
                     end
@@ -160,6 +164,14 @@ return function(H)
             for index = 1, 3 do
                 H.equal(reused.sources[index].xhtml, fresh.sources[index].xhtml, "identical decoded chapter")
             end
+        end)
+        H.step("missing catalog index refreshes authoritative reader metadata", function()
+            local missing = start("missing_index", 3, false, nil, nil, 2)
+            success(missing)
+            H.equal(missing.job.chapters[2].chapterIdx, nil, "catalog input really has no second chapter index")
+            H.equal(missing.readers, 3, "only the chapter with missing metadata loses reuse")
+            H.equal(#missing.retries, 0, "metadata fallback never needs an outer retry")
+            H.equal(missing.sources[2].xhtml, fresh.sources[2].xhtml, "fresh metadata fallback preserves content")
         end)
         H.step("explicit cached-context rejection refreshes internally once", function()
             local rejected = start("rejected", 2, false, "empty")
