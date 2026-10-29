@@ -307,6 +307,7 @@ function Worker:start(options)
         if not options.queue then return false, "worker_busy" end
         local previous = self.pending
         self.pending = request
+        ForkBudget.wait(request)
         if previous then
             self:_complete(previous, { ok = false, cancelled = true,
                 error = "replaced" })

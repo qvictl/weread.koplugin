@@ -214,6 +214,23 @@ local ok, err = xpcall(function()
                 "same-account annotation did not retain its original context")
         end
     end
+    -- Pending on a shared worker was accepted before the independent
+    -- coroutine; it must retain that order when the active child is reaped.
+    local fifo_worker = Worker:new{ temp_dir = "/data/workers" }
+    fifo_worker:start{ task = function() return "active" end }
+    local active_pid = launched
+    local _, older_pending = fifo_worker:start{ queue = true, task = function() return "older" end }
+    local later_co, later_result = start({})
+    children[active_pid].task(); children[active_pid].done = true
+    pump(10)
+    expect(fifo_worker.job and fifo_worker.job.request == older_pending and launched == active_pid + 1
+        and coroutine.status(later_co) == "suspended", "later coroutine bypassed the older shared-worker request")
+    children[launched].task(); children[launched].done = true
+    pump(10)
+    expect(launched == active_pid + 2 and not fifo_worker:busy(), "later coroutine did not follow the older request")
+    children[launched].task(); children[launched].done = true
+    pump(10)
+    expect(later_result()[1] and Budget.available(), "FIFO handoff stranded the later coroutine")
     -- A replaced annotation callback can synchronously enqueue B on the
     -- same worker while actual Downloader is accepting chapter request C.
     replace_module("ui/widget/confirmbox", { new = function(_, value) return value end })
