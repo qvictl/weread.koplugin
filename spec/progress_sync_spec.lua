@@ -1633,6 +1633,26 @@ test("catalog HTTP precedes parent application and progress HTTP", function()
     complete(pending[2]); eq(f.sync.verified, true, "refreshed catalog verifies")
 end)
 
+test("synchronous catalog completion cannot replace the next request cancel handle", function()
+    local available, calls, cancelled = nil, 0, {}
+    local f = async_fixture({
+        get_chapters = function() return available end,
+        fetch_catalog = function() return chapters end,
+        apply_catalog = function(_, value) available = value; return value end,
+        request = function(task, success)
+            calls = calls + 1
+            local call = calls
+            if call == 1 then success(task()) end
+            return function() cancelled[#cancelled + 1] = call end
+        end,
+    })
+    f.sync:sync_now()
+    eq(calls, 2, "catalog completion starts progress transport")
+    f.sync:on_suspend()
+    eq(#cancelled, 1, "only active request is cancelled")
+    eq(cancelled[1], 2, "progress child owns the current cancel handle")
+end)
+
 test("transport and parent exceptions release state and permit retry", function()
     local f, pending = async_fixture(); f.sync:sync_now()
     local flush = f.sync.settings.flush

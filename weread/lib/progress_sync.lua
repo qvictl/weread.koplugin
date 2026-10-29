@@ -1208,14 +1208,17 @@ function ProgressSync:_pull(options)
         end
         release()
     end
+    local active_request
     local function request(task, on_success, on_failure)
         if not current() then release(); return end
-        self.pull_cancel = nil
+        local request_step = {}
+        active_request, self.pull_cancel = request_step, nil
         local success, failure = guarded(on_success), guarded(on_failure or failed)
         if self.request then
             local ok, cancel = pcall(self.request, task, success, failure, options)
             if not ok then failure(cancel, false)
-            elseif self.pull_request == request_token and self.pulling and type(cancel) == "function" then
+            elseif active_request == request_step and self.pull_request == request_token
+                and self.pulling and type(cancel) == "function" then
                 self.pull_cancel = cancel
             end
         else
