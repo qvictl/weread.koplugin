@@ -74,6 +74,10 @@ local function all_books(settings)
     return settings:get("books", {}) or {}
 end
 
+local function is_manual_upload(reason)
+    return reason == "explicit_local_choice" or reason == "manual_sync"
+end
+
 local function document_path(document)
     if not document then return nil end
     return document.file
@@ -523,10 +527,17 @@ function ProgressSync:_persist_unsaved_uploads()
 end
 
 -- Positions persisted by earlier instances (closed documents, failed
--- uploads). Without book_id: every book; with it: that book only.
+-- uploads). Without book_id: every book when automatic uploads are enabled;
+-- otherwise only the open book's manual request. With book_id: that book only.
 function ProgressSync:_load_persisted_uploads(book_id)
     if not RequestOwner.matches(self.settings, self.session_owner) then return end
-    if self:_config().upload_on_close ~= true then return end
+    local automatic = self:_config().upload_on_close == true
+    -- Manual retries are independent of automatic close uploads. With the
+    -- latter disabled, only load the open book rather than scan the library.
+    if not automatic then
+        book_id = book_id or self.current_book_id
+        if not book_id then return end
+    end
     self.upload_queue = self.upload_queue or {}
     local books
     if book_id then
@@ -546,6 +557,7 @@ function ProgressSync:_load_persisted_uploads(book_id)
         -- Older unsigned positions stay on disk: the global book store
         -- cannot prove their account. Fresh local positions can replace them.
         if type(book) == "table" and type(book.pending_upload_position) == "table"
+            and (automatic or is_manual_upload(book.pending_upload_reason))
             and book.pending_upload_owner == digest
             and not self.upload_queue[id]
             and not (self.uploading and self.uploading.book_id == id) then
@@ -819,6 +831,17 @@ function ProgressSync:_resolve(local_position, remote, context, options)
     local queued = self.upload_queue and self.upload_queue[context.book_id]
     if queued and not RequestOwner.matches(self.settings, queued.owner) then
         self.upload_queue[context.book_id], queued = nil, nil
+    end
+    if queued and not options.manual and is_manual_upload(queued.reason) then
+        -- The reader already chose this exact snapshot. A fresh automatic
+        -- pull must not replace it with newer, unrequested local reading or
+        -- discard it because automatic close uploads are disabled. The pump
+        -- retries its original baselines with the usual strict cloud guard.
+        self.local_position, self.remote_position = copy(local_position), copy(remote)
+        self.remote_floor, self.report_fallback = nil, nil
+        self.dirty = not PositionMapper.same_position(local_position, remote)
+        self:_mark_verified(context.book_id, "manual_retry", local_position, remote)
+        return
     end
     if queued then
         self.upload_queue[context.book_id] = nil
@@ -1559,13 +1582,13 @@ function ProgressSync:on_resume()
     local generation = self.generation
     self:_schedule_network_work("resume", function()
         if generation ~= self.generation then return end
+        self:_load_persisted_uploads()
         if recheck and not self.choice and not self.pulling then
             -- Someone may have read elsewhere while we slept. A position
             -- queued at suspend goes through this pull (see _resolve).
             self:_clear_verified("resume_recheck")
             self:_pull({ manual = false })
         end
-        self:_load_persisted_uploads()
         self:_pump_uploads()
     end)
 end
