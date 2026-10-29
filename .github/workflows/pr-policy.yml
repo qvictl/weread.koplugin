@@ -74,6 +74,7 @@ jobs:
         with:
           ref: ${{ steps.pr.outputs.head_sha }}
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Fetch base branch and coverage history
         run: |
@@ -108,14 +109,26 @@ jobs:
           done
           echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
 
+      # A dispatched policy may inspect an older or external PR head. Use
+      # tooling from this workflow's fixed revision, never from that head.
+      - name: Checkout coverage tooling
+        if: steps.integration.outputs.run_id != ''
+        run: |
+          tools="$RUNNER_TEMP/coverage-tooling"
+          git init --quiet "$tools"
+          git -C "$tools" sparse-checkout set --no-cone /scripts/download_emulator_coverage.py
+          GIT_TERMINAL_PROMPT=0 git -C "$tools" -c credential.helper= fetch --quiet --depth 1 \
+            "https://github.com/$GITHUB_REPOSITORY.git" "$GITHUB_WORKFLOW_SHA"
+          git -C "$tools" checkout --quiet --detach FETCH_HEAD
+
       - name: Download emulator coverage
         if: steps.integration.outputs.run_id != ''
-        continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
           RUN_ID: ${{ steps.integration.outputs.run_id }}
         run: |
-          gh run download "$RUN_ID" --repo "$GITHUB_REPOSITORY" -p 'coverage-emulator-shard-*' -D "$RUNNER_TEMP/emulator-coverage"
+          python3 "$RUNNER_TEMP/coverage-tooling/scripts/download_emulator_coverage.py" --repo "$GITHUB_REPOSITORY" \
+            --run "$RUN_ID" --out "$RUNNER_TEMP/emulator-coverage"
           find "$RUNNER_TEMP/emulator-coverage" -type f
 
       # Measure what the Integration run measured: unit specs, changed lines
