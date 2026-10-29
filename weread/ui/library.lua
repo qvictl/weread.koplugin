@@ -390,6 +390,11 @@ function M:fetchVisibleShelfCovers(view, items, options)
             runner.write_all(child_write_fd, ok and path and "ok" or "error")
         end)
         if not pid then
+            if read_fd == "worker_busy" or read_fd == "low_memory" then
+                self.shelf_cover_job = self.shelf_cover_job or {}
+                UIManager:scheduleIn(0.15, fetch_next)
+                return
+            end
             logger.warn("bookshelf cover background worker failed to start")
             index = index + 1
             UIManager:scheduleIn(0.1, fetch_next)
