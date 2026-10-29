@@ -316,8 +316,7 @@ function Downloader:_finishJob(dl)
         UIManager:scheduleIn(0.1, function()
             if self._scheduled_start ~= scheduled then return end
             self._scheduled_start = nil
-            if pending.options and (pending.options.prefetch or pending.options.mp_article)
-                and pending.account_id ~= account_id(self.settings) then
+            if pending.account_id ~= account_id(self.settings) then
                 if type(pending.options.on_complete) == "function" then
                     pcall(pending.options.on_complete, false, "account_changed")
                 end
@@ -631,6 +630,15 @@ function Downloader:_sleepInJob(dl, seconds)
     return true
 end
 
+-- Reject an accepted job before another account can issue or receive its work.
+function Downloader:_accountChanged(dl)
+    if dl.account_id and dl.account_id ~= account_id(self.settings) then
+        dl.cancelled, dl.cancel_reason = true, "account_changed"
+        return true
+    end
+    return false
+end
+
 -- Raises a LOW_MEMORY_ERROR when memory does not recover; callers route it to
 -- _stopForLowMemory instead of counting a chapter failure.
 function Downloader:_waitForMemory(dl)
@@ -638,7 +646,7 @@ function Downloader:_waitForMemory(dl)
     if ok then return end
     local previous_title, previous_progress = dl.stage_title, dl.stage_progress
     for attempt, delay in ipairs(MEMORY_WAIT_SCHEDULE) do
-        if dl.cancelled then return end
+        if self:_accountChanged(dl) or dl.cancelled then return end
         logger.warn("download waiting for free memory:",
             "available_kb=", tostring(available),
             "required_kb=", tostring(required),
@@ -648,7 +656,7 @@ function Downloader:_waitForMemory(dl)
         self:_setStage(dl, T(_("Waiting for free memory... %1 MB free, %2 MB needed"),
             kb_to_mb(available), kb_to_mb(required)), previous_progress)
         if not self:_sleepInJob(dl, delay) then break end
-        if dl.cancelled then return end
+        if self:_accountChanged(dl) or dl.cancelled then return end
         ok, available, required = self.memory_gate()
         if ok then
             logger.info("download memory recovered:",
@@ -658,7 +666,7 @@ function Downloader:_waitForMemory(dl)
             return
         end
     end
-    if dl.cancelled then return end
+    if self:_accountChanged(dl) or dl.cancelled then return end
     error(string.format("%s: available_kb=%s required_kb=%s", LOW_MEMORY_ERROR,
         tostring(available), tostring(required)), 0)
 end
@@ -689,14 +697,18 @@ function Downloader:_stopForLowMemory(dl, err)
 end
 
 function Downloader:_runInterruptible(dl, task)
-    if dl.cancelled then return nil end
-    if not dl.trapper then return task() end
+    if self:_accountChanged(dl) or dl.cancelled then return nil end
+    if not dl.trapper then
+        local value = task()
+        if self:_accountChanged(dl) then return nil end
+        return value
+    end
     -- No point forking a worker (and paying its memory) without a link.
     if self.is_connected and not self.is_connected() then
         error(NETWORK_UNAVAILABLE_ERROR, 0)
     end
     self:_waitForMemory(dl)
-    if dl.cancelled then return nil end
+    if self:_accountChanged(dl) or dl.cancelled then return nil end
     local dialog = dl.progress_dialog
     local fingerprint = WorkerSettings.fingerprint(self.settings)
     local prepare_child = self.prepare_worker_child or prepare_worker_child
@@ -707,7 +719,7 @@ function Downloader:_runInterruptible(dl, task)
         return { ok = ok, value = value, auth = auth_result() }
     end, dialog)
     if dialog then dialog.dismiss_callback = nil end
-    if dl.cancelled then return nil end
+    if self:_accountChanged(dl) or dl.cancelled then return nil end
     if not completed then error("could not start download worker") end
     if not result then error("download worker returned no result") end
     if result.auth then WorkerSettings.merge(self.settings, fingerprint, result.auth) end
@@ -723,7 +735,10 @@ end
 function Downloader:_scheduleGuarded(dl, step_fn, delay)
     UIManager:scheduleIn(delay or 0.1, function()
         local function run()
-            local ok, err = xpcall(step_fn, debug.traceback)
+            local ok, err = xpcall(function()
+                if self:_accountChanged(dl) then return self:_stopCancelled(dl) end
+                return step_fn()
+            end, debug.traceback)
             if ok then return end
             logger.err("download step failed:", log_error(err))
             if self._active_job ~= dl and dl.completion_notified then return end
@@ -1505,6 +1520,7 @@ function Downloader:_persistDownloadResult(dl, ok, path, chapter_paths)
 end
 
 function Downloader:_step(dl)
+    self:_accountChanged(dl)
     if dl.cancelled then
         self:_stopCancelled(dl)
         return
