@@ -88,6 +88,9 @@ return function(H)
         wait_done(current)
         H.check(current.result.ok, current.name .. " succeeds", tostring(current.result.value))
         H.equal(#current.job.failed, 0, "no failed chapter")
+        local final = current.job.chapters[current.job.total]
+        H.equal(current.job.book.chapter_uid, final.chapterUid, "parent accepted the final chapter UID")
+        H.equal(current.job.book.chapter_idx, final.chapterIdx, "parent accepted the final chapter index")
     end
     local ok, err = xpcall(function()
         H.step("prepare bounded real HTTP jobs and observe accepted results", function()
@@ -117,6 +120,10 @@ return function(H)
                         H.equal(value.book.reader_url,
                             Protocol.reader_url(book.book_id or book.bookId, job.chapters[job.index].chapterUid),
                             "reused reader URL follows the current chapter")
+                        H.equal(value.book.chapter_uid, job.chapters[job.index].chapterUid,
+                            "returned reader chapter UID follows its URL")
+                        H.equal(value.book.chapter_idx, job.chapters[job.index].chapterIdx,
+                            "returned reader chapter index follows its URL")
                         phase.sources[job.index] = { xhtml = value.xhtml, was_ready = was_ready }
                     end
                     return value

@@ -496,6 +496,18 @@ do
         and client.pages == 1, "accepted session was not reused")
     expect(book.reader_url == "https://weread.qq.com/web/reader/B1k2"
         and content_params[#content_params].ps == "PS1", "reuse lost the current chapter referer or accepted session")
+    local positioned = { book_id = "B1", psvts = "accepted", pclts = "clock", token = "token",
+        chapter_uid = 1, chapter_idx = 1, chapter_offset = 17, progress = 35, summary = "cached summary" }
+    Content.fetch_chapter_xhtml(client, settings, positioned, { chapterUid = 5, chapterIdx = "12" }, options)
+    expect(positioned.chapter_uid == 5 and positioned.chapter_idx == 12 and positioned.chapter_offset == 17,
+        "reused reader metadata did not follow its current catalog chapter")
+    expect(positioned.progress == 35 and positioned.summary == "cached summary" and positioned.psvts == "accepted"
+        and positioned.pclts == "clock" and positioned.token == "token" and client.pages == 1,
+        "catalog metadata update changed cached progress, credentials or reader request count")
+    Content.fetch_chapter_xhtml(client, settings, positioned, { chapterUid = 6, chapterOffset = 0 }, options)
+    expect(positioned.chapter_uid == 6 and positioned.chapter_idx == 12 and positioned.chapter_offset == 0
+        and positioned.progress == 35 and positioned.summary == "cached summary",
+        "catalog metadata update lost missing-index fallback or explicit zero offset")
     Content.fetch_chapter_xhtml(client, settings, book, { chapterUid = 3 })
     Content.fetch_chapter_xhtml(client, settings, book, { chapterUid = 4 }, { reuse_reader_state = false })
     expect(client.pages == 3 and book.psvts == "PS3", "raw/default callers must keep per-chapter refresh")

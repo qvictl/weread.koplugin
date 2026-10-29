@@ -1825,6 +1825,8 @@ function Content.fetch_chapter_xhtml(client, settings, book, chapter, options)
     end
     if chapter and chapter.chapterUid then
         book.reader_url = WeRead.reader_url(book.book_id or book.bookId, chapter.chapterUid)
+        -- Match a fresh reader's catalog position while retaining cached cloud progress.
+        ReaderState.apply_to_book(book, { current_chapter = chapter })
     end
     local ok, value = pcall(fetch_chapter_with_state, client, settings, book, chapter)
     if ok then return value end
