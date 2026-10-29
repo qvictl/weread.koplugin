@@ -172,6 +172,11 @@ for key, value in pairs(Library) do
     if host[key] == nil then host[key] = value end
 end
 
+local Memory = require("weread.lib.memory_gate")
+local read_memory = Memory.read_meminfo
+local function enough_memory() return "MemAvailable: 1048576 kB\n" end
+Memory.read_meminfo = enough_memory
+local succeeded, failure = xpcall(function()
 host:showShelfView("books", nil, nil, {})
 expect(shown[1].data.paged == true, "bookshelf did not enable pagination by default")
 expect(shown[1].data.page_size == 10, "bookshelf used the wrong page size")
@@ -299,6 +304,34 @@ expect(#cover_requests == requests_before_qlogo + 1
         and cover_requests[#cover_requests].url == "https://wx.qlogo.cn/avatar",
     "public-account avatar cover was not upgraded to HTTPS and fetched")
 
+-- Low memory keeps the visible book pending; recovery retries that exact
+-- cover instead of advancing the batch to its end without fetching it.
+do
+    local ui = package.loaded["ui/uimanager"]
+    local schedule = ui.scheduleIn
+    local queued = {}
+    ui.scheduleIn = function(_, _, fn) queued[#queued + 1] = fn end
+    local ok, err = pcall(function()
+        local book = { bookId = "memory-retry", cover = "https://cdn.example/memory-retry" }
+        local view = { page = 1, page_size = 1 }
+        host.shelf_view = view
+        host.shelf_cover_generation = host.shelf_cover_generation + 1
+        local before = #cover_requests
+        Memory.read_meminfo = function() return "MemAvailable: 1 kB\n" end
+        host:fetchVisibleShelfCovers(view, { book }, {})
+        expect(#cover_requests == before and host.shelf_cover_job and #queued == 1,
+            "low-memory cover did not retain a waiting batch")
+        Memory.read_meminfo = enough_memory
+        for _ = 1, 8 do local fn = table.remove(queued, 1); if fn then fn() end end
+        expect(#cover_requests == before + 1 and cached_covers[book]
+            and not host.shelf_cover_job and #queued == 0,
+            "cover was skipped instead of retried after memory recovery")
+    end)
+    Memory.read_meminfo = enough_memory
+    ui.scheduleIn = schedule
+    if not ok then error(err, 0) end
+end
+
 -- Groups are projected once per snapshot and share the existing shelf records.
 local grouped_books = {}
 for index = 1, 30 do grouped_books[index] = { bookId = tostring(index), title = "Group book " .. index } end
@@ -424,5 +457,9 @@ expect(#dialogs == 1, "old shelf cache repeated the upgrade hint before a refres
 host.shelf_group_key = "archive:7"
 host:onWeReadAccountChanged()
 expect(host.shelf_groups == nil and host.shelf_group_key == nil, "account switch retained old groups")
+
+end, debug.traceback)
+Memory.read_meminfo = read_memory
+if not succeeded then error(failure, 0) end
 
 print(("bookshelf_pagination_spec: %d checks"):format(checks))

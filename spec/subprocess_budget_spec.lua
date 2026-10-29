@@ -214,6 +214,46 @@ local ok, err = xpcall(function()
                 "same-account annotation did not retain its original context")
         end
     end
+    -- A replaced annotation callback can synchronously enqueue B on the
+    -- same worker while actual Downloader is accepting chapter request C.
+    replace_module("ui/widget/confirmbox", { new = function(_, value) return value end })
+    replace_module("ui/time", { now = function() return 1000 end })
+    replace_module("weread.ui.download_dialog", {})
+    replace_module("weread.lib.i18n", { tr = function(text) return text end })
+    replace_module("weread.lib.chapter_prefetch_worker", { run = function() error("replaced chapter ran") end })
+    replace_module("weread.lib.downloader", nil)
+    local Downloader = require("weread.lib.downloader")
+    local held = launched + 1
+    start({})
+    local shared = Worker:new{ temp_dir = "/data/workers" }
+    local b_handle, b_ran, completion
+    shared:start{ queue = true, kind = "annotation", task = function() return "A" end,
+        on_done = function(value)
+            expect(value.error == "replaced", "A did not complete as replaced")
+            local accepted_b
+            accepted_b, b_handle = shared:start{ queue = true, kind = "annotation", task = function()
+                b_ran = true; return "B"
+            end }
+            expect(accepted_b, "replacement callback could not accept B")
+        end }
+    local d = Downloader:new{ settings = { get = function(_, key)
+        if key == "account" then return { user_vid = "A" } end
+    end }, client = {}, background_worker = shared }
+    local dl = { account_id = "A", book = { book_id = "A-book" }, chapters = { { chapterUid = 1 } },
+        on_complete = function(ok, value) completion = { ok, value } end }
+    d._active_job = dl
+    local accepted_c = d:_startPrefetchWorker(dl)
+    expect(not accepted_c and completion and not completion[1] and completion[2] == "replaced"
+        and d._active_job == nil and dl.worker_handle == nil,
+        "reentrant replacement left actual Downloader with a completed handle")
+    expect(shared.pending == b_handle, "outer acceptance orphaned the callback's pending request")
+    children[held].task(); children[held].done = true
+    pump(12)
+    expect(launched == held + 1 and shared.job and shared.job.request == b_handle,
+        "orphaned FIFO waiter blocked shared network work")
+    children[launched].task(); children[launched].done = true
+    pump(10)
+    expect(b_ran and not shared:busy() and Budget.available(), "reentrant queued work never completed")
     local subsequent_wait = { keep_waiting = true }
     local co_waiting, waiting_result = start(subsequent_wait)
     local completed_dismiss = subsequent_wait.dismiss_callback

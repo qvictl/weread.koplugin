@@ -41,7 +41,7 @@ package.preload["readcollection"] = function()
     return { coll = { weread = {} } }
 end
 package.preload["weread.lib.logger"] = function()
-    return { info = function() end }
+    return { info = function() end, warn = function() end }
 end
 package.preload["weread.ui.thought_popup"] = function()
     return { closeVisible = function() end }
@@ -442,6 +442,47 @@ do
         "deferred local bookshelf did not open the WeRead collection")
     opener:showWereadCollection()
     expect(#ticks == 2, "local bookshelf could not be opened again")
+end
+
+-- The real connection action distinguishes a dismissed trap from a
+-- rejected worker; neither failure may silently look like cancellation.
+do
+    local names = { "ui/trapper", "weread.lib.subprocess", "weread.lib.mock_environment" }
+    local saved, mode, notices = {}, nil, {}
+    for _, name in ipairs(names) do saved[name] = { value = package.loaded[name] } end
+    package.loaded["ui/trapper"] = { wrap = function(_, fn) fn() end }
+    package.loaded["weread.lib.subprocess"] = { run = function()
+        if mode == "cancel" then return false end
+        if mode == "memory" then return false, nil, "low_memory" end
+        if mode == "unavailable" then return false, "worker_unavailable", "start_failed" end
+        return true, { ok = true, value = "ready" }
+    end }
+    package.loaded["weread.lib.mock_environment"] = {
+        read = function() return { host = "localhost", port = 8080 } end,
+        endpoint = function() return "http://localhost:8080" end,
+    }
+    local ok, err = pcall(function()
+        local probe = setmetatable({ settings = {}, showInfo = function(_, text)
+            notices[#notices + 1] = text
+        end }, { __index = Menu })
+        local action
+        for _, item in ipairs(probe:getMockMenuItems()) do
+            if item.text == "Test connection" then action = item.callback end
+        end
+        expect(action ~= nil, "connection action missing")
+        mode = "cancel"; action()
+        expect(#notices == 0, "user cancellation showed a failure")
+        for _, failure in ipairs({ "memory", "unavailable" }) do
+            mode = failure; action()
+            expect(type(notices[#notices]) == "string" and notices[#notices]:find("Mock connection failed", 1, true),
+                "worker admission failure was silently discarded")
+        end
+        mode = "success"; action()
+        expect(#notices == 3 and notices[3] and notices[3]:find("Mock connection succeeded", 1, true),
+            "successful connection did not report its result")
+    end)
+    for _, name in ipairs(names) do package.loaded[name] = saved[name].value end
+    if not ok then error(err, 0) end
 end
 
 print(string.format(

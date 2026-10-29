@@ -305,13 +305,18 @@ function Worker:start(options)
     local request = { token = self:_token(), options = options }
     if self.job or self.pending then
         if not options.queue then return false, "worker_busy" end
-        if self.pending then
-            local previous = self.pending
-            self.pending = nil
+        local previous = self.pending
+        self.pending = request
+        if previous then
             self:_complete(previous, { ok = false, cancelled = true,
                 error = "replaced" })
+            -- Completion can enqueue again on this shared worker. Preserve
+            -- its new owner and do not hand out an already completed handle.
+            if self.pending ~= request
+                and not (self.job and self.job.request == request) then
+                return false, "replaced"
+            end
         end
-        self.pending = request
         if options.replace_active and self.job
             and self.job.request.options.kind == options.kind then
             self:cancel(self.job.request, "superseded")
