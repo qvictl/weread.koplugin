@@ -100,6 +100,35 @@ class ProbeTests(unittest.TestCase):
                     client.request(url, method=method)
                 opened.assert_not_called()
 
+    def test_reader_scope_accepts_only_canonical_identifier_paths(self):
+        for host in ("weread.qq.com", "i.weread.qq.com"):
+            for path in ("/web/reader/XXXsynthetic", urllib.parse.urlsplit(
+                    protocol.reader_url_for("900001", 2)).path):
+                with self.subTest(host=host, path=path):
+                    probe.check_scope("https://" + host + path, "GET")
+
+    def test_noncanonical_reader_paths_fail_before_network_and_on_redirect(self):
+        client = probe.ScopedClient({"wr_vid": "XXX-id", "wr_skey": "XXX-synthetic"})
+        request = urllib.request.Request("https://weread.qq.com/web/reader/XXX")
+        for suffix in ("", ".", "..", "XXX/extra", "XXX/", "XXX%2fextra", "XXX%5Cextra", "%2e%2e"):
+            target = "https://weread.qq.com/web/reader/" + suffix
+            with self.subTest(suffix=suffix), mock.patch.object(client.opener, "open") as opened:
+                with self.assertRaises(probe.RequestScopeError):
+                    client.request(target)
+                opened.assert_not_called()
+                with self.assertRaises(probe.RequestScopeError):
+                    probe.ScopedRedirect().redirect_request(request, None, 302, "", {}, target)
+
+    def test_local_epub_refuses_noncanonical_reader_reference(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "book.epub"
+            with zipfile.ZipFile(path, "w") as archive:
+                archive.writestr("OEBPS/content.opf", '<metadata xmlns:dc="http://purl.org/dc/elements/1.1/">'
+                                 '<dc:source>https://weread.qq.com/web/reader/XXX%2fextra</dc:source>'
+                                 '</metadata>')
+            with self.assertRaises(probe.ConfigurationError):
+                probe.reader_reference(path)
+
     def test_redirect_cannot_escape_tls_or_allowed_hosts(self):
         request = urllib.request.Request("https://weread.qq.com/web/reader/XXX")
         for target in ["http://weread.qq.com/web/reader/XXX", "https://elsewhere.invalid/web/reader/XXX"]:

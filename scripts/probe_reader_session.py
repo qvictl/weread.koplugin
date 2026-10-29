@@ -56,7 +56,7 @@ def check_scope(url, method):
     if (parsed.scheme != "https" or parsed.hostname not in {"weread.qq.com", "i.weread.qq.com"}
             or parsed.port not in (None, 443) or parsed.username or parsed.password):
         raise RequestScopeError()
-    reader = method == "GET" and parsed.path.startswith("/web/reader/")
+    reader = method == "GET" and re.fullmatch(r"/web/reader/[A-Za-z0-9]+", parsed.path)
     content = method == "POST" and (parsed.path == "/web/book/chapterInfos"
         or re.fullmatch(r"/web/book/chapter/(?:e_[0123]|t_[01])", parsed.path))
     if not reader and not content:
