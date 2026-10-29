@@ -295,8 +295,7 @@ def select(base: str | None, head: str, repo: Path = REPO) -> dict:
     if any(path.startswith(FRAMEWORK) for path in changed):
         manifest["reasons"] = ["test_framework_or_policy_changed"]
         return manifest
-    if any(path.startswith("spec/") and not path.endswith(".lua")
-           and not path.startswith(("spec/emulator/", "spec/koreader/")) for path in changed):
+    if any(path.startswith("spec/") and not path.endswith(".lua") for path in changed):
         manifest["reasons"] = ["unclassified_unit_fixture_changed"]
         return manifest
     if not any(production(path) or path.endswith(".lua")

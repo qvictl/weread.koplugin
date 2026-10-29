@@ -40,7 +40,8 @@ escaped or unclassified module loaders fall back to full UT.
 Runtime consumers conservatively depend on all repository Lua modules because
 injected preload options can use computed keys or come from another function.
 Lua helpers remain in the graph even in an integration directory if unit tests
-load them; opaque non-Lua unit fixtures conservatively run full UT.
+load them; opaque non-Lua spec fixtures conservatively run full UT, including
+fixtures under integration directories that unit tests may also read.
 Unclassified dynamic loaders, framework changes and unmatched production
 changes conservatively run full UT. PRs freeze their event base/head, main
 pushes use `before`, and a manual run without a base uses full UT. Docs/IT-only

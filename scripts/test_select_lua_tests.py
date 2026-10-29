@@ -320,6 +320,18 @@ class SelectionTest(unittest.TestCase):
         self.assertEqual(self.select()["mode"], "full")
         self.assertEqual(self.select()["reasons"], ["unclassified_unit_fixture_changed"])
 
+    def test_unit_data_under_integration_directories_is_not_skipped(self):
+        for path in ("spec/emulator/data.json", "spec/koreader/data.json"):
+            with self.subTest(path=path):
+                self.write("spec/affected_spec.lua", 'local file = assert(io.open("' + path + '", "rb"))\n'
+                           'file:close()\n')
+                self.write(path, '{}\n')
+                base = self.save()
+                self.write(path, '{"changed": true}\n')
+                self.save()
+                self.assertEqual(self.select(base)["mode"], "full")
+                self.assertEqual(self.select(base)["reasons"], ["unclassified_unit_fixture_changed"])
+
     def test_root_metadata_change_selects_its_reader(self):
         self.write("_meta.lua", 'return { version = "1.0" }\n')
         self.write("spec/affected_spec.lua", 'local file = assert(io.open("_meta.lua", "rb"))\nfile:close()\n')
