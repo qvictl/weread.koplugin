@@ -83,6 +83,23 @@ return function(H)
             H.metric("budget_heartbeat_gap_ms", gap)
             H.check(gap < 800, "waiting and cancellation preserve the UI heartbeat", tostring(gap))
         end)
+        H.step("the worker boundary preserves arbitrary image and cover bytes", function()
+            local result
+            local bytes = string.char(0, 255, 128, 13, 10, 34, 92)
+            H.call(function()
+                require("ui/trapper"):wrap(function()
+                    local completed, value = require("weread.lib.subprocess").run(function()
+                        return { cover_data = bytes, assets = { { data = bytes } } }
+                    end, {}, false, { settings = plugin.settings })
+                    result = { completed = completed, value = value }
+                end)
+            end)
+            H.wait_until("binary result delivered to parent", function() return result end, 5)
+            H.check(result.completed, "binary worker completed")
+            H.equal(result.value.cover_data, bytes, "cover bytes round-trip unchanged")
+            H.equal(result.value.assets[1].data, bytes, "image bytes round-trip unchanged")
+            H.check(Budget.available(), "binary result child was reaped")
+        end)
     end, debug.traceback)
     running = false
     H.mock_control({ hold_response = false, match = "", delay = 0, times = 0 })

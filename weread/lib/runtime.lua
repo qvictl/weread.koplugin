@@ -166,6 +166,12 @@ end
 -- workspaces must not be deleted under it.
 function Runtime:recover()
     return self:once("recover", function()
+        if self.prefetch_worker and self.prefetch_worker.recover then
+            local ok, removed, err = pcall(self.prefetch_worker.recover, self.prefetch_worker)
+            if not ok or not removed then
+                logger.warn("stale worker cleanup failed:", tostring(ok and err or removed))
+            end
+        end
         if self.downloader and self.downloader.recover then
             self.downloader:recover()
         end

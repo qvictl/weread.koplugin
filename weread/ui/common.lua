@@ -166,6 +166,13 @@ function M:_runNetworkRequest(busy_text, error_label, task, on_success, on_failu
         return
     end
     local function report(err)
+        local messages = {
+            low_memory = "Not enough free memory. Close the open book and try again.",
+            worker_unavailable = "This operation is unavailable on this device.",
+            worker_no_result = "The operation did not return a result. Please try again.",
+            worker_timeout = "The operation timed out. Please try again.",
+        }
+        if messages[err] then err = _(messages[err]) end
         if on_failure then return on_failure(err, false) end
         logger.warn("annotation request failed:", tostring(error_label), tostring(err))
         self:showInfo(T(_("%1 failed:\n%2"), error_label, display_error(err)))

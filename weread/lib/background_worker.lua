@@ -93,6 +93,7 @@ function Worker:new(options)
     local obj = setmetatable({
         scheduler = options.scheduler or UIManager,
         runner = options.runner or default_runner(),
+        result_codec = options.result_codec,
         temp_dir = assert(options.temp_dir, "worker temp_dir required"),
         min_available_kb = tonumber(options.min_available_kb)
             or DEFAULT_MIN_AVAILABLE_KB,
@@ -123,6 +124,28 @@ function Worker:busy()
     return self.job ~= nil or self.pending ~= nil
 end
 
+-- Called only by process startup recovery. Result files can contain renewed
+-- credentials, so remove interrupted IPC artifacts before accepting new work.
+function Worker:recover()
+    if self:busy() then return nil, "worker_busy" end
+    if lfs.attributes(self.temp_dir, "mode") ~= "directory" then return 0 end
+    local removed = 0
+    for name in lfs.dir(self.temp_dir) do
+        local suffix = name:match("^prefetch%-%d+%-%d+%-%d+%.(.+)$")
+        suffix = suffix and suffix:gsub("%.tmp$", "")
+        if suffix == "progress.json" or suffix == "result.json"
+            or suffix == "result.bin" or suffix == "cancel" then
+            local path = self.temp_dir .. "/" .. name
+            if lfs.attributes(path, "mode") == "file" then
+                local ok, err = os.remove(path)
+                if not ok then return nil, err end
+                removed = removed + 1
+            end
+        end
+    end
+    return removed
+end
+
 function Worker:_token()
     sequence = sequence + 1
     return table.concat({ tostring(self.now()), tostring(sequence),
@@ -141,10 +164,10 @@ function Worker:_schedule()
     self.scheduler:scheduleIn(self.poll_interval, task)
 end
 
-function Worker:_decode(path)
+function Worker:_decode(path, codec)
     local raw = read_file(path)
     if not raw then return nil end
-    local ok, value = pcall(Json.decode, raw)
+    local ok, value = pcall((codec or Json).decode, raw)
     if ok and type(value) == "table" then return value, raw end
 end
 
@@ -201,7 +224,7 @@ function Worker:_launch(request)
 
     local prefix = self.temp_dir .. "/prefetch-" .. request.token
     local progress_path = prefix .. ".progress.json"
-    local result_path = prefix .. ".result.json"
+    local result_path = prefix .. (self.result_codec and ".result.bin" or ".result.json")
     local cancel_path = prefix .. ".cancel"
     local child = function()
         local function cancelled()
@@ -243,7 +266,7 @@ function Worker:_launch(request)
             or { ok = false, cancelled = cancelled_error or nil,
                 error = cancelled_error and "cancelled" or tostring(value),
                 task_token = request.token }
-        local encoded_ok, encoded = pcall(Json.encode, payload)
+        local encoded_ok, encoded = pcall((self.result_codec or Json).encode, payload)
         if encoded_ok then atomic_write(result_path, encoded) end
     end
     local ok, pid, err, reservation = pcall(ForkBudget.run, self.runner, child, request)
@@ -354,7 +377,7 @@ function Worker:_poll()
         self:_schedule()
         return
     end
-    local result = self:_decode(job.result_path)
+    local result = self:_decode(job.result_path, self.result_codec)
     if not result or tostring(result.task_token or "") ~= job.request.token then
         result = { ok = false,
             cancelled = job.cancel_requested_at ~= nil,

@@ -38,6 +38,9 @@ package.preload["json"] = function()
         decode = function(value) return assert(json_values[tonumber(value)]) end,
     }
 end
+-- The codec's actual arbitrary-byte round trip is covered in emulator28.
+-- This spec replaces OS execution and IPC encoding with in-memory tokens.
+package.preload["string.buffer"] = function() return require("json") end
 local Memory = require("weread.lib.memory_gate")
 Memory.read_meminfo = function() return nil end -- unknown memory still permits work.
 local Process = require("weread.lib.subprocess")
@@ -145,6 +148,9 @@ local ok, err = xpcall(function()
     pending_trap.dismiss_callback()
     expect(coroutine.status(co_pending) == "dead" and not pending_result()[1] and launched == 6,
         "cancelling a queued task forked or failed to return")
+    expect(pending_result()[2] == nil and pending_result()[3] == nil
+        and result_a()[2] == nil and result_a()[3] == nil,
+        "queued and running user cancellation returned different failure protocols")
     children[6].task(); children[6].done = true
     pump(10)
     expect(Budget.available() and launched == 6, "cancelled waiter stayed ahead of new work")
@@ -199,6 +205,17 @@ local ok, err = xpcall(function()
             expect(observed and observed.uid == "A" and observed.book == "A-book",
                 "same-account annotation did not retain its original context")
         end
+    end
+    local failed_parent = coroutine.create(function()
+        Process.run(function() return true end, {}, false, { settings = { data_dir = "/data" } })
+        error("synthetic-private-auth")
+    end)
+    expect(coroutine.resume(failed_parent), "failure probe did not start")
+    children[launched].task(); children[launched].done = true
+    pump(10)
+    expect(H.count_logs("warn", "worker parent coroutine failed") == 1, "resume failure was silently dropped")
+    for _, log in ipairs(H.logs) do
+        expect(not log.text:find("synthetic-private-auth", 1, true), "resume failure leaked its error contents")
     end
 end, debug.traceback)
 rawset(io, "open", real_open)
