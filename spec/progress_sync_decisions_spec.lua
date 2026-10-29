@@ -704,118 +704,130 @@ end)
 -- The OS runner and JSON codec are fixtures; ProgressSync, ReadReport,
 -- ForkBudget, Settings' per-book API and BookStore's disk writes are actual.
 test("shared-slot manual retry reloads from Settings and BookStore before a fresh pull", function()
-    local H = require("spec.helpers.read_report_harness")
-    local Budget = require("weread.lib.fork_budget")
-    local encoded = {}
-    local function clone(value)
-        if type(value) ~= "table" then return value end
-        local out = {}
-        for key, item in pairs(value) do out[key] = clone(item) end
-        return out
+    local modules = {}
+    for _, name in ipairs({ "json", "datastorage", "luasettings", "libs/libkoreader-lfs",
+        "weread.lib.book_store", "weread.lib.settings" }) do
+        modules[name] = { preload = package.preload[name], loaded = package.loaded[name] }
+        package.loaded[name] = nil
     end
-    package.preload["json"] = function()
-        return {
-            encode = function(value)
-                encoded[#encoded + 1] = clone(value)
-                return tostring(#encoded)
-            end,
-            decode = function(value) return clone(assert(encoded[tonumber(value)])) end,
-        }
-    end
-    require("weread.lib.book_store")
-    package.preload["datastorage"] = function() return {} end
-    package.preload["luasettings"] = function() return {} end
-    package.preload["libs/libkoreader-lfs"] = function() return {} end
-    local Settings = require("weread.lib.settings")
-    local root = os.tmpname()
-    os.remove(root)
-    root = root .. "-manual-retry"
-    local f = fixture(cloud(50))
-    f.values.books = {}
-    f.values.api_key = "test-key"
-    f.values.account = { user_vid = "42" }
-    f.values.cookies = { wr_vid = "42", wr_skey = "key" }
-    f.values.sync.upload_on_close = false
-    local store = {
-        readSetting = function(_, key, default) return f.values[key] or default end,
-        saveSetting = function(_, key, value) f.values[key] = value end,
-        flush = function() end,
-    }
-    local function settings_instance()
-        return setmetatable({ store = store, cache_dir = root }, Settings)
-    end
-    local settings = settings_instance()
-    settings:put_book("book", f.book)
-    f.sync.settings = settings
-    f.sync.get_book = function(id) return f.sync.settings:get_book(id) end
-    local holder_done, reaped = false, 0
-    local holder = {
-        run = function() return 9001 end,
-        is_done = function()
-            if holder_done then reaped = reaped + 1 end
-            return holder_done
-        end,
-    }
-    local runner = H.runner()
-    local report, env = H.new_report{ settings = settings, subprocess = runner }
-    report.ensure_context = function()
-        return H.ready_book(report, { chapter_uid = 22, chapter_idx = 2,
-            chapter_offset = 150, progress = 25, chapters = chapters })
-    end
-    report.client.web_progress = cloud(50)
-    report.client.progress = { book = cloud(50) }
-    local seen = {}
-    f.upload_result = function(position)
-        seen[#seen + 1] = clone(position)
-        local accepted, outcome = report:upload_position("book", position, 0)
-        if outcome and outcome.error_kind == "pending" and runner.child then
-            runner.finish()
-            runner.done = true
-            env.scheduler:run_next()
+    local case_ok, case_err = xpcall(function()
+        local H = require("spec.helpers.read_report_harness")
+        local Budget = require("weread.lib.fork_budget")
+        local encoded = {}
+        local function clone(value)
+            if type(value) ~= "table" then return value end
+            local out = {}
+            for key, item in pairs(value) do out[key] = clone(item) end
+            return out
         end
-        return accepted, outcome
-    end
-    local memory_ok, memory_err = H.with_memory(function()
-        expect(Budget.run(holder, function() end) == 9001, "unrelated worker owns the slot")
-        f.open()
-        f.choices[1].keep_local()
-        f.drain()
-        eq(#seen, 10, "actual ReadReport reports busy for the bounded retry chain")
-        eq(runner.forks, 0, "busy path never starts an upload child")
-        local pending = settings:get_book("book")
-        eq(pending.pending_upload_reason, "explicit_local_choice", "reason survived real book reload")
-        eq(pending.pending_upload_position.percent, 25, "original choice survived real book reload")
-        local path = root .. "/book/reading_state.json"
-        local file = assert(io.open(path, "rb"))
-        local reading = require("json").decode(file:read("*a")); file:close()
-        expect(reading.pending_upload_owner ~= nil and reading.pending_upload_baselines ~= nil
-            and reading.pending_upload_reason == "explicit_local_choice",
-            "position, owner, baselines and intent share the atomic reading-state file")
-        f.sync:on_close_document()
-        -- A fresh Settings instance has no BookStore cache. Reopening runs
-        -- the actual automatic pull before the strict guarded upload.
-        f.sync.settings = settings_instance()
-        f.document.page = 60
+        package.preload["json"] = function()
+            return {
+                encode = function(value)
+                    encoded[#encoded + 1] = clone(value)
+                    return tostring(#encoded)
+                end,
+                decode = function(value) return clone(assert(encoded[tonumber(value)])) end,
+            }
+        end
+        require("weread.lib.book_store")
+        package.preload["datastorage"] = function() return {} end
+        package.preload["luasettings"] = function() return {} end
+        package.preload["libs/libkoreader-lfs"] = function() return {} end
+        local Settings = require("weread.lib.settings")
+        local root = os.tmpname()
+        os.remove(root)
+        root = root .. "-manual-retry"
+        local f = fixture(cloud(50))
+        f.values.books = {}
+        f.values.api_key = "test-key"
+        f.values.account = { user_vid = "42" }
+        f.values.cookies = { wr_vid = "42", wr_skey = "key" }
+        f.values.sync.upload_on_close = false
+        local store = {
+            readSetting = function(_, key, default) return f.values[key] or default end,
+            saveSetting = function(_, key, value) f.values[key] = value end,
+            flush = function() end,
+        }
+        local function settings_instance()
+            return setmetatable({ store = store, cache_dir = root }, Settings)
+        end
+        local settings = settings_instance()
+        settings:put_book("book", f.book)
+        f.sync.settings = settings
+        f.sync.get_book = function(id) return f.sync.settings:get_book(id) end
+        local holder_done, reaped = false, 0
+        local holder = {
+            run = function() return 9001 end,
+            is_done = function()
+                if holder_done then reaped = reaped + 1 end
+                return holder_done
+            end,
+        }
+        local runner = H.runner()
+        local report, env = H.new_report{ settings = settings, subprocess = runner }
+        report.ensure_context = function()
+            return H.ready_book(report, { chapter_uid = 22, chapter_idx = 2,
+                chapter_offset = 150, progress = 25, chapters = chapters })
+        end
+        report.client.web_progress = cloud(50)
+        report.client.progress = { book = cloud(50) }
+        local seen = {}
+        f.upload_result = function(position)
+            seen[#seen + 1] = clone(position)
+            local accepted, outcome = report:upload_position("book", position, 0)
+            if outcome and outcome.error_kind == "pending" and runner.child then
+                runner.finish()
+                runner.done = true
+                env.scheduler:run_next()
+            end
+            return accepted, outcome
+        end
+        local memory_ok, memory_err = H.with_memory(function()
+            expect(Budget.run(holder, function() end) == 9001, "unrelated worker owns the slot")
+            f.open()
+            f.choices[1].keep_local()
+            f.drain()
+            eq(#seen, 10, "actual ReadReport reports busy for the bounded retry chain")
+            eq(runner.forks, 0, "busy path never starts an upload child")
+            local pending = settings:get_book("book")
+            eq(pending.pending_upload_reason, "explicit_local_choice", "reason survived real book reload")
+            eq(pending.pending_upload_position.percent, 25, "original choice survived real book reload")
+            local path = root .. "/book/reading_state.json"
+            local file = assert(io.open(path, "rb"))
+            local reading = require("json").decode(file:read("*a")); file:close()
+            expect(reading.pending_upload_owner ~= nil and reading.pending_upload_baselines ~= nil
+                and reading.pending_upload_reason == "explicit_local_choice",
+                "position, owner, baselines and intent share the atomic reading-state file")
+            f.sync:on_close_document()
+            -- A fresh Settings instance has no BookStore cache. Reopening runs
+            -- the actual automatic pull before the strict guarded upload.
+            f.sync.settings = settings_instance()
+            f.document.page = 60
+            holder_done = true
+            f.open()
+            eq(runner.forks, 1, "manual request starts after the shared slot is free")
+            eq(reaped, 1, "the prior worker was exactly reaped before admission")
+            eq(seen[11].percent, 25, "restored upload keeps the requested snapshot")
+            eq(seen[11].guard.strict, true, "restored upload has the real strict guard")
+            eq(seen[11].guard.baselines[1].percent, 50, "original baseline reaches ReadReport")
+            eq(#report.client.sent, 1, "actual child pipeline reported in the existing session")
+            eq(report.client.sent[1].chapter_offset, 150, "actual POST uses the original manual chapter offset")
+            eq(f.sync.settings:get_book("book").pending_upload_position, nil,
+                "successful parent apply clears the durable request")
+        end)
         holder_done = true
-        f.open()
-        eq(runner.forks, 1, "manual request starts after the shared slot is free")
-        eq(reaped, 1, "the prior worker was exactly reaped before admission")
-        eq(seen[11].percent, 25, "restored upload keeps the requested snapshot")
-        eq(seen[11].guard.strict, true, "restored upload has the real strict guard")
-        eq(seen[11].guard.baselines[1].percent, 50, "original baseline reaches ReadReport")
-        eq(#report.client.sent, 1, "actual child pipeline reported in the existing session")
-        eq(report.client.sent[1].chapter_offset, 150, "actual POST uses the original manual chapter offset")
-        eq(f.sync.settings:get_book("book").pending_upload_position, nil,
-            "successful parent apply clears the durable request")
-    end)
-    holder_done = true
-    H.finish_runners()
-    Budget.available()
-    for _, name in ipairs({ "metadata", "reading_state", "articles" }) do
-        os.remove(root .. "/book/" .. name .. ".json")
+        H.finish_runners()
+        Budget.available()
+        for _, name in ipairs({ "metadata", "reading_state", "articles" }) do
+            os.remove(root .. "/book/" .. name .. ".json")
+        end
+        os.execute("rmdir '" .. root .. "/book' '" .. root .. "' 2>/dev/null")
+        expect(memory_ok, tostring(memory_err))
+    end, debug.traceback)
+    for name, original in pairs(modules) do
+        package.preload[name], package.loaded[name] = original.preload, original.loaded
     end
-    os.execute("rmdir '" .. root .. "/book' '" .. root .. "' 2>/dev/null")
-    expect(memory_ok, tostring(memory_err))
+    expect(case_ok, tostring(case_err))
 end)
 
 print(string.format("progress_sync_decisions_spec: %d checks passed", checks))
