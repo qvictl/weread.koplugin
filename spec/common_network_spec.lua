@@ -168,4 +168,32 @@ for _, current in ipairs({ "success", "task_error", "cancel", "fork_error", "inv
 end
 eq(merged, 3, "successful worker credentials merged before task/UI error delivery")
 
+-- A UI gate must carry admission ownership through its deferred callback.
+local UIManager = require("ui/uimanager")
+local schedule = UIManager.scheduleIn
+for _, change in ipairs({ "uid", "api_key", "ticket" }) do
+    local queued
+    UIManager.scheduleIn = function(_, _, callback) queued = callback end
+    mode, account.user_vid, gateway_key, link_up = "success", "original", "synthetic-api-one", true
+    local tasks, delivered, cancelled, reason = 0, 0, 0, nil
+    host:runOnlineTask("Book info", function()
+        host:_runNetworkRequest("Loading", "Book info", function() tasks = tasks + 1; return {} end,
+            function() delivered = delivered + 1 end,
+            function(_, was_cancelled, why)
+                eq(was_cancelled, true, "deferred owner rejection is cleanup cancellation")
+                cancelled, reason = cancelled + 1, why
+            end)
+    end)
+    if change == "uid" then account.user_vid = "replacement"
+    elseif change == "api_key" then gateway_key = "synthetic-api-two"
+    else host.settings.wr_ticket = "rotated" end
+    queued()
+    eq(tasks, change == "ticket" and 1 or 0, change .. " deferred task admission")
+    eq(delivered, tasks, change .. " no stale parent publication")
+    eq(cancelled, change == "ticket" and 0 or 1, change .. " cleanup exactly once")
+    eq(reason, change ~= "ticket" and "account_changed" or nil, change .. " cancellation reason")
+    eq(host._network_task_owner, nil, "temporary admission context restored")
+end
+UIManager.scheduleIn = schedule
+
 print(string.format("common_network_spec: %d checks", checks))

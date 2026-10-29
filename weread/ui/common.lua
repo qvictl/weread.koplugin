@@ -137,8 +137,14 @@ function M:runOnlineTask(label, callback, delay, options)
         end
         return false
     end
+    local owner = RequestOwner.capture(self.settings)
     UIManager:scheduleIn(delay or 0.1, function()
+        -- Pass admission ownership into immediate request adapters, including
+        -- their cancellation cleanup, rather than adopting a later account.
+        local previous = self._network_task_owner
+        self._network_task_owner = owner
         local ok, err = xpcall(callback, debug.traceback)
+        self._network_task_owner = previous
         if not ok then
             self:closeBusy()
             logger.err("network task failed:", label, log_error(err))
@@ -154,7 +160,11 @@ end
 -- the parent with the task's result; failures are reported with error_label.
 -- Refuse to run network tasks when the runtime cannot provide a worker.
 function M:_runNetworkRequest(busy_text, error_label, task, on_success, on_failure)
-    local original_owner = RequestOwner.capture(self.settings)
+    local original_owner = self._network_task_owner or RequestOwner.capture(self.settings)
+    if not RequestOwner.matches(self.settings, original_owner) then
+        if on_failure then on_failure(nil, true, "account_changed") end
+        return
+    end
     local function report(err)
         if on_failure then return on_failure(err, false) end
         logger.warn("annotation request failed:", tostring(error_label), tostring(err))

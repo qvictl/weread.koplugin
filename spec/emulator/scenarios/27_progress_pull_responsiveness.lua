@@ -158,13 +158,21 @@ return function(H)
         end)
         marker(345)
         local before = H.mock_state().started_counts["/book/getprogress"] or 0
+        local detail_before = H.mock_state().started_counts["/book/info"] or 0
+        local detail_updated = plugin.settings:get_book("900001").detail_updated_at
         local ok, err = xpcall(function()
             H.call(function()
                 plugin.settings:update_auth({ cookies = {}, api_key = "mock-owner-api-one" }, { replace_cookies = true })
                 sync:sync_now()
+                plugin:refreshBookRecord(plugin.settings:get_book("900001"))
                 plugin.settings:update_auth({ api_key = "mock-owner-api-two" })
             end)
-            H.wait_until("deferred old request rejected", function() return not sync.pulling end, 5)
+            H.wait_until("deferred old requests rejected and busy cleaned", function()
+                return not sync.pulling and plugin.busy_message == nil
+            end, 5)
+            H.equal(H.mock_state().started_counts["/book/info"] or 0, detail_before, "old detail request never starts")
+            H.equal(plugin.settings:get_book("900001").detail_updated_at, detail_updated,
+                "old detail result never publishes under new gateway")
             H.equal(H.mock_state().started_counts["/book/getprogress"] or 0, before, "old gateway request never starts")
             H.equal(plugin.settings:get_book("900001").last_pull_at, 345, "defer rejection does not persist")
         end, debug.traceback)

@@ -1663,6 +1663,10 @@ test("transport and parent exceptions release state and permit retry", function(
     eq(f.sync.pulling, false, "parent exception releases lock")
     eq(f.sync.state, "error", "parent exception records error")
     eq(f.notifications[#f.notifications].code, "pull_failed", "parent error visible")
+    eq(f.notifications[#f.notifications].data.error:find("stack traceback", 1, true), nil,
+        "parent traceback stays out of the user notice")
+    eq(f.notifications[#f.notifications].data.error:find("parent disk failure", 1, true) ~= nil, true,
+        "parent error first line stays visible")
     f.sync.settings.flush = flush; f.sync:sync_now(); complete(pending[2])
     eq(f.sync.verified, true, "retry succeeds")
     f = async_fixture({ request = function() error("transport unavailable") end })

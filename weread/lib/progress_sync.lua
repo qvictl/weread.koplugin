@@ -1199,7 +1199,9 @@ function ProgressSync:_pull(options)
             if not ok then
                 release()
                 self.state = "error"
-                if options.manual then self.notify("pull_failed", { error = tostring(err) })
+                log("warn", "progress pull callback failed:", tostring(err))
+                local message = tostring(err):match("^[^\n]*") or "pull_failed"
+                if options.manual then self.notify("pull_failed", { error = message })
                 else self:_schedule_pull_retry(options, retry_token) end
             end
         end
