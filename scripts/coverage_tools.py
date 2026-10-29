@@ -9,12 +9,12 @@ with all their executable lines missed (`merge --all-files`).
     coverage_tools.py merge --out coverage/unit.stats.out --all-files coverage/parts
     # line report (needs LuaCov on LUA_PATH and luajit)
     coverage_tools.py report coverage/unit.stats.out coverage/unit.report.out
-    # PR gate: diff unit, diff combined, overall ratchet, dated targets. The
-    # ratchet compares with main's coverage at merge-base(base, head) (for a
-    # PR merge commit: its first parent) taken from history.jsonl, falling
-    # back to the nearest ancestor with a record, then the day-one baseline.
-    coverage_tools.py gate --unit coverage/unit.report.out --combined coverage/combined.report.out \
-        --base origin/main --labels "a,b" --history history.jsonl --summary out.md --json out.json
+    # PR unit gate against its own merge-base and nearest unit history record.
+    coverage_tools.py gate --mode unit --unit coverage/unit.report.out --base origin/main --history history.jsonl
+    # Release combined gate over all unreleased changes since the last genuine
+    # combined ancestor. The overall ratchet also includes this candidate.
+    coverage_tools.py gate --mode release --unit coverage/unit.report.out --combined coverage/combined.report.out \
+        --base origin/main --history history.jsonl --summary out.md --json out.json
     # main: history record (keyed by SHA), baseline.json and badges for the coverage branch
     coverage_tools.py baseline --unit ... --combined ... --sha SHA --out-dir DIR
     # quick totals / single diff
@@ -33,7 +33,7 @@ import re
 import subprocess
 import sys
 
-REPO = Path(__file__).resolve().parent.parent
+REPO = Path(os.environ.get("COVERAGE_REPO", Path(__file__).resolve().parent.parent)).resolve()
 POLICY = REPO / ".ci/coverage-policy.json"
 TRACKED = re.compile(r"^(main\.lua|weread/.+\.lua|integrations/.+\.lua)$")
 EXEMPT_DIFF_LABELS = ("no-tests-needed", "upstream-sync")
@@ -180,8 +180,8 @@ def parse_report(path: Path) -> dict:
 # ------------------------------------------------------------------ diff
 
 
-def changed_lines(base: str, head: str) -> dict:
-    merge_base = git_merge_base(base, head)
+def changed_lines(base: str, head: str, direct=False) -> dict:
+    merge_base = base if direct else git_merge_base(base, head)
     diff = subprocess.check_output(["git", "diff", "-U0", "--no-color", "--diff-filter=AM", merge_base, head, "--",
                                     "main.lua", "weread", "integrations"], cwd=REPO, text=True)
     result: dict = {}
@@ -298,14 +298,14 @@ def module_floor_misses(report_cov: dict, pattern: str, minimum: float) -> list:
     return sorted(misses, key=lambda item: (item[1], item[0]))
 
 
-def target_checks(policy: dict, today, o_unit: dict, o_comb, unit_cov: dict) -> list:
+def target_checks(policy: dict, today, o_unit: dict, o_comb, unit_cov: dict, mode="release") -> list:
     """(name, ok, blocking, detail) per dated target; report-only before its date, blocking from it."""
     checks = []
     for target in effective_targets(policy):
         active = today >= dt.date.fromisoformat(target["date"])
         title = f"Target {target['label'] or target['date']}"
         suffix = "" if active else f" (report-only until {target['date']})"
-        if "combined" in target:
+        if "combined" in target and mode == "release":
             minimum = target["combined"]
             value = o_comb["percent"] if o_comb is not None else None
             checks.append((f"{title}: overall unit + emulator ≥ {minimum['effective']:.2f}%{suffix}",
@@ -334,17 +334,63 @@ def fmt_pct(value) -> str:
     return "n/a" if value is None else f"{value:.2f}%"
 
 
-def read_history(path) -> list:
-    """Records of history.jsonl (one per measured main commit); unreadable lines are skipped."""
+def validate_release_checks(checks):
+    if not isinstance(checks, dict):
+        raise ValueError("release checks must be a run/attempt map")
+    for run_id, check in checks.items():
+        if (not isinstance(run_id, str) or not run_id.isdigit() or int(run_id) <= 0
+                or not isinstance(check, dict) or type(check.get("attempt")) is not int or check["attempt"] <= 0):
+            raise ValueError("invalid release run/attempt watermark")
+        if "sha" in check or "combined" in check:
+            if (not isinstance(check.get("sha"), str) or not re.fullmatch(r"[0-9a-f]{40}", check["sha"])
+                    or type(check.get("combined")) not in (int, float) or not 0 <= check["combined"] <= 100):
+                raise ValueError("invalid accepted release floor")
+    return checks
+
+
+def merge_release_checks(*maps):
+    merged = {}
+    for checks in maps:
+        for run_id, check in validate_release_checks(checks).items():
+            old = merged.get(run_id, {})
+            if old.get("sha") and check.get("sha") and old["sha"] != check["sha"]:
+                raise ValueError("a release run cannot change its measured source")
+            value = dict(old, attempt=max(old.get("attempt", 0), check["attempt"]))
+            if "sha" in check:
+                value.update(sha=check["sha"], combined=max(old.get("combined", 0), check["combined"]))
+            merged[run_id] = value
+    return merged
+
+
+def read_history(path, strict=False) -> list:
+    """Keep legacy unit-history tolerance; release history must be complete."""
     records = []
-    if path and Path(path).is_file():
-        for line in Path(path).read_text(encoding="utf-8").splitlines():
-            try:
-                record = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(record, dict) and record.get("sha"):
-                records.append(record)
+    if not path or not Path(path).is_file():
+        if strict:
+            raise ValueError("coverage history is missing")
+        return records
+    for line in Path(path).read_text(encoding="utf-8").splitlines():
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            if strict:
+                raise ValueError("coverage history contains malformed JSON")
+            continue
+        if strict:
+            valid = (isinstance(record, dict)
+                     and isinstance(record.get("sha"), str)
+                     and re.fullmatch(r"[0-9a-f]{40}", record["sha"]))
+            for metric in ("unit", "combined") if isinstance(record, dict) and "combined" in record else ("unit",):
+                value = record.get(metric) if isinstance(record, dict) else None
+                percent = value.get("percent") if isinstance(value, dict) else None
+                valid = valid and type(percent) in (int, float) and 0 <= percent <= 100
+            if not valid:
+                raise ValueError("coverage history contains an invalid measurement")
+            validate_release_checks(record.get("release_checks", {}))
+        if isinstance(record, dict) and record.get("sha"):
+            records.append(record)
+    if strict and not records:
+        raise ValueError("coverage history is empty")
     return records
 
 
@@ -352,19 +398,22 @@ def git_merge_base(base: str, head: str, cwd=REPO) -> str:
     return subprocess.check_output(["git", "merge-base", base, head], cwd=cwd, text=True).strip()
 
 
-def git_ancestors(sha: str, cwd=REPO, limit: int = 5000) -> list:
-    """sha itself, then its ancestors, nearest first (empty if git cannot resolve it)."""
+def git_ancestors(sha: str, cwd=REPO, limit: int = 5000, strict=False) -> list:
+    """Walk ancestors; release gates fail closed on unreadable Git history."""
     if not sha:
         return []
     try:
-        out = subprocess.check_output(["git", "rev-list", f"--max-count={limit}", sha, "--"],
+        limit_args = [f"--max-count={limit}"] if limit is not None else []
+        out = subprocess.check_output(["git", "rev-list", *limit_args, sha, "--"],
                                       cwd=cwd, text=True, stderr=subprocess.DEVNULL)
     except subprocess.CalledProcessError:
+        if strict:
+            raise
         return [sha]
     return out.split() or [sha]
 
 
-def select_baseline(records: list, base_sha: str, ancestors: list):
+def select_baseline(records: list, base_sha: str, ancestors: list, kind="unit"):
     """Main's coverage record for the commit a PR is measured against.
 
     Returns (record, match): match is "exact" when base_sha itself has a record,
@@ -373,7 +422,8 @@ def select_baseline(records: list, base_sha: str, ancestors: list):
     "none" (record None) when no ancestor has one. When a SHA was published more
     than once the last record wins.
     """
-    by_sha = {record["sha"]: record for record in records}
+    by_sha = {record["sha"]: record for record in records
+              if isinstance(record.get(kind), dict) and "percent" in record[kind]}
     for index, sha in enumerate(ancestors or ([base_sha] if base_sha else [])):
         if sha in by_sha:
             return by_sha[sha], ("exact" if index == 0 else "ancestor")
@@ -411,20 +461,56 @@ def ratchet_checks(policy: dict, o_unit: dict, o_comb, baseline, match: str, bas
 
 def gate(args) -> int:
     policy = load_policy()
+    mode = getattr(args, "mode", "unit")
+    if mode in ("unit", "diff") and args.combined:
+        raise ValueError("combined coverage requires --mode release")
+    selection = check_selection(args)
+    if mode == "diff" and selection is None:
+        raise ValueError("diff coverage requires a validated test selection manifest")
+    if mode != "diff" and selection and selection["mode"] != "full":
+        raise ValueError("whole-plugin coverage requires the full unit suite")
     labels = {label.strip() for label in (args.labels or "").split(",") if label.strip()}
     exempt = sorted(labels.intersection(EXEMPT_DIFF_LABELS))
     today = dt.date.fromisoformat(args.today) if args.today else dt.date.today()
     unit_cov = parse_report(Path(args.unit))
     combined_cov = parse_report(Path(args.combined)) if args.combined and Path(args.combined).is_file() else None
-    changes = changed_lines(args.base, args.head)
+    records = [] if mode == "diff" else read_history(args.history, strict=(mode == "release"))
+    combined_baseline = None
+    combined_diff_baseline = None
+    if mode == "diff":
+        base_sha = args.base_sha or git_merge_base(args.base, args.head)
+        if selection["base_sha"] != base_sha:
+            raise ValueError("coverage diff base differs from test selection")
+        baseline, match, diff_base = None, None, base_sha
+        changes = changed_lines(base_sha, args.head, direct=True)
+    elif mode == "release":
+        # A version commit or a repeated candidate validation must cover the
+        # entire batch since the previous authentic combined measurement.
+        ancestors = git_ancestors(args.head, limit=None, strict=True)
+        previous = ancestors[1:]
+        base_sha = ancestors[0]
+        baseline, match = select_baseline(records, base_sha, ancestors)
+        combined_baseline, _ = select_baseline(records, base_sha, ancestors, "combined")
+        combined_diff_baseline, _ = select_baseline(records, "", previous, "combined")
+        if combined_diff_baseline:
+            diff_base = combined_diff_baseline["sha"]
+        else:
+            # First release: all production code must meet the combined diff
+            # floor. There is no invented measurement for a prior commit.
+            diff_base = subprocess.check_output(
+                ["git", "hash-object", "-t", "tree", "-w", "--stdin"],
+                input="", cwd=REPO, text=True).strip()
+        changes = changed_lines(diff_base, args.head, direct=True)
+    else:
+        ancestors = git_ancestors(args.base_sha or git_merge_base(args.base, args.head))
+        base_sha = ancestors[0]
+        baseline, match = select_baseline(records, base_sha, ancestors)
+        diff_base = git_merge_base(args.base, args.head)
+        changes = changed_lines(args.base, args.head)
     d_unit = diff_stats(unit_cov, changes)
     d_comb = diff_stats(combined_cov, changes) if combined_cov is not None else None
-    o_unit = overall(unit_cov)
+    o_unit = None if mode == "diff" else overall(unit_cov)
     o_comb = overall(combined_cov) if combined_cov is not None else None
-    records = read_history(args.history)
-    ancestors = git_ancestors(args.base_sha or git_merge_base(args.base, args.head))
-    base_sha = ancestors[0]
-    baseline, match = select_baseline(records, base_sha, ancestors)
     checks = []  # (name, ok, blocking, detail)
 
     def add(name, ok, blocking, detail):
@@ -432,34 +518,54 @@ def gate(args) -> int:
 
     unit_min = float(policy["diff_unit_min"])
     comb_min = float(policy["diff_combined_min"])
-    add(f"Diff coverage, unit specs ≥ {unit_min:.0f}%",
-        d_unit["executable"] == 0 or d_unit["percent"] >= unit_min, not exempt,
-        f"{d_unit['percent']:.1f}% ({d_unit['covered']}/{d_unit['executable']} changed executable lines)")
-    if d_comb is None:
-        add(f"Diff coverage, unit + emulator ≥ {comb_min:.0f}%", False, not exempt,
-            "emulator coverage unavailable (Integration run missing or failed)")
+    if mode in ("unit", "diff"):
+        add(f"Diff coverage, unit specs ≥ {unit_min:.0f}%",
+            d_unit["executable"] == 0 or d_unit["percent"] >= unit_min, not exempt,
+            f"{d_unit['percent']:.1f}% ({d_unit['covered']}/{d_unit['executable']} changed executable lines)")
+    elif d_comb is None or not o_comb["executable"]:
+        add("Authentic release combined coverage is available", False, True,
+            "release requires unit + real emulator coverage; no unit-only fallback")
     else:
         add(f"Diff coverage, unit + emulator ≥ {comb_min:.0f}%",
-            d_comb["executable"] == 0 or d_comb["percent"] >= comb_min, not exempt,
-            f"{d_comb['percent']:.1f}% ({d_comb['covered']}/{d_comb['executable']})")
-    ratchet = ratchet_checks(policy, o_unit, o_comb, baseline, match, base_sha)
+            d_comb["executable"] == 0 or d_comb["percent"] >= comb_min, True,
+            f"{d_comb['percent']:.1f}% ({d_comb['covered']}/{d_comb['executable']}); diff from {diff_base[:8]}")
+    ratchet = (dict(checks=[], unit=None, combined=None, source=None) if mode == "diff"
+               else ratchet_checks(policy, o_unit, None, baseline, match, base_sha))
     for name, ok, blocking, detail in ratchet["checks"]:
         add(name, ok, blocking, detail)
-    for name, ok, blocking, detail in target_checks(policy, today, o_unit, o_comb, unit_cov):
-        add(name, ok, blocking, detail)
+    combined_floor = policy["day_one_baseline"]["combined"]
+    if combined_baseline:
+        combined_floor = combined_baseline["combined"]["percent"]
+    if mode == "release":
+        proofs = merge_release_checks(*(record.get("release_checks", {}) for record in records))
+        combined_floor = max([combined_floor, *(proof["combined"] for proof in proofs.values()
+                                                if proof.get("sha") in ancestors)])
+    if mode == "release" and o_comb is not None:
+        add("Overall unit + emulator coverage does not drop (ratchet)",
+            o_comb["percent"] + float(policy.get("ratchet_tolerance_pp", 0)) >= combined_floor, True,
+            f"{fmt_pct(o_comb['percent'])} vs {fmt_pct(combined_floor)}; nearest real combined record "
+            + (combined_baseline["sha"][:8] if combined_baseline else "none (day-one floor)"))
+    if mode != "diff":
+        for name, ok, blocking, detail in target_checks(policy, today, o_unit, o_comb, unit_cov, mode):
+            add(name, ok, blocking, detail)
 
     failed_blocking = [c for c in checks if c["blocking"] and not c["ok"]]
-    md = [f"### Coverage: {'✅ pass' if not failed_blocking else '❌ fail'}", ""]
+    md = [f"### Coverage ({mode}): {'✅ pass' if not failed_blocking else '❌ fail'}", ""]
     md += ["| Check | Result | Blocking | Detail |", "| --- | --- | --- | --- |"]
     for c in checks:
         md.append(f"| {c['name']} | {'✅' if c['ok'] else '❌'} | {'yes' if c['blocking'] else 'no'} | {c['detail']} |")
-    if exempt:
-        md += ["", f"Diff-coverage gates waived by label `{exempt[0]}`; ratchet and active targets still apply."]
-    md += ["", f"Overall: unit {fmt_pct(o_unit['percent'])} ({o_unit['covered']}/{o_unit['executable']} lines, "
-               f"{o_unit['files']} files)"
-           + (f" · unit + emulator {fmt_pct(o_comb['percent'])} ({o_comb['covered']}/{o_comb['executable']})"
-              if o_comb else "")]
-    history = records[-8:]
+    if exempt and mode in ("unit", "diff"):
+        md += ["", f"Diff-coverage gates waived by label `{exempt[0]}`."
+               + (" Ratchet and active targets still apply." if mode == "unit" else "")]
+    if mode == "diff":
+        md += ["", f"Unit selection: {selection['mode']}, {len(selection['tests'])}/{selection['total_tests']} specs.",
+               "Whole-plugin coverage and its baseline were not measured; they are release gates."]
+    else:
+        md += ["", f"Overall: unit {fmt_pct(o_unit['percent'])} ({o_unit['covered']}/{o_unit['executable']} lines, "
+                   f"{o_unit['files']} files)"
+               + (f" · unit + emulator {fmt_pct(o_comb['percent'])} ({o_comb['covered']}/{o_comb['executable']})"
+                  if o_comb else "")]
+    history = [record for record in records if record.get("combined")][-8:]
     if history:
         trend = " → ".join(f"{h['combined']['percent']:.1f}" for h in history if h.get("combined"))
         md += ["", f"Trend on main (unit + emulator, last {len(history)}): {trend}"]
@@ -482,12 +588,33 @@ def gate(args) -> int:
     if args.json:
         Path(args.json).write_text(json.dumps(dict(
             checks=checks, diff_unit=d_unit, diff_combined=d_comb, overall_unit=o_unit, overall_combined=o_comb,
-            baseline_unit=ratchet["unit"], baseline_combined=ratchet["combined"],
+            mode=mode, diff_base=diff_base, measured_sha=base_sha if mode == "release" else None,
+            run_id=int(os.environ.get("GITHUB_RUN_ID", "0")),
+            run_attempt=int(os.environ.get("GITHUB_RUN_ATTEMPT", "0")),
+            baseline_unit=ratchet["unit"], baseline_combined=combined_floor if mode == "release" else None,
+            combined_baseline_sha=combined_baseline["sha"] if combined_baseline else None,
+            combined_diff_baseline_sha=combined_diff_baseline["sha"] if combined_diff_baseline else None,
             baseline_sha=baseline.get("sha") if baseline else None, baseline_match=match, base_sha=base_sha,
             passed=not failed_blocking),
             ensure_ascii=False, indent=2), encoding="utf-8")
     print(text)
     return 0 if not failed_blocking else 1
+
+
+def check_selection(args):
+    """A partial report must never become a whole-plugin gate or history row."""
+    explicit = getattr(args, "selection_manifest", None)
+    path = Path(explicit) if explicit else Path(args.unit).parent / "test-selection.json"
+    if not explicit and not path.is_file():
+        return None  # Legacy/local full runners predate selection manifests.
+    from select_lua_tests import validate
+    manifest = json.loads(path.read_text())
+    validate(manifest, REPO)
+    expected = getattr(args, "sha", None) or subprocess.check_output(
+        ["git", "rev-parse", args.head], cwd=REPO, text=True)
+    if manifest["head_sha"] != expected.strip():
+        raise ValueError("coverage report target differs from test selection")
+    return manifest
 
 
 def target_summary(target: dict) -> str:
@@ -530,34 +657,85 @@ def is_newest_publish(baseline_path: Path, sha: str, cwd=REPO) -> bool:
 
 
 def baseline(args) -> int:
+    if not isinstance(args.sha, str) or not re.fullmatch(r"[0-9a-f]{40}", args.sha):
+        raise ValueError("coverage publication requires an exact commit SHA")
+    selection = check_selection(args)
+    if selection and selection["mode"] != "full":
+        raise ValueError("partial unit coverage cannot update history or badges")
+    policy = load_policy()
+    tolerance = float(policy.get("ratchet_tolerance_pp", 0))
     unit = overall(parse_report(Path(args.unit)))
-    combined = overall(parse_report(Path(args.combined)))
+    combined = overall(parse_report(Path(args.combined))) if args.combined else None
     now = dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat()
-    record = dict(sha=args.sha, date=now, unit=unit, combined=combined, run=args.run_url or "")
+    record = dict(sha=args.sha, date=now, unit=unit, run=args.run_url or "")
+    if combined is not None:
+        record["combined"] = combined
     out = Path(args.out_dir)
+    history_path = out / "history.jsonl"
+    previous = read_history(history_path, strict=history_path.exists())
+    if any(not isinstance(entry.get("date"), str) or not entry["date"] for entry in previous):
+        raise ValueError("coverage history contains an invalid publication date")
+    ancestors = git_ancestors(args.sha, limit=None, strict=True)
+    unit_baseline, _match = select_baseline(previous, args.sha, ancestors)
+    unit_floor = unit_baseline["unit"]["percent"] if unit_baseline else policy["day_one_baseline"]["unit"]
+    if unit["percent"] + tolerance < unit_floor:
+        raise ValueError("publication would lower the full-unit coverage ratchet")
+    checks_path = getattr(args, "release_checks", None)
+    checks = validate_release_checks(json.loads(Path(checks_path).read_text())) if checks_path else {}
+    publication_attempt = getattr(args, "publication_attempt", None)
+    if publication_attempt is not None:
+        run_id = (args.run_url or "").rstrip("/").split("/")[-1]
+        own = checks.get(run_id, {})
+        if (publication_attempt <= 0 or own.get("sha") != args.sha or combined is None
+                or own.get("combined", -1) < combined["percent"]
+                or combined["percent"] + tolerance < own.get("combined", 101)):
+            raise ValueError("persistence retry does not match the accepted release")
+        checks[run_id] = dict(own, attempt=max(own["attempt"], publication_attempt))
+    all_checks = merge_release_checks(*(entry.get("release_checks", {}) for entry in previous), checks)
+    for check in all_checks.values():
+        if combined is not None and check.get("sha") == args.sha and combined["percent"] + tolerance < check["combined"]:
+            raise ValueError("publication would erase a durable accepted release floor")
+    existing = next((entry for entry in reversed(previous) if entry["sha"] == args.sha), None)
+    if combined is None and existing and existing.get("combined"):
+        record = existing  # A late unit publisher cannot erase a true combined measurement.
+    merged_checks = merge_release_checks(existing.get("release_checks", {}) if existing else {}, checks)
+    if merged_checks:
+        record["release_checks"] = merged_checks
+    entries = [entry for entry in previous if entry["sha"] != args.sha] + [record]
     out.mkdir(parents=True, exist_ok=True)
-    entries = [entry for entry in read_history(out / "history.jsonl") if entry["sha"] != args.sha] + [record]
     (out / "history.jsonl").write_text("".join(json.dumps(entry) + "\n" for entry in entries), encoding="utf-8")
     if is_newest_publish(out / "baseline.json", args.sha):
         (out / "baseline.json").write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
-        (out / "badge.json").write_text(json.dumps(dict(
-            schemaVersion=1, label="coverage", message=f"{combined['percent']:.1f}%",
-            color=badge_color(combined["percent"]))) + "\n", encoding="utf-8")
         (out / "badge-unit.json").write_text(json.dumps(dict(
-            schemaVersion=1, label="unit coverage", message=f"{unit['percent']:.1f}%",
-            color=badge_color(unit["percent"]))) + "\n", encoding="utf-8")
+            schemaVersion=1, label="unit coverage", message=f"{record['unit']['percent']:.1f}%",
+            color=badge_color(record["unit"]["percent"]))) + "\n", encoding="utf-8")
     else:
         print(f"{args.sha[:8]} is older than the published baseline.json; history only")
+    # Keep the combined badge on the nearest authentic measurement, even
+    # when a release finishes after a newer main unit-only record.
+    try:
+        visible = json.loads((out / "baseline.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        visible = None
+    if visible:
+        measured, _ = select_baseline(entries, visible["sha"], git_ancestors(visible["sha"], limit=None), "combined")
+        if measured:
+            value = measured["combined"]["percent"]
+            (out / "badge.json").write_text(json.dumps(dict(
+                schemaVersion=1, label="release coverage", message=f"{value:.1f}%",
+                color=badge_color(value))) + "\n", encoding="utf-8")
     policy = load_policy()
     lines = ["# Coverage history (main)", "",
-             "Generated by the *Coverage* workflow after every successful `Integration` run on `main`. "
+             "Whole coverage comes from full Release measurements or manual full backfills; partial CI never publishes it. "
+             "A dash means no emulator measurement for that commit. "
              "Scope: `main.lua`, `weread/`, `integrations/`. Policy: `.ci/coverage-policy.json` on main.", "",
              "Targets: " + "; ".join(target_summary(t) for t in effective_targets(policy)), "",
              "| Date (UTC) | Commit | Unit | Unit + emulator | Run |", "| --- | --- | --- | --- | --- |"]
     for entry in reversed(entries[-100:]):
         run = f"[run]({entry['run']})" if entry.get("run") else ""
+        measured = f"{entry['combined']['percent']:.2f}%" if entry.get("combined") else "—"
         lines.append(f"| {entry['date']} | `{entry['sha'][:8]}` | {entry['unit']['percent']:.2f}% "
-                     f"| {entry['combined']['percent']:.2f}% | {run} |")
+                     f"| {measured} | {run} |")
     (out / "README.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
     print(json.dumps(record, indent=2))
     return 0
@@ -581,6 +759,7 @@ def main() -> int:
     p = sub.add_parser("total")
     p.add_argument("report")
     p = sub.add_parser("gate")
+    p.add_argument("--mode", choices=("unit", "diff", "release"), default="unit")
     p.add_argument("--unit", required=True)
     p.add_argument("--combined")
     p.add_argument("--base", required=True)
@@ -592,12 +771,16 @@ def main() -> int:
     p.add_argument("--today")
     p.add_argument("--summary")
     p.add_argument("--json")
+    p.add_argument("--selection-manifest", help="validated affected-test manifest; required for diff mode")
     p = sub.add_parser("baseline")
     p.add_argument("--unit", required=True)
-    p.add_argument("--combined", required=True)
+    p.add_argument("--combined", help="authentic release report; omit for unit-only main records")
     p.add_argument("--sha", required=True)
     p.add_argument("--run-url")
+    p.add_argument("--publication-attempt", type=int, help="acknowledge the persistence retry without rerunning tests")
+    p.add_argument("--release-checks", help="durable checked run/attempt watermarks from the accepted gate")
     p.add_argument("--out-dir", required=True)
+    p.add_argument("--selection-manifest", help="full-suite manifest; selected/none reports cannot be published")
     args = parser.parse_args()
     return dict(merge=merge, report=report, diff=diff, total=total, gate=gate, baseline=baseline)[args.command](args)
 

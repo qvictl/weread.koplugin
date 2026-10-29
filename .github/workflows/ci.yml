@@ -24,6 +24,26 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Select affected Lua specs
+        env:
+          EVENT: ${{ github.event_name }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          base=""
+          if [[ "$EVENT" == "pull_request" ]]; then
+            base="$(git merge-base HEAD "$PR_BASE")"
+          elif [[ "$EVENT" == "push" ]]; then
+            base="$PUSH_BEFORE"
+          fi
+          python3 scripts/select_lua_tests.py --base "$base" --head HEAD --out "$RUNNER_TEMP/unit-selection.json"
+          cat "$RUNNER_TEMP/unit-selection.json" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Install Lua tooling
         run: |
@@ -49,7 +69,14 @@ jobs:
             done
 
       - name: Lua unit and component specs
-        run: bash scripts/run_lua_specs.sh
+        run: bash scripts/run_lua_specs.sh --manifest "$RUNNER_TEMP/unit-selection.json"
+
+      - name: Upload selected test manifest
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: unit-test-selection
+          path: ${{ runner.temp }}/unit-selection.json
 
   python:
     name: Python scripts and mock service
@@ -62,13 +89,8 @@ jobs:
       - name: Python syntax check
         run: python3 -m py_compile scripts/*.py
 
-      - name: Offline mock service contract
-        run: python3 scripts/test_mock_weread.py
-
-      - name: Coverage tooling tests
-        run: |
-          python3 scripts/test_coverage_tools.py
-          python3 scripts/test_download_emulator_coverage.py
+      - name: Python CI tooling and offline contracts
+        run: python3 -m unittest discover -s scripts -p 'test_*.py'
 
       - name: Emulator scenario inventory
         run: python3 scripts/run_emulator_scenarios.py --list

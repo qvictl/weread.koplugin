@@ -29,8 +29,9 @@
 网关（github-actions[bot]）在下面 **全部** 条件对 PR 的最新提交（head SHA）成立时批准，并开启自动合并
 （squash，上游同步分支 `sync/upstream-*` 用 merge commit，保留与上游共享的历史）：
 
-1. **必需检查全部成功**：`main` 分支保护要求的检查（网关运行时从分支保护读取；撰写本文时为 `ci`、`integration`、`tests-policy`；以分支保护为准，
-   包括测试策略和覆盖率门禁）都成功（`success` / `neutral` / `skipped`）。排队或重跑中的检查算未完成。
+1. **必需检查全部成功**：`main` 分支保护要求的检查（网关运行时从分支保护读取；撰写本文时为 `ci`、`tests-policy`；以分支保护为准，
+   包括受影响业务UT和整批PR unit diff≥80%；选择/覆盖率工具等基础自检固定运行，
+   全量UT/真实集成及unit/combined整体与日期/模块门禁在发版执行）都成功（`success` / `neutral` / `skipped`）。排队或重跑中的检查算未完成。
 2. **AI 审查已完成且没有 Request changes**：CodeRabbit（`coderabbitai[bot]`）审查过 head SHA——提交了 `commit_id` 等于 head 的审查，或者（CodeRabbit 没有意见时不发 review）`coderabbitai` 应用在
    该提交上最新的 `CodeRabbit` 检查已完成、结论为 success 且为 “Review completed”；并且它最新的结论性审查
    （Approve / Request changes）不是 **Request changes**。（Gemini Code Assist 已按所有者决定停用。）
@@ -153,6 +154,9 @@ gh api -X PATCH repos/$R/branches/main/protection/required_pull_request_reviews 
 
 - **No human gate** (owner decision, 2026-10-28): if the agent and the AI review think it is fine, it merges; regressions
   are fixed forward. Releases, version bumps, CI and policy changes follow the same flow.
+- **CI trust boundary:** PR workflows, coverage tools and policy remain reviewable PR code. The workflow-revision
+  pin keeps manual dispatch and historical-head checks on the selected workflow tooling; it does not make PR tooling
+  immutable. Latest-head AI review and protected main govern changes to those files, as they do other PR changes.
 - **Reviewer:** CodeRabbit (requests changes for blocking findings and auto-approves once resolved — its approval may
   satisfy the required approval). Gemini Code Assist was dropped.
 - **Review comments:** potential issues / bugs are fixed or answered with a justification; then the agent resolves the

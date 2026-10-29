@@ -1,0 +1,348 @@
+name: Release candidate
+
+# Only a confirmed candidate enters this call. The caller holds its lock until
+# integration, coverage, persistence and package/publication have all finished.
+on:
+  workflow_call:
+    inputs:
+      target_sha:
+        type: string
+        required: true
+      publish:
+        type: string
+        required: true
+      version:
+        type: string
+        required: true
+      tag:
+        type: string
+        required: true
+      artifact_name:
+        type: string
+        required: true
+      archive:
+        type: string
+        required: true
+      fork_release:
+        type: string
+        default: nightly
+permissions:
+  contents: read
+  actions: read
+jobs:
+  integration:
+    name: Validate release in KOReader
+    uses: ./.github/workflows/integration.yml
+    with:
+      target_sha: ${{ inputs.target_sha }}
+      fork_release: ${{ inputs.fork_release || 'nightly' }}
+    permissions:
+      contents: read
+
+  coverage:
+    name: Release combined coverage gate
+    permissions:
+      contents: read
+      actions: read
+    needs: integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout coverage tooling
+        run: |
+          tools="$RUNNER_TEMP/coverage-tooling"
+          git init --quiet "$tools"
+          git -C "$tools" sparse-checkout set --no-cone /scripts/download_emulator_coverage.py /scripts/coverage_tools.py /scripts/select_lua_tests.py
+          GIT_TERMINAL_PROMPT=0 git -C "$tools" -c credential.helper= fetch --quiet --depth 1 \
+            "https://github.com/$GITHUB_REPOSITORY.git" "$GITHUB_WORKFLOW_SHA"
+          git -C "$tools" checkout --quiet --detach FETCH_HEAD
+
+      - name: Checkout measured candidate
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.target_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Fetch authentic coverage history
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin main:refs/remotes/origin/main
+          mkdir -p "$RUNNER_TEMP/baseline"
+          git fetch --no-tags --depth 1 origin coverage:refs/remotes/origin/coverage
+          git show origin/coverage:history.jsonl > "$RUNNER_TEMP/baseline/history.jsonl"
+          test -s "$RUNNER_TEMP/baseline/history.jsonl"
+          jq -e -s 'map(select(type == "object" and .sha != null and .unit.percent != null)) | length > 0' \
+            "$RUNNER_TEMP/baseline/history.jsonl" >/dev/null
+
+      - name: Download exact candidate emulator coverage
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARGET_SHA: ${{ inputs.target_sha }}
+        run: |
+          python3 "$RUNNER_TEMP/coverage-tooling/scripts/download_emulator_coverage.py" \
+            --repo "$GITHUB_REPOSITORY" --run "$GITHUB_RUN_ID" --expected-sha "$TARGET_SHA" \
+            --out "$RUNNER_TEMP/emulator-coverage"
+
+      - name: Install LuaJIT and LuaCov
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y luajit libsqlite3-0
+          git clone --quiet --depth 1 --branch v0.16.0 https://github.com/lunarmodules/luacov.git "$RUNNER_TEMP/luacov"
+          echo "LUA_PATH=$RUNNER_TEMP/luacov/src/?.lua;;" >> "$GITHUB_ENV"
+
+      - name: Unit specs and release coverage gates
+        run: |
+          set -euo pipefail
+          # Normal execution is blocking; LuaCov's instrumentation-only timing
+          # failures remain advisory after this full suite has passed.
+          bash scripts/run_lua_specs.sh
+          bash scripts/run_lua_coverage.sh
+          tool="$RUNNER_TEMP/coverage-tooling/scripts/coverage_tools.py"
+          export COVERAGE_REPO="$GITHUB_WORKSPACE"
+          python3 "$tool" merge --all-files --out coverage/combined.stats.out coverage/unit.stats.out "$RUNNER_TEMP/emulator-coverage"
+          python3 "$tool" report coverage/combined.stats.out coverage/combined.report.out
+          python3 "$tool" gate --mode release --unit coverage/unit.report.out --combined coverage/combined.report.out \
+            --base origin/main --head HEAD --history "$RUNNER_TEMP/baseline/history.jsonl" \
+            --summary coverage/release-gate.md --json coverage/release-gate.json
+          cat coverage/release-gate.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Reject unpersisted earlier release floors
+        env:
+          COVERAGE_REPO: ${{ github.workspace }}
+          GH_TOKEN: ${{ github.token }}
+          TARGET_SHA: ${{ inputs.target_sha }}
+        run: |
+          python3 "$RUNNER_TEMP/coverage-tooling/scripts/download_emulator_coverage.py" \
+            --repo "$GITHUB_REPOSITORY" --run "$GITHUB_RUN_ID" --expected-sha "$TARGET_SHA" \
+            --require-release-history "$RUNNER_TEMP/baseline/history.jsonl" --current-gate coverage/release-gate.json --checks-out coverage/release-checks.json
+
+      - name: Upload release coverage evidence
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: release-coverage
+          path: |
+            coverage/*.report.out
+            coverage/release-gate.*
+            coverage/release-checks.json
+          retention-days: 30
+
+  persist-coverage:
+    name: Persist accepted release coverage
+    needs: coverage
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - name: Checkout measured candidate
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.target_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Checkout coverage tooling
+        run: |
+          tools="$RUNNER_TEMP/coverage-tooling"
+          git init --quiet "$tools"
+          git -C "$tools" sparse-checkout set --no-cone /scripts/download_emulator_coverage.py /scripts/coverage_tools.py /scripts/select_lua_tests.py
+          GIT_TERMINAL_PROMPT=0 git -C "$tools" -c credential.helper= fetch --quiet --depth 1 \
+            "https://github.com/$GITHUB_REPOSITORY.git" "$GITHUB_WORKFLOW_SHA"
+          git -C "$tools" checkout --quiet --detach FETCH_HEAD
+
+      - name: Download accepted measurement
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARGET_SHA: ${{ inputs.target_sha }}
+        run: |
+          python3 "$RUNNER_TEMP/coverage-tooling/scripts/download_emulator_coverage.py" \
+            --repo "$GITHUB_REPOSITORY" --run "$GITHUB_RUN_ID" --expected-sha "$TARGET_SHA" \
+            --accepted-out "$RUNNER_TEMP/accepted-coverage"
+
+      - name: Persist main measurement before publication
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ inputs.target_sha }}
+          COVERAGE_REPO: ${{ github.workspace }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SHA"
+          if [[ "$GITHUB_REF" != "refs/heads/main" ]]; then
+            echo "Package-only candidate uses a non-main ref; main coverage history is unchanged."
+            exit 0
+          fi
+          git fetch --quiet --no-tags origin main:refs/remotes/origin/main
+          if ! git merge-base --is-ancestor "$SHA" origin/main; then
+            echo "::error::Main-ref candidate is not an ancestor of main."
+            exit 1
+          fi
+          reports="$RUNNER_TEMP/accepted-coverage"
+          jq -e --arg sha "$SHA" '.mode == "release" and .passed == true and .measured_sha == $sha' \
+            "$reports/release-gate.json" >/dev/null
+          site="$RUNNER_TEMP/coverage-site"
+          tool="$RUNNER_TEMP/coverage-tooling/scripts/coverage_tools.py"
+          publish() {
+            git fetch --quiet --no-tags origin main:refs/remotes/origin/main || return 1
+            git merge-base --is-ancestor "$SHA" origin/main || return 1
+            git fetch --quiet --no-tags origin +coverage:refs/remotes/origin/coverage || return 1
+            if [[ -d "$site" ]]; then
+              git -C "$site" checkout -q -B coverage origin/coverage || return 1
+            else
+              git worktree add -q -B coverage "$site" origin/coverage || return 1
+            fi
+            python3 "$tool" gate --mode release --unit "$reports/unit.report.out" \
+              --combined "$reports/combined.report.out" --base origin/main --head "$SHA" \
+              --history "$site/history.jsonl" || return 1
+            python3 "$tool" baseline --unit "$reports/unit.report.out" --combined "$reports/combined.report.out" \
+              --sha "$SHA" --run-url "$RUN_URL" --release-checks "$reports/release-checks.json" --publication-attempt "$GITHUB_RUN_ATTEMPT" --out-dir "$site" || return 1
+            git -C "$site" add baseline.json history.jsonl badge-unit.json badge.json README.md || return 1
+            if git -C "$site" diff --cached --quiet; then return 0; fi
+            git -C "$site" -c user.name="github-actions[bot]" \
+              -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+              commit -q -m "coverage: release ${SHA:0:8}" || return 1
+            git -C "$site" -c credential.helper= -c 'credential.helper=!gh auth git-credential' push origin coverage
+          }
+          for attempt in 1 2 3 4 5; do
+            if publish; then exit 0; fi
+            if (( attempt == 5 )); then
+              echo "::error::Could not persist accepted release coverage; retry this Release before another candidate."
+              exit 1
+            fi
+            sleep $((attempt * 5))
+          done
+
+  package-and-release:
+    name: Package and publish validated candidate
+    needs: [integration, coverage, persist-coverage]
+    runs-on: ubuntu-latest
+    env:
+      ARCHIVE: ${{ inputs.archive }}
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout validated candidate
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.target_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Build plugin package
+        run: bash scripts/package_release.sh "$ARCHIVE"
+
+      - name: Generate checksum
+        run: |
+          archive="$ARCHIVE"
+          (
+            cd "$(dirname "$archive")"
+            sha256sum "$(basename "$archive")" > "$(basename "$archive").sha256"
+          )
+          cat "$ARCHIVE.sha256"
+
+      - name: Verify package contents
+        run: |
+          unzip -l "$ARCHIVE"
+          test "$(unzip -Z1 "$ARCHIVE" | head -n 1)" \
+            = "weread.koplugin/"
+          unzip -Z1 "$ARCHIVE" \
+            | grep -qx "weread.koplugin/main.lua"
+          unzip -Z1 "$ARCHIVE" \
+            | grep -qx "weread.koplugin/_meta.lua"
+          unzip -Z1 "$ARCHIVE" \
+            | grep -qx "weread.koplugin/icons/weread-w-book.svg"
+          unzip -Z1 "$ARCHIVE" \
+            | grep -qx "weread.koplugin/integrations/init.lua"
+          unzip -Z1 "$ARCHIVE" \
+            | grep -qx "weread.koplugin/integrations/zenui.lua"
+          if unzip -Z1 "$ARCHIVE" \
+            | grep -Eq '^weread\.koplugin/(spec|scripts|docs|\.github)/'; then
+            echo "error: development-only files were included in the release package" >&2
+            exit 1
+          fi
+
+      - name: Upload plugin package artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: ${{ inputs.artifact_name }}
+          path: ${{ inputs.archive }}
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+
+      - name: Upload checksum artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: ${{ inputs.artifact_name }}-checksum
+          path: ${{ inputs.archive }}.sha256
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Ensure release tag is new
+        if: inputs.publish == 'true'
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          if git rev-parse --verify --quiet "refs/tags/$TAG"; then
+            echo "error: tag $TAG already exists; bump _meta.lua to a new version" >&2
+            exit 1
+          fi
+
+      - name: Build release notes preface
+        if: inputs.publish == 'true'
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          bash scripts/extract_release_notes.sh \
+            "$VERSION" \
+            dist/release-preface.md
+          cat dist/release-preface.md
+
+      - name: Verify updater asset names
+        if: inputs.publish == 'true'
+        env:
+          VERSION: ${{ inputs.version }}
+          ARCHIVE: ${{ inputs.archive }}
+        run: |
+          # weread/lib/updater.lua parse_release() expects exactly these names.
+          test "$(basename "$ARCHIVE")" = "weread.koplugin-v$VERSION.zip"
+          test -f "$ARCHIVE.sha256"
+          grep -q 'Updater.RELEASE_PREFIX = "https://github.com/'"$GITHUB_REPOSITORY"'/releases/download/"' weread/lib/updater.lua
+          grep -q 'Updater.API_URL = "https://api.github.com/repos/'"$GITHUB_REPOSITORY"'/releases/latest"' weread/lib/updater.lua
+
+      - name: Create GitHub Release
+        if: inputs.publish == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+          VERSION: ${{ inputs.version }}
+          ARCHIVE: ${{ inputs.archive }}
+          TARGET_SHA: ${{ inputs.target_sha }}
+        run: |
+          release_preface="$(cat dist/release-preface.md)"
+          gh release create "$TAG" \
+            "$ARCHIVE" \
+            "$ARCHIVE.sha256" \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$TARGET_SHA" \
+            --title "Version $VERSION" \
+            --notes "$release_preface" \
+            --generate-notes \
+            --latest
+
+      - name: Verify published release
+        if: inputs.publish == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          latest="$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name)"
+          test "$latest" = "$TAG"
+          mkdir -p "$RUNNER_TEMP/verify" && cd "$RUNNER_TEMP/verify"
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" -p "weread.koplugin-v$VERSION.zip*"
+          sha256sum -c "weread.koplugin-v$VERSION.zip.sha256"

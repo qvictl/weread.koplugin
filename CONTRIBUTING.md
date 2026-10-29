@@ -22,18 +22,20 @@ Pull requests are welcome whether written by people or by AI. We gate on
 tests, not on who wrote the code. A PR can be merged only when all required
 checks pass:
 
-- `ci` - Lua lint (luacheck), namespace policy, unit/component specs, Python
+- `ci` - Lua lint (luacheck), namespace policy, affected unit/component specs, Python
   scripts, mock-service contract, package and changelog checks, secret scan;
-- `integration` - the plugin running inside a real headless KOReader
-  emulator against the local mock WeRead service
-  (`spec/emulator/scenarios/`) on the
-  [qvictl/koreader](https://github.com/qvictl/koreader) fork build (rolling
-  `nightly`, in the `koreader/kobase:5.0.0-22.04` container; fails if that
-  build cannot be fetched or started), plus the pinned KOReader PluginLoader
-  test;
-- `integration-official` - the same emulator scenarios on the official
-  KOReader v2026.07.1 release, which many devices still run;
-- `tests-policy` - the test rule and the coverage gates below.
+- `tests-policy` - test changes and unit diff coverage ≥ 80% across the whole PR.
+
+Ordinary PRs and main pushes select business Lua specs from both versions of
+the import graph. PRs use their frozen event merge-base; pushes use `before`.
+Missing bases, framework changes, unclassified dynamic imports or an unmatched
+production file run the full suite. Docs/integration-only changes can select
+none. Each run publishes a head-bound selection manifest. Selector, coverage,
+mock-service and other CI self-tests remain fixed checks.
+
+Real integration runs only for Release candidates: fork and official
+emulators plus the pinned PluginLoader must all succeed before publication.
+Ordinary PRs, main pushes and upstream-sync do not start those tests.
 
 Test rule: Lua code changes under `main.lua`, `weread/` or `integrations/`
 must come with changes under `spec/`, and every user-visible feature or fix
@@ -45,59 +47,55 @@ or log wording.
 
 ### Coverage policy / 覆盖率策略
 
-Configured in [`.ci/coverage-policy.json`](.ci/coverage-policy.json) and
-enforced by `tests-policy` on every PR to `main`. Scope: the whole plugin
-(`main.lua`, `weread/`, `integrations/`; never `spec/`, `scripts/` or
-fixtures). Plugin files no test loads count as 0%.
+Configured in [`.ci/coverage-policy.json`](.ci/coverage-policy.json). Scope:
+`main.lua`, `weread/`, `integrations/`; unexecuted plugin files count as 0%.
 
-| Gate | Rule | Blocking |
+| Gate | Ordinary PR (`tests-policy`) | Release candidate |
 | --- | --- | --- |
-| Diff, unit | changed executable Lua lines covered by unit specs ≥ 80% | yes (waived by `no-tests-needed`) |
-| Diff, combined | changed lines covered by unit specs + emulator scenarios ≥ 90% | yes (waived by `no-tests-needed`) |
-| Ratchet | overall unit and overall combined coverage must not drop below `main`'s coverage at the PR's own base commit (0.1 pp tolerance: emulator runs vary by a few timing-dependent lines, observed 0.03 pp) | yes |
-| Target 4 weeks | overall combined ≥ max(75%, day-one baseline 80.78%) and overall unit ≥ 80% from 2026-11-24 | report-only before the date, then yes |
-| Target 8 weeks | overall combined ≥ 85%, overall unit ≥ 88% and every `weread/lib/*` file unit ≥ 70% from 2026-12-22 | report-only before the date, then yes |
+| Diff | unit ≥ 80% | real unit + emulator ≥ 90% |
+| Overall ratchet | not measured by partial UT | full unit and combined, including an existing same-candidate record |
+| Dated targets | evaluated at Release | existing full unit/module and combined floors |
 
-Emulator coverage is measured with LuaCov inside the real KOReader app while
-the scenarios run (forked download/login workers included). Every PR gets
-the full table (diff unit, diff combined, overall, ratchet, targets, trend)
-in the job summary and as a sticky comment. After each green `Integration`
-run on `main`, the *Coverage* workflow publishes `baseline.json`,
-`history.jsonl` and the README badge on the
-[`coverage` branch](https://github.com/qvictl/weread.koplugin/tree/coverage).
+The 0.1 percentage-point tolerance and all thresholds/dates are unchanged:
+unit ≥ 80% from 2026-11-24; unit ≥ 88% and each `weread/lib/*` file ≥ 70%
+from 2026-12-22. Combined targets apply at release: ≥ max(75%, 80.78%) from
+2026-11-24 and ≥ 85% from 2026-12-22. Before their dates targets are report-only.
+PR diff waivers retain their narrow scope; release combined coverage cannot
+be waived. Features/fixes still update emulator scenarios for release testing.
 
-The ratchet base is the `main` commit the PR is measured against, not
-`main`'s latest value: `Integration` measures the merge commit
-`refs/pull/N/merge` pointed at (`tests-policy` checks out that same commit),
-so the base is that merge commit's first parent, and its coverage comes from
-`history.jsonl` (one record per `main` commit, keyed by SHA; if that commit
-has none, e.g. its run failed, the nearest ancestor that has one; with none
-at all, the day-one baseline). Tests another PR merges meanwhile therefore do
-not fail PRs that are already in flight, so several PRs can be in CI at once.
-Day-one baseline (2026-10-27): unit 73.80%, unit + emulator 80.78%. The
-roadmap to the targets (priorities, batches) is
-[docs/coverage-plan.md](docs/coverage-plan.md).
+Release diffs start at the nearest ancestor with a real combined measurement,
+skip unit-only records and exclude the candidate itself. A version-only
+commit therefore cannot hide the unreleased batch. The overall combined
+ratchet includes the candidate's own previous measurement. With no combined
+ancestor, all production code from the empty tree must meet the 90% diff
+floor and the existing day-one overall floor. Release history fetch/read
+failures stop validation; they are never treated as a first measurement.
 
-覆盖率策略见 `.ci/coverage-policy.json`，由 `tests-policy` 在每个合入 `main` 的 PR
-上强制执行：改动的可执行 Lua 行单元测试覆盖率 ≥ 80%，单元测试 + 模拟器场景合计 ≥ 90%；
-整体覆盖率（单元、合计）不得低于该 PR 所基于的 `main` 提交的覆盖率（`Integration` 测的合并提交的第一个父提交，取 `coverage` 分支 `history.jsonl` 中按 SHA 记录的值，缺失时取最近的有记录祖先；与其他 PR 同时在 CI 中互不影响）；合计整体覆盖率在 2026-11-24 起
-≥ max(75%, 首日基线 80.78%)，2026-12-22 起 ≥ 85%；单元整体覆盖率 2026-11-24 起 ≥ 80%，
-2026-12-22 起 ≥ 88%，且届时每个 `weread/lib/*` 文件单元覆盖率 ≥ 70%；到期前仅报告。
-路线图见 [docs/coverage-plan.md](docs/coverage-plan.md)。每个 PR 的摘要和评论
-都会列出各项结果，`main` 的历史趋势与徽章发布在 `coverage` 分支。
+Partial daily measurements never update whole-plugin history or badges.
+Release runs normal full UT before full LuaCov and real integration, then
+synchronously publishes authentic full unit and combined measurements. Manual
+historical full backfills remain available and must pass normal full UT and
+the original unit overall ratchet against their own source ancestry. Missing
+combined means unmeasured; the combined badge retains the nearest authentic
+measurement. A late unit publisher cannot erase a real same-SHA combined
+record. Full unit ratchets use authentic full-unit ancestors, including an
+existing candidate record; a partial or version-only result cannot supply a
+new whole-plugin baseline.
+
+普通PR/main按改动影响选择业务Lua UT，PR整批改动行单测≥80%，不等待模拟器。
+选择器和覆盖率工具等基础自检仍固定运行；无法安全选择时回退全量。部分UT的整体
+覆盖率及基线均为未测，不更新历史/徽章。发版必须普通全量UT硬通过，再运行全量
+LuaCov及官方/fork/PluginLoader真实集成，检查原unit/combined整体棘轮、日期/模块
+目标和整批combined diff≥90%；不新增发版unit diff门槛。覆盖历史读取失败阻止发布。
 
 See [docs/testing.md](docs/testing.md).
 
 本仓库是 finlater/weread.koplugin 的维护分支：`main` 为本分支发布线（默认、受保护），
 `upstream` 为上游 `finlater/main` 的只读镜像，每周自动同步并向 `main` 发起合并 PR。
 
-欢迎任何 PR，无论由人还是由 AI 编写；我们以测试而非作者身份把关。合并前必须通过
-`ci`、`integration`（在 `koreader/kobase:5.0.0-22.04` 容器中用 qvictl/koreader 分支
-构建运行真实 KOReader 模拟器 + 本地 mock 服务的集成场景，以及固定版本 PluginLoader 测试）、
-`integration-official`（同一组场景在官方 KOReader v2026.07.1 上运行）和 `tests-policy`（修改 Lua 代码必须同时修改 `spec/` 下的测试，`feat`/`fix`
-类 PR 必须新增或更新至少一个模拟器场景，并满足下面的覆盖率门禁；仅维护者可用
-`no-tests-needed` 标签豁免，且仅限文档、注释或日志措辞改动）。Bug 修复需附带修复前会失败的
-回归测试。
+欢迎任何PR，无论由人还是AI编写。合并前必须通过`ci`与`tests-policy`，保留lint、
+单测、Python、打包、变更日志和敏感信息检查。真实集成移到发版候选；`feat`/`fix`
+仍须更新模拟器场景，缺陷仍须有修前失败回归。豁免仍限维护者指定的文档、注释或日志措辞。
 
 ### Review policy / 审查策略
 
@@ -273,13 +271,7 @@ python3 -m py_compile scripts/*.py
 python3 scripts/test_mock_weread.py
 bash scripts/package_release.sh /tmp/weread.koplugin-release-test.zip
 bash scripts/check_secrets.sh              # needs a PCRE2-enabled ripgrep
-# Linux x86_64 emulator scenarios. `integration`: the qvictl/koreader fork build
-# (needs SDL 3, as in CI's koreader/kobase:5.0.0-22.04 container; see docs/testing.md)
-KOREADER_EMULATOR_SOURCE=fork bash scripts/fetch_koreader_emulator.sh /tmp/koreader
-python3 scripts/run_emulator_scenarios.py --koreader /tmp/koreader/fork/extract --out /tmp/weread-emulator
-# `integration-official`: official KOReader v2026.07.1 (needs SDL 2)
-KOREADER_EMULATOR_SOURCE=official bash scripts/fetch_koreader_emulator.sh /tmp/koreader
-python3 scripts/run_emulator_scenarios.py --koreader /tmp/koreader/official/extract --out /tmp/weread-emulator-official
+# Real emulator/PluginLoader tests are release-candidate checks; see docs/testing.md.
 # unit diff coverage (LuaCov), the first gate of `tests-policy`
 bash scripts/run_lua_coverage.sh && python3 scripts/coverage_tools.py diff coverage/unit.report.out --base origin/main
 ```
@@ -294,13 +286,7 @@ python3 -m py_compile scripts/*.py
 python3 scripts/test_mock_weread.py
 bash scripts/package_release.sh /tmp/weread.koplugin-release-test.zip
 bash scripts/check_secrets.sh              # needs a PCRE2-enabled ripgrep
-# Linux x86_64 emulator scenarios. `integration`: the qvictl/koreader fork build
-# (needs SDL 3, as in CI's koreader/kobase:5.0.0-22.04 container; see docs/testing.md)
-KOREADER_EMULATOR_SOURCE=fork bash scripts/fetch_koreader_emulator.sh /tmp/koreader
-python3 scripts/run_emulator_scenarios.py --koreader /tmp/koreader/fork/extract --out /tmp/weread-emulator
-# `integration-official`: official KOReader v2026.07.1 (needs SDL 2)
-KOREADER_EMULATOR_SOURCE=official bash scripts/fetch_koreader_emulator.sh /tmp/koreader
-python3 scripts/run_emulator_scenarios.py --koreader /tmp/koreader/official/extract --out /tmp/weread-emulator-official
+# Real emulator/PluginLoader tests are release-candidate checks; see docs/testing.md.
 # unit diff coverage (LuaCov), the first gate of `tests-policy`
 bash scripts/run_lua_coverage.sh && python3 scripts/coverage_tools.py diff coverage/unit.report.out --base origin/main
 ```
