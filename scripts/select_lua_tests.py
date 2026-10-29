@@ -17,6 +17,10 @@ import subprocess
 REPO = Path(__file__).resolve().parents[1]
 FRAMEWORK = (".github/", ".ci/", ".luacov", "scripts/select_lua_tests.py",
              "scripts/run_lua_", "scripts/coverage_tools.py", "scripts/check_test_policy.py")
+LONG_STRING_OPEN = re.compile(r"\[(=*)\[")
+NAME = re.compile(r"[A-Za-z_][A-Za-z_0-9]*")
+DECIMAL_ESCAPE = re.compile(r"\d{1,3}")
+HEX_ESCAPE = re.compile(r"[0-9a-fA-F]{2}")
 
 
 def git(*args: str, repo: Path = REPO) -> str:
@@ -55,7 +59,7 @@ def is_test(path: str) -> bool:
 
 
 def production(path: str) -> bool:
-    return path == "main.lua" or path.startswith(("weread/", "integrations/"))
+    return path in ("main.lua", "_meta.lua") or path.startswith(("weread/", "integrations/"))
 
 
 def tokens(source: str) -> list[tuple[str, str]]:
@@ -68,7 +72,7 @@ def tokens(source: str) -> list[tuple[str, str]]:
             continue
         comment = source.startswith("--", index)
         start = index + 2 if comment else index
-        bracket = re.match(r"\[(=*)\[", source[start:])
+        bracket = LONG_STRING_OPEN.match(source, start)
         if bracket:
             close = "]" + bracket[1] + "]"
             end = source.find(close, start + len(bracket[0]))
@@ -93,12 +97,12 @@ def tokens(source: str) -> list[tuple[str, str]]:
                     if index == len(source):
                         raise ValueError("unterminated Lua escape")
                     escape = source[index]
-                    digits = re.match(r"\d{1,3}", source[index:])
+                    digits = DECIMAL_ESCAPE.match(source, index)
                     if digits:
                         value.append(chr(int(digits[0])))
                         index += len(digits[0])
                         continue
-                    if escape == "x" and re.match(r"[0-9a-fA-F]{2}", source[index + 1:index + 3]):
+                    if escape == "x" and HEX_ESCAPE.match(source, index + 1):
                         value.append(chr(int(source[index + 1:index + 3], 16)))
                         index += 3
                         continue
@@ -116,7 +120,7 @@ def tokens(source: str) -> list[tuple[str, str]]:
             result.append(("string", "".join(value)))
             index += 1
             continue
-        name = re.match(r"[A-Za-z_][A-Za-z_0-9]*", source[index:])
+        name = NAME.match(source, index)
         if name:
             result.append(("name", name[0]))
             index += len(name[0])
@@ -224,10 +228,20 @@ def imports(path: str, source: str, inventory: set[str]) -> tuple[set[str], list
             unknown.append(f"unclassified_dynamic_import:{path}:{value}")
     # Runtime supports injected preload lists. Literal overrides are already
     # represented by their strings; an expression cannot be silently ignored.
-    for index in range(len(ts) - 1):
-        if ts[index][1] == "preload_modules" and ts[index + 1][1] == "=":
-            if literal_array(ts, index + 2) is None:
-                unknown.append(f"unclassified_preload_override:{path}")
+    for index, (_kind, value) in enumerate(ts):
+        if value != "preload_modules":
+            continue
+        after = index + 1
+        if after < len(ts) and ts[after][1] == "]":
+            after += 1
+        if after < len(ts) and ts[after][1] == "=":
+            bounded = literal_array(ts, after + 1) is not None
+        else:
+            bounded = (path == "weread/lib/runtime.lua" and index >= 2
+                       and [item[1] for item in ts[index - 2:index]] == ["options", "."]
+                       and after < len(ts) and ts[after][1] == "or")
+        if not bounded:
+            unknown.append(f"unclassified_preload_override:{path}")
     return edges, unknown
 
 
@@ -273,8 +287,11 @@ def select(base: str | None, head: str, repo: Path = REPO) -> dict:
     if any(path.startswith(FRAMEWORK) for path in changed):
         manifest["reasons"] = ["test_framework_or_policy_changed"]
         return manifest
-    if not any(production(path) or (path.startswith("spec/") and path.endswith(".lua")
-                                   and not path.startswith(("spec/emulator/", "spec/koreader/")))
+    if any(path.startswith("spec/") and not path.endswith(".lua")
+           and not path.startswith(("spec/emulator/", "spec/koreader/")) for path in changed):
+        manifest["reasons"] = ["unclassified_unit_fixture_changed"]
+        return manifest
+    if not any(production(path) or path.endswith(".lua")
                for path in changed):
         manifest.update(mode="none", tests=[], reasons=["no_unit_runtime_changes"])
         return manifest

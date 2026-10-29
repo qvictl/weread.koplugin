@@ -206,7 +206,8 @@ class SelectionTest(unittest.TestCase):
         self.write("weread/lib/runtime.lua", 'Runtime.PRELOAD_MODULES = { "weread.lib.leaf" }\n'
                    'for _i, name in ipairs(options.preload_modules or Runtime.PRELOAD_MODULES) do\n'
                    'local ok, err = pcall(require, name)\nend\nreturn {}\n')
-        self.write("spec/affected_spec.lua", 'require("weread.lib.runtime")\n')
+        self.write("spec/affected_spec.lua", 'local options = { ["preload_modules"] = { "weread.lib.leaf" } }\n'
+                   'require("weread.lib.runtime")\n')
         base = self.save()
         self.write("weread/lib/leaf.lua", "return { changed = true }\n")
         self.save()
@@ -214,6 +215,27 @@ class SelectionTest(unittest.TestCase):
         self.write("spec/affected_spec.lua", 'require("weread.lib.runtime")\noptions.preload_modules = computed\n')
         self.save()
         self.assertEqual(self.select(base)["mode"], "full")
+
+    def test_computed_preload_override_cannot_hide_behind_another_direct_consumer(self):
+        self.write("weread/lib/runtime.lua", 'Runtime.PRELOAD_MODULES = { "weread.lib.other" }\n'
+                   'for _i, name in ipairs(options.preload_modules or Runtime.PRELOAD_MODULES) do\n'
+                   'local ok, err = pcall(require, name)\nend\nreturn {}\n')
+        self.write("spec/independent_spec.lua", 'require("weread.lib.other")\n')
+        for override in ('local options = {}\noptions["preload_modules"] = { "weread.lib." .. suffix }',
+                         'local options = setmetatable({}, { __index = function(_, key)\n'
+                         'if key == "preload_modules" then return { "weread.lib." .. suffix } end\nend })'):
+            with self.subTest(override=override):
+                self.write("spec/unrelated_spec.lua", 'local suffix = "leaf"\n' + override
+                           + '\nrequire("weread.lib.runtime")\n')
+                base = self.save()
+                self.write("weread/lib/leaf.lua", "return { changed = true }\n")
+                self.save()
+                result = self.select(base)
+                self.assertEqual(result["mode"], "full")
+                self.assertIn("spec/affected_spec.lua", result["tests"])
+                self.assertIn("spec/unrelated_spec.lua", result["tests"])
+                self.write("weread/lib/leaf.lua", "return {}\n")
+                self.save()
 
     def test_production_change_with_no_test_is_full(self):
         self.write("weread/lib/new.lua", "return {}\n")
@@ -246,6 +268,35 @@ class SelectionTest(unittest.TestCase):
         self.assertEqual(self.select()["mode"], "none")
         self.assertEqual(self.select()["tests"], [])
 
+    def test_it_named_lua_helper_shared_by_units_is_not_skipped(self):
+        self.write("spec/emulator/shared.lua", "return {}\n")
+        self.write("spec/helpers/wrapper.lua", 'return dofile("spec/emulator/shared.lua")\n')
+        self.write("spec/affected_spec.lua", 'dofile("spec/emulator/shared.lua")\n')
+        self.write("spec/unrelated_spec.lua", 'require("spec.helpers.wrapper")\n')
+        self.write("spec/independent_spec.lua", 'require("weread.lib.other")\n')
+        base = self.save()
+        self.write("spec/emulator/shared.lua", "return { changed = true }\n")
+        self.save()
+        result = self.select(base)
+        self.assertEqual(result["mode"], "selected")
+        self.assertEqual(result["tests"], ["spec/affected_spec.lua", "spec/unrelated_spec.lua"])
+
+    def test_unknown_unit_fixture_data_conservatively_runs_full(self):
+        self.write("spec/fixtures/chapter.json", '{"changed": true}\n')
+        self.save()
+        self.assertEqual(self.select()["mode"], "full")
+        self.assertEqual(self.select()["reasons"], ["unclassified_unit_fixture_changed"])
+
+    def test_root_metadata_change_selects_its_reader(self):
+        self.write("_meta.lua", 'return { version = "1.0" }\n')
+        self.write("spec/affected_spec.lua", 'local file = assert(io.open("_meta.lua", "rb"))\nfile:close()\n')
+        base = self.save()
+        self.write("_meta.lua", 'return { version = "1.1" }\n')
+        self.save()
+        result = self.select(base)
+        self.assertEqual(result["mode"], "selected")
+        self.assertEqual(result["tests"], ["spec/affected_spec.lua"])
+
     def test_framework_change_is_full(self):
         for name in ("scripts/run_lua_specs.sh", ".luacov", ".ci/coverage-policy.json", ".github/workflows/ci.yml"):
             with self.subTest(name=name):
@@ -275,6 +326,7 @@ class SelectionTest(unittest.TestCase):
         # the Lua process and its failing assertion are real.
         for name in ("run_lua_specs.sh", "select_lua_tests.py"):
             self.write("scripts/" + name, (Path(__file__).parent / name).read_text())
+        self.write("disable-mapfile.bash", "enable -n mapfile || true\n")
         self.write("spec/unrelated_spec.lua", 'error("unselected failure must block release")\n')
         base = self.save()
         self.write("weread/lib/leaf.lua", "return { changed = true }\n")
@@ -282,7 +334,8 @@ class SelectionTest(unittest.TestCase):
         manifest = selector.select(base, "HEAD", self.repo)
         path = self.repo / "selection.json"
         path.write_text(json.dumps(manifest))
-        env = dict(os.environ, LUAJIT_BIN=shutil.which("luajit"))
+        env = dict(os.environ, LUAJIT_BIN=shutil.which("luajit"),
+                   BASH_ENV=str(self.repo / "disable-mapfile.bash"))
         command = ["bash", "scripts/run_lua_specs.sh"]
         selected = subprocess.run(command + ["--manifest", str(path)], cwd=self.repo,
                                   env=env, text=True, capture_output=True)
@@ -298,10 +351,18 @@ class SelectionTest(unittest.TestCase):
                                env=env, text=True, capture_output=True)
         self.assertNotEqual(stale.returncode, 0)
         self.assertNotIn("==>", stale.stdout, "a stale manifest ran tests before validation")
+        head = self.git("rev-parse", "HEAD")
+        path.write_text(json.dumps(selector.select(head, head, self.repo)))
+        empty = subprocess.run(command + ["--manifest", str(path)], cwd=self.repo,
+                               env=env, text=True, capture_output=True)
+        self.assertEqual(empty.returncode, 0, empty.stderr)
+        self.assertNotIn("==>", empty.stdout, "an empty selection executed a spec")
 
     @unittest.skipUnless(shutil.which("luajit"), "coverage runner regression requires LuaJIT")
     def test_actual_coverage_runner_uses_same_manifest_and_release_full_failure_is_blocking(self):
         env = dict(os.environ, LUAJIT_BIN=shutil.which("luajit"))
+        self.write("disable-mapfile.bash", "enable -n mapfile || true\n")
+        env["BASH_ENV"] = str(self.repo / "disable-mapfile.bash")
         available = subprocess.run([env["LUAJIT_BIN"], "-e", 'require("luacov.runner")'],
                                    env=env, capture_output=True)
         if available.returncode:

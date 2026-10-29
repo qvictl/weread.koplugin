@@ -21,7 +21,9 @@ if (( $# )); then
     selection="$(python3 scripts/select_lua_tests.py --manifest "$manifest" --list)"
     manifest_content="$(cat "$manifest")"
     spec_files=()
-    if [[ -n "$selection" ]]; then mapfile -t spec_files <<< "$selection"; fi
+    while IFS= read -r selected_spec; do
+        if [[ -n "$selected_spec" ]]; then spec_files+=("$selected_spec"); fi
+    done <<< "$selection"
 fi
 if ! "$lua_bin" -e 'require("luacov.runner")' >/dev/null 2>&1; then
     echo "error: LuaCov not found for $lua_bin (luarocks install luacov, or set LUA_PATH)" >&2
@@ -38,7 +40,7 @@ fi
 
 spec_count=0
 failed=0
-for spec_file in "${spec_files[@]}"; do
+for spec_file in "${spec_files[@]+"${spec_files[@]}"}"; do
     name="$(basename "$spec_file" .lua)"
     stats="coverage/parts/$name.stats.out"
     if ! "$lua_bin" -joff -e "

@@ -341,7 +341,8 @@ class CoveragePhaseTest(unittest.TestCase):
         (self.root / "weread/lib").mkdir(parents=True)
         self.module = self.root / "weread/lib/m.lua"
         (self.root / "spec").mkdir()
-        (self.root / "spec/affected_spec.lua").write_text('require("weread.lib.m")\n')
+        (self.root / "spec/affected_spec.lua").write_text('require("weread.lib.m")\n'
+                                                       'local file = io.open("_meta.lua", "rb")\n')
         (self.root / "spec/unrelated_spec.lua").write_text("assert(true)\n")
         self.rows = ["old_%d()" % i for i in range(10)]
         self.module.write_text("\n".join(self.rows) + "\n")
@@ -423,7 +424,10 @@ class CoveragePhaseTest(unittest.TestCase):
         self.assertEqual(data["diff_unit"]["percent"], 60)
 
     def test_none_selection_reports_no_whole_measurement(self):
-        code, data = self.run_gate("diff", selection_manifest=self.selection(self.production))
+        previous = self.candidate
+        (self.root / "note.md").write_text("documentation\n")
+        self.candidate = self.commit("documentation only")
+        code, data = self.run_gate("diff", base=previous, selection_manifest=self.selection(previous))
         self.assertEqual(code, 0, data)
         self.assertEqual(data["diff_unit"]["executable"], 0)
         self.assertIsNone(data["overall_unit"])

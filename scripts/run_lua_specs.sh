@@ -18,11 +18,13 @@ if (( $# )); then
     fi
     selection="$(python3 scripts/select_lua_tests.py --manifest "$2" --list)"
     spec_files=()
-    if [[ -n "$selection" ]]; then mapfile -t spec_files <<< "$selection"; fi
+    while IFS= read -r selected_spec; do
+        if [[ -n "$selected_spec" ]]; then spec_files+=("$selected_spec"); fi
+    done <<< "$selection"
 fi
 
 spec_count=0
-for spec_file in "${spec_files[@]}"; do
+for spec_file in "${spec_files[@]+"${spec_files[@]}"}"; do
     echo "==> $spec_file"
     "$lua_bin" "$spec_file"
     spec_count=$((spec_count + 1))

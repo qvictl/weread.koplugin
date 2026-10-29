@@ -37,6 +37,8 @@ Git versions' dependency graphs, including literal require/pcall/loadfile,
 package.loaded/preload references and verified Runtime/menu preload lists.
 Computed cache keys conservatively depend on all local runtime/helper modules;
 escaped or unclassified module loaders fall back to full UT.
+Lua helpers remain in the graph even in an integration directory if unit tests
+load them; opaque non-Lua unit fixtures conservatively run full UT.
 Unclassified dynamic loaders, framework changes and unmatched production
 changes conservatively run full UT. PRs freeze their event base/head, main
 pushes use `before`, and a manual run without a base uses full UT. Docs/IT-only
