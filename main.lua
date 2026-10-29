@@ -118,32 +118,27 @@ function WeReadPlugin:init()
         get_chapters = function(book)
             return self:ensureChaptersLoaded(book)
         end,
-        refresh_catalog = function(book_id)
+        fetch_catalog = function(book_id)
             local book = self.settings:get_book(book_id)
-            if type(book) ~= "table" then
-                return nil, "book_not_found"
-            end
-            local ok, chapters_or_err = pcall(function()
-                Content.ensure_reader_state(self.client, book)
-                return Content.fetch_catalog(self.client, book)
-            end)
-            if not ok then
-                return nil, chapters_or_err
-            end
-            local chapters = chapters_or_err
-            if type(chapters) ~= "table" or #chapters == 0 then
-                return nil, "catalog_unavailable"
-            end
+            if type(book) ~= "table" then error("book_not_found", 0) end
+            Content.ensure_reader_state(self.client, book)
+            local chapters = Content.fetch_catalog(self.client, book)
+            if type(chapters) ~= "table" or #chapters == 0 then error("catalog_unavailable", 0) end
+            return chapters
+        end,
+        apply_catalog = function(book_id, chapters)
+            local book = self.settings:get_book(book_id)
+            if type(book) ~= "table" then return nil, "book_not_found" end
             local cache_ok, cache_err = Content.save_catalog_cache(
                 self.client, self.settings, book, chapters)
             if not cache_ok then
-                logger.warn("save chapter catalog cache failed:",
-                    PluginUtil.log_error(cache_err))
+                logger.warn("save chapter catalog cache failed:", PluginUtil.log_error(cache_err))
             end
-            if self.library_db then
-                self.library_db:putChapters(book_id, chapters)
-            end
+            if self.library_db then self.library_db:putChapters(book_id, chapters) end
             return chapters
+        end,
+        request = function(task, on_success, on_failure, options)
+            return ProgressSyncDialog.request(self, task, on_success, on_failure, options)
         end,
         get_file_context = function(book, path)
             return self:getChapterInfoFromFile(book, path)
@@ -153,6 +148,9 @@ function WeReadPlugin:init()
                 _("Sync progress"), callback, nil, run_options)
         end,
         upload_position = function(book_id, position, elapsed_seconds)
+            if not self.read_report.subprocess then
+                return false, { error = _("Network subprocess is unavailable."), error_kind = "unsupported" }
+            end
             return self.read_report:upload_position(
                 book_id, position, elapsed_seconds)
         end,

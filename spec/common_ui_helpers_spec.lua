@@ -160,8 +160,8 @@ expect(host:isNetworkOnline() == true and logged.warn[#logged.warn]:find("dns br
     "failing online check not tolerated")
 set_network({ isOnline = function() return "yes" end })
 expect(host:isNetworkOnline() == false, "non-boolean online status counted as online")
--- Without isConnected the link check uses the online check.
-expect(host:isNetworkConnected() == false, "link check did not fall back to the online check")
+-- Without isConnected the task checks reachability; the UI never probes DNS.
+expect(host:isNetworkConnected() == true, "missing link API must defer reachability to the task")
 set_network({ isConnected = function() error("ioctl failed") end })
 expect(host:isNetworkConnected() == true and logged.warn[#logged.warn]:find("ioctl failed", 1, true),
     "failing link check not tolerated")
@@ -194,7 +194,7 @@ expect(host.busy_message == nil and last_shown().text:find("Sync failed:\n", 1, 
     "failed online task not reported")
 expect(logged.err[#logged.err]:find("network task failed: Sync", 1, true), "failed online task not logged")
 -- Offline: the busy message is closed and the user told to connect.
-set_network({ isOnline = function() return false end })
+set_network({ isConnected = function() return false end })
 host:showBusy("Syncing...")
 expect(host:runOnlineTask("Sync", function() ran = ran + 1 end) == false and #scheduled == 0,
     "offline task was scheduled")

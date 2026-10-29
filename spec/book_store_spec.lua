@@ -53,6 +53,11 @@ local ok, index = BookStore.save(settings, "book/42", {
     author = "Fixture author",
     progress = 37,
     chapter_uid = 9,
+    last_remote_position = { percent = 37 }, last_remote_position_owner = "remote-digest",
+    last_uploaded_position = { percent = 37 }, last_uploaded_position_owner = "upload-digest",
+    reported_local = true, reported_local_owner = "report-digest",
+    pending_upload_position = { percent = 40 }, pending_upload_owner = "pending-digest",
+    pending_upload_baselines = { { percent = 37 } },
     mp_articles = { { title = "Fixture article" } },
     chapters = { { chapterUid = 9 } },
 })
@@ -90,6 +95,20 @@ expect(loaded.chapters == nil,
     "large chapter catalog should not be stored in the book record")
 expect(loaded.cache_dir == index.cache_dir,
     "resolved cache directory did not round-trip")
+
+-- Ownership and its position must share the same atomic JSON write, rather
+-- than independently changing in metadata before a reading-state failure.
+local function read_split(name)
+    local file = assert(io.open(index.cache_dir .. "/" .. name .. ".json", "rb"))
+    local bytes = file:read("*a"); file:close()
+    return require("json").decode(bytes)
+end
+local metadata, reading = read_split("metadata"), read_split("reading_state")
+for _, field in ipairs({ "last_remote_position_owner", "last_uploaded_position_owner",
+    "reported_local", "reported_local_owner", "pending_upload_owner", "pending_upload_baselines" }) do
+    expect(metadata[field] == nil and reading[field] ~= nil, field .. " was split from its position")
+    expect(loaded[field] ~= nil, field .. " did not survive storage reload")
+end
 
 local renames = 0
 local real_rename = os.rename

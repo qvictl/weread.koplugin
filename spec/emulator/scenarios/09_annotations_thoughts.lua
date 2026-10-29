@@ -12,6 +12,7 @@ local QUOTE = "窗外的风穿过树梢，带来远处山谷的回声。"
 local THOUGHT = "这是一条合成想法"
 
 return function(H)
+    local without_ui_dns = dofile(os.getenv("WEREAD_TEST_HARNESS_DIR") .. "/no_ui_dns.lua")
     local tr = H.tr
 
     H.step("thought database creates missing parents and survives reopening", function()
@@ -99,7 +100,7 @@ return function(H)
     H.step("sync underlines and thoughts for the open chapter", function()
         local before = annotation_requests()
         local plugin = H.plugin()
-        H.call(function() plugin:startUnifiedAnnotationSync{ chapters = { chapter } } end)
+        without_ui_dns(H, function() plugin:startUnifiedAnnotationSync{ chapters = { chapter } } end)
         H.wait_until("annotation sync started", function()
             return plugin._external_annotation_sync ~= nil
         end, 15)

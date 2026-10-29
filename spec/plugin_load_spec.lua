@@ -249,6 +249,76 @@ expect(package.loaded["weread.lib.client"] ~= nil,
 expect(package.loaded["weread.ui.menu"] ~= nil,
     "namespaced menu module was not loaded")
 
+-- Progress transport adapters split HTTP from parent catalog/application.
+do
+    local Content = require("weread.lib.content")
+    local Dialog, PluginUtil = require("weread.ui.progress_sync_dialog"), require("weread.lib.plugin_util")
+    local originals = { ensure = Content.ensure_reader_state, fetch = Content.fetch_catalog,
+        save = Content.save_catalog_cache, get_book = fake_settings.get_book, log_error = PluginUtil.log_error,
+        request = Dialog.request, upload = plugin.read_report.upload_position,
+        subprocess = plugin.read_report.subprocess, database = plugin.library_db }
+    local function run_adapter_checks(inject_failure)
+    local ok, error_message = xpcall(function()
+    local book, chapters, child = { book_id = "book" }, { { chapterUid = 1 } }, true
+    local saves, writes = 0, 0
+    fake_settings.get_book = function() return book end
+    Content.ensure_reader_state = function() expect(child, "reader HTTP escaped child task") end
+    Content.fetch_catalog = function() expect(child, "catalog HTTP escaped child task"); return chapters end
+    Content.save_catalog_cache = function()
+        expect(not child, "catalog publication escaped parent")
+        saves = saves + 1; return saves ~= 2, "synthetic catalog failure"
+    end
+    require("weread.lib.plugin_util").log_error = tostring
+    plugin.library_db = { putChapters = function() expect(not child, "SQLite escaped parent"); writes = writes + 1 end }
+    expect(plugin.progress_sync.fetch_catalog("book") == chapters and saves == 0 and writes == 0,
+        "catalog task performed parent side effects")
+    child = false
+    expect(plugin.progress_sync.apply_catalog("book", chapters) == chapters and saves == 1 and writes == 1,
+        "catalog result did not reach parent publication")
+    expect(plugin.progress_sync.apply_catalog("book", chapters) == chapters and writes == 2,
+        "catalog file failure lost SQLite fallback")
+    plugin.library_db = nil
+    expect(plugin.progress_sync.apply_catalog("book", chapters) == chapters, "catalog without SQLite failed")
+    book = nil
+    local value, err = plugin.progress_sync.apply_catalog("book", chapters)
+    expect(value == nil and err == "book_not_found", "missing parent book accepted")
+    child = true
+    expect(not pcall(plugin.progress_sync.fetch_catalog, "book"), "missing source book accepted")
+    book, chapters = { book_id = "book" }, {}
+    expect(not pcall(plugin.progress_sync.fetch_catalog, "book"), "empty catalog accepted")
+    local task, options, cancel = function() end, { manual = true }, function() end
+    Dialog.request = function(host, fn, _, _, opts)
+        expect(host == plugin and fn == task and opts == options, "progress request adapter lost context")
+        return cancel
+    end
+    expect(plugin.progress_sync.request(task, function() end, function() end, options) == cancel,
+        "progress request adapter lost cancellation")
+    plugin.read_report.upload_position = function() error("synchronous upload must not run") end
+    local accepted, outcome = plugin.progress_sync.upload_position("book", {}, 0)
+    expect(not accepted and outcome.error_kind == "unsupported", "UI invoked no-worker raw upload")
+    plugin.read_report.subprocess = {}
+    plugin.read_report.upload_position = function() return true, { accepted = true } end
+    expect(plugin.progress_sync.upload_position("book", {}, 0) == true, "worker upload adapter stopped forwarding")
+    if inject_failure then error("synthetic adapter assertion failure") end
+    end, debug.traceback)
+    Content.ensure_reader_state, Content.fetch_catalog, Content.save_catalog_cache = originals.ensure, originals.fetch, originals.save
+    fake_settings.get_book, PluginUtil.log_error, Dialog.request = originals.get_book, originals.log_error, originals.request
+    plugin.read_report.upload_position, plugin.read_report.subprocess = originals.upload, originals.subprocess
+    plugin.library_db = originals.database
+    expect(fake_settings.get_book == originals.get_book and PluginUtil.log_error == originals.log_error
+        and Dialog.request == originals.request, "module replacements were not restored")
+    expect(plugin.read_report.upload_position == originals.upload
+        and plugin.read_report.subprocess == originals.subprocess and plugin.library_db == originals.database,
+        "plugin replacements were not restored")
+    if inject_failure then
+        expect(not ok and error_message:find("synthetic adapter assertion failure", 1, true),
+            "fault did not reach cleanup")
+    elseif not ok then error(error_message, 0) end
+    end
+    run_adapter_checks(false)
+    run_adapter_checks(true)
+end
+
 -- KOReader re-instantiates the plugin for every FileManager/ReaderUI. The
 -- second instance must share the services and must not re-run recovery.
 plugin.downloader.show_info("from first")

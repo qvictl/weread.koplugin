@@ -7,6 +7,7 @@ local Menu = require("ui/widget/menu")
 local UIManager = require("ui/uimanager")
 
 local PluginUtil = require("weread.lib.plugin_util")
+local RequestOwner = require("weread.lib.request_owner")
 local _ = PluginUtil.tr
 local T = PluginUtil.T
 local log_error = PluginUtil.log_error
@@ -105,7 +106,9 @@ end
 function M:isNetworkConnected()
     local ok, NetworkMgr = pcall(require, "ui/network/manager")
     if not ok or not NetworkMgr or not NetworkMgr.isConnected then
-        return self.settings and self.settings.mock_endpoint and true or self:isNetworkOnline()
+        -- An older runtime cannot inspect the link. Let the network task
+        -- report reachability rather than resolving DNS on the UI thread.
+        return true
     end
     local ok_connected, connected = pcall(function()
         return NetworkMgr:isConnected()
@@ -124,23 +127,24 @@ function M:showOffline(label)
 end
 
 -- options.silent_offline: no offline notice (background work).
--- options.link_only: check the interface link only, never a blocking DNS
--- lookup; for lifecycle-triggered work, where the request itself fails fast.
+-- Every UI gate checks the link only; the task reports DNS/HTTP failures.
+-- Existing callers may still pass link_only for compatibility.
 function M:runOnlineTask(label, callback, delay, options)
-    local online
-    if options and options.link_only then
-        online = self:isNetworkConnected()
-    else
-        online = self:isNetworkOnline()
-    end
+    local online = self:isNetworkConnected()
     if not online then
         if not (options and options.silent_offline) then
             self:showOffline(label)
         end
         return false
     end
+    local owner = RequestOwner.capture(self.settings)
     UIManager:scheduleIn(delay or 0.1, function()
+        -- Pass admission ownership into immediate request adapters, including
+        -- their cancellation cleanup, rather than adopting a later account.
+        local previous = self._network_task_owner
+        self._network_task_owner = owner
         local ok, err = xpcall(callback, debug.traceback)
+        self._network_task_owner = previous
         if not ok then
             self:closeBusy()
             logger.err("network task failed:", label, log_error(err))
@@ -156,12 +160,11 @@ end
 -- the parent with the task's result; failures are reported with error_label.
 -- Refuse to run network tasks when the runtime cannot provide a worker.
 function M:_runNetworkRequest(busy_text, error_label, task, on_success, on_failure)
-    local function account_id()
-        local settings = self.settings
-        local account = settings and settings.get and settings:get("account", {})
-        return type(account) == "table" and tostring(account.user_vid or "") or ""
+    local original_owner = self._network_task_owner or RequestOwner.capture(self.settings)
+    if not RequestOwner.matches(self.settings, original_owner) then
+        if on_failure then on_failure(nil, true, "account_changed") end
+        return
     end
-    local original_account = account_id()
     local function report(err)
         if on_failure then return on_failure(err, false) end
         logger.warn("annotation request failed:", tostring(error_label), tostring(err))
@@ -190,7 +193,7 @@ function M:_runNetworkRequest(busy_text, error_label, task, on_success, on_failu
         end, busy_text, true)
         -- A queued QR completion can switch accounts while the UI loop keeps
         -- running. Cookie/ticket renewal within the same account is harmless.
-        if account_id() ~= original_account then
+        if not RequestOwner.matches(self.settings, original_owner) then
             if on_failure then on_failure(nil, true, "account_changed") end
             return
         end
