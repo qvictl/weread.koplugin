@@ -22,10 +22,16 @@ Pull requests are welcome whether written by people or by AI. We gate on
 tests, not on who wrote the code. A PR can be merged only when all required
 checks pass:
 
-- `ci` - Lua lint (luacheck), namespace policy, unit/component specs, Python
+- `ci` - Lua lint (luacheck), namespace policy, affected unit/component specs, Python
   scripts, mock-service contract, package and changelog checks, secret scan;
-- `tests-policy` - test changes, unit diff coverage ≥ 80%, the PR's own-base
-  unit ratchet and dated unit/module floors.
+- `tests-policy` - test changes and unit diff coverage ≥ 80% across the whole PR.
+
+Ordinary PRs and main pushes select business Lua specs from both versions of
+the import graph. PRs use their frozen event merge-base; pushes use `before`.
+Missing bases, framework changes, unclassified dynamic imports or an unmatched
+production file run the full suite. Docs/integration-only changes can select
+none. Each run publishes a head-bound selection manifest. Selector, coverage,
+mock-service and other CI self-tests remain fixed checks.
 
 Real integration runs only for Release candidates: fork and official
 emulators plus the pinned PluginLoader must all succeed before publication.
@@ -47,8 +53,8 @@ Configured in [`.ci/coverage-policy.json`](.ci/coverage-policy.json). Scope:
 | Gate | Ordinary PR (`tests-policy`) | Release candidate |
 | --- | --- | --- |
 | Diff | unit ≥ 80% | real unit + emulator ≥ 90% |
-| Overall ratchet | unit against its own merge-base's nearest unit record | unit and combined, including an existing same-candidate record |
-| Dated targets | existing unit/module floors | existing unit/module and combined floors |
+| Overall ratchet | not measured by partial UT | full unit and combined, including an existing same-candidate record |
+| Dated targets | evaluated at Release | existing full unit/module and combined floors |
 
 The 0.1 percentage-point tolerance and all thresholds/dates are unchanged:
 unit ≥ 80% from 2026-11-24; unit ≥ 88% and each `weread/lib/*` file ≥ 70%
@@ -65,17 +71,22 @@ ancestor, all production code from the empty tree must meet the 90% diff
 floor and the existing day-one overall floor. Release history fetch/read
 failures stop validation; they are never treated as a first measurement.
 
-Main CI publishes genuine unit-only history. Release candidates and backfills
-of historical main Integration runs publish combined measurements. Missing
+Partial daily measurements never update whole-plugin history or badges.
+Release runs normal full UT before full LuaCov and real integration, then
+synchronously publishes authentic full unit and combined measurements. Manual
+historical full backfills remain available and must pass normal full UT and
+the original unit overall ratchet against their own source ancestry. Missing
 combined means unmeasured; the combined badge retains the nearest authentic
 measurement. A late unit publisher cannot erase a real same-SHA combined
-record. PRs still use their own base, so another PR's new tests do not change
-their baseline. See [docs/coverage-plan.md](docs/coverage-plan.md).
+record. Full unit ratchets use authentic full-unit ancestors, including an
+existing candidate record; a partial or version-only result cannot supply a
+new whole-plugin baseline.
 
-普通PR只执行unit改动行≥80%、自身merge-base的单元整体棘轮及原日期/模块目标，
-不等待模拟器。发版候选必须通过官方、fork及PluginLoader真实集成，并满足整批未发布
-改动合计≥90%、真实combined整体棘轮及原日期目标。diff排除candidate自身，overall
-棘轮保留其已有实测；每日unit记录不伪造combined。覆盖历史读取失败必须阻止发布。
+普通PR/main按改动影响选择业务Lua UT，PR整批改动行单测≥80%，不等待模拟器。
+选择器和覆盖率工具等基础自检仍固定运行；无法安全选择时回退全量。部分UT的整体
+覆盖率及基线均为未测，不更新历史/徽章。发版必须普通全量UT硬通过，再运行全量
+LuaCov及官方/fork/PluginLoader真实集成，检查原unit/combined整体棘轮、日期/模块
+目标和整批combined diff≥90%；不新增发版unit diff门槛。覆盖历史读取失败阻止发布。
 
 See [docs/testing.md](docs/testing.md).
 

@@ -741,6 +741,12 @@ function Downloader:_runInterruptible(dl, task)
     if self:_accountChanged(dl) or dl.cancelled then return nil end
     if not completed then
         if failure_reason == "low_memory" then error(LOW_MEMORY_ERROR, 0) end
+        local reason = result or failure_reason
+        if reason == "worker_no_result" then
+            error(_("The operation did not return a result. Please try again."), 0)
+        elseif reason == "worker_timeout" then
+            error(_("The operation timed out. Please try again."), 0)
+        end
         error("could not start download worker")
     end
     if not result then error("download worker returned no result") end

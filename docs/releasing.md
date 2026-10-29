@@ -90,9 +90,13 @@ changelog section.
 
 ## Coverage and provenance / 覆盖率与来源
 
-PRs retain unit diff ≥ 80%, their own-base unit ratchet and existing unit/module
-targets. Only Release candidates run integration and enforce combined diff ≥ 90%,
-combined overall ratchet and dated combined targets. The diff covers the batch
+PRs run affected business Lua UT and require unit diff ≥ 80% for the full PR.
+Partial results have null whole coverage/baselines and never publish badges.
+Release first runs normal full UT with blocking failures, then full LuaCov and
+integration. It enforces the original full unit/combined overall ratchets,
+dated/module targets and combined diff ≥ 90%. Instrumentation-only timing
+failures retain the existing advisory behavior after normal full UT passes.
+The combined diff covers the batch
 since the nearest real combined ancestor (skipping unit-only records and excluding
 the candidate); the overall ratchet includes an existing measurement for the
 same candidate. With no earlier combined ancestor, all production lines must
@@ -103,7 +107,8 @@ advances. The candidate manifest binds its exact source and successful CI run;
 all three coverage shards must measure that source. Reruns select artifacts by
 latest creation time and reject partial, ambiguous or mismatched data. Publication
 keeps main ancestry checks, fixed-workflow tooling and non-persistent checkout
-credentials. Daily unit history never fabricates or erases combined coverage.
+credentials. Daily partial UT never writes whole-plugin history. Fixed CI
+tooling self-tests remain enabled independently of the business UT selection.
 
 Version resolution runs without a concurrency lock. Only a confirmed candidate
 enters the reusable `release-candidate.yml` call, whose lock covers integration,
@@ -117,8 +122,14 @@ job validates the exact accepted reports, fetches main ancestry and current
 history again, rechecks the gate, and pushes the measurement before packaging.
 A main candidate cannot finish successfully while its combined record is still
 pending in a separate workflow. Package-only candidates from non-main refs do not
-write main history, even when their SHA is an ancestor of main. Daily Coverage runs publish unit records only; manual
-historical backfills remain available.
+write main history, even when their SHA is an ancestor of main. `Coverage` is
+manual-only for historical full backfills; ordinary main CI does not start
+another full measurement. Release reuses its existing synchronous persistence.
+Manual backfills pass normal full UT, then the writer rechecks the full-unit
+overall ratchet against the target's real ancestors (including a same-SHA
+measurement) before changing history. Newer main descendants do not constrain
+an older source's backfill. The original0.1pp tolerance applies; no new release
+unit-diff threshold is added.
 
 A failed or cancelled Release with a previously successful combined gate must
 have that ancestor measurement in history before a later candidate proceeds.

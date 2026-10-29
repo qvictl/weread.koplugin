@@ -18,9 +18,35 @@ luacheck main.lua _meta.lua weread spec
 python3 scripts/test_mock_weread.py
 ```
 
-`run_lua_specs.sh` executes every top-level `spec/*_spec.lua` with LuaJIT.
+Without a manifest, `run_lua_specs.sh` executes every top-level `spec/*_spec.lua` with LuaJIT.
 These standalone tests stub KOReader services and cover pure logic, service
 composition, state machines, migration behavior, and regressions.
+
+Ordinary CI selects affected business Lua specs. To inspect and reuse the same
+selection locally (both runners reject a manifest for a different HEAD):
+
+```bash
+python3 scripts/select_lua_tests.py --base "$(git merge-base HEAD origin/main)" --head HEAD --out /tmp/weread-unit-selection.json
+bash scripts/run_lua_specs.sh --manifest /tmp/weread-unit-selection.json
+bash scripts/run_lua_coverage.sh --manifest /tmp/weread-unit-selection.json
+```
+
+The version1 manifest records mode (`full`, `selected`, `none`), base/head SHA,
+tests, changed files, reasons and total test inventory. Selection joins both
+Git versions' dependency graphs, including literal require/pcall/loadfile,
+package.loaded/preload references and verified Runtime/menu preload lists.
+Computed cache keys conservatively depend on all local runtime/helper modules;
+escaped or unclassified module loaders fall back to full UT.
+Runtime consumers conservatively depend on all repository Lua modules because
+injected preload options can use computed keys or come from another function.
+Lua helpers remain in the graph even in an integration directory if unit tests
+load them; opaque non-Lua spec fixtures conservatively run full UT, including
+fixtures under integration directories that unit tests may also read.
+Unclassified dynamic loaders, framework changes and unmatched production
+changes conservatively run full UT. PRs freeze their event base/head, main
+pushes use `before`, and a manual run without a base uses full UT. Docs/IT-only
+changes can run zero business Lua specs. Fixed CI tooling self-tests, lint,
+Python/mock checks, package checks and secret scans still run.
 
 `plugin_load_spec.lua` is the entry-point smoke test. It loads the real
 `main.lua`, initializes the service graph with deterministic fakes, composes
@@ -222,33 +248,39 @@ The `PR policy` workflow's `tests-policy` job is a required check:
   update an emulator scenario. Waivers: `no-tests-needed` (maintainers;
   docs, comments or log wording only), `upstream-sync`.
 - **Coverage gates** (`scripts/coverage_tools.py gate`, thresholds and dated
-  targets in `.ci/coverage-policy.json`): PR mode enforces unit diff ≥ 80%,
-  its own-base unit ratchet and dated unit/module floors. Release mode
-  requires authentic combined diff ≥ 90%, combined overall ratchet and
-  the existing dated combined floors. Unit floors remain in force.
+  targets in `.ci/coverage-policy.json`): ordinary `diff` mode enforces only
+  unit diff ≥ 80% across the full PR. Whole coverage/baseline fields are null.
+  Release mode requires normal full UT to pass, then full unit coverage,
+  authentic combined diff ≥ 90%, full unit/combined overall ratchets and the
+  existing dated unit/module/combined floors. All thresholds and 0.1 tolerance
+  remain unchanged; there is no new release unit-diff threshold.
   See [CONTRIBUTING.md](../CONTRIBUTING.md#coverage-policy--覆盖率策略) and the
-  roadmap in [coverage-plan.md](coverage-plan.md); the tooling itself is
-  tested by `python3 scripts/test_coverage_tools.py`.
+  tooling self-tests `python3 scripts/test_coverage_tools.py` and
+  `python3 scripts/test_select_lua_tests.py`.
 
 How coverage is measured:
 
-- unit: `scripts/run_lua_coverage.sh` runs every `spec/*_spec.lua` under
-  LuaCov (JIT off), merges per-spec stats and adds untested plugin files with
-  zero hits;
+- unit: `scripts/run_lua_coverage.sh` uses the same validated manifest as
+  the normal runner, or all specs by default. LuaCov runs with JIT off,
+  merges per-spec stats and adds untested plugin files with zero hits. Partial
+  results have no overall measurement and cannot publish history/badges;
 - emulator: `scripts/run_emulator_scenarios.py --coverage` installs
   `spec/emulator/luacov_patch.lua` as an early KOReader userpatch, so LuaCov
   runs inside the real app from before plugin loading, including forked
   download/login workers (per-PID stats). `@no_coverage` scenarios (timing
   budgets) run without it. CI measures it on the fork build only and uploads
   `coverage-emulator-shard-*` (the official-build job collects no coverage);
-- PR policy never waits for integration and reports unit-only measurements;
+- PR policy never waits for integration and reports changed-line unit coverage;
 - Release merges unit stats with all three fork shards from its own outer
   run, requiring every measured SHA to equal the declared candidate. Its
   diff starts at the nearest real combined ancestor, skipping unit-only
   records and excluding the candidate itself. Overall combined ratchet
   includes any previous measurement for the same candidate;
-- main CI publishes unit-only history. Release synchronously persists
-  genuine combined history before packaging; absent combined values are never copied from unit.
+- main CI does not publish partial coverage. Release synchronously persists
+  genuine full unit/combined history before packaging; only manual full
+  historical backfills use `Coverage`. Backfills first pass normal full UT
+  and the unit ratchet against their own ancestors, not newer main descendants.
+  Missing combined is never copied from unit.
   Publishing checks actual main ancestry and preserves prior same-SHA combined data.
 
 Locally (LuaCov checkout on `LUA_PATH`):
@@ -268,7 +300,10 @@ python3 scripts/coverage_tools.py gate --mode release --unit coverage/unit.repor
 ```
 
 修改 Lua 代码的 PR 必须修改 `spec/`，`feat`/`fix` 类 PR 必须新增或更新模拟器场景；改动行
-覆盖率在普通PR执行单元≥80%及自身unit基线棘轮；发版候选执行整批改动合计≥90%、真实combined棘轮及相应日期目标。无真实combined祖先时全生产代码从空树比较；history下载或读取失败会阻止发布。
+覆盖率在普通PR仅执行整批改动单测≥80%；部分UT不声称整体实测、不写历史/徽章。
+发版先普通全量UT硬通过，再运行全量覆盖率和真实集成，执行原unit/combined整体棘轮、
+日期/模块目标及整批combined diff≥90%。无真实combined祖先时从空树比较；history
+下载或读取失败阻止发布。
 
 ## Updater simulator regression / 更新弹窗模拟器回归
 

@@ -30,7 +30,8 @@
 （squash，上游同步分支 `sync/upstream-*` 用 merge commit，保留与上游共享的历史）：
 
 1. **必需检查全部成功**：`main` 分支保护要求的检查（网关运行时从分支保护读取；撰写本文时为 `ci`、`tests-policy`；以分支保护为准，
-   包括测试策略和unit覆盖率门禁；真实集成与combined门禁在发版时执行）都成功（`success` / `neutral` / `skipped`）。排队或重跑中的检查算未完成。
+   包括受影响业务UT和整批PR unit diff≥80%；选择/覆盖率工具等基础自检固定运行，
+   全量UT/真实集成及unit/combined整体与日期/模块门禁在发版执行）都成功（`success` / `neutral` / `skipped`）。排队或重跑中的检查算未完成。
 2. **AI 审查已完成且没有 Request changes**：CodeRabbit（`coderabbitai[bot]`）审查过 head SHA——提交了 `commit_id` 等于 head 的审查，或者（CodeRabbit 没有意见时不发 review）`coderabbitai` 应用在
    该提交上最新的 `CodeRabbit` 检查已完成、结论为 success 且为 “Review completed”；并且它最新的结论性审查
    （Approve / Request changes）不是 **Request changes**。（Gemini Code Assist 已按所有者决定停用。）

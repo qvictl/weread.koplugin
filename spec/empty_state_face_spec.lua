@@ -241,14 +241,23 @@ local clamped_view = LibraryView.show({
 expect(clamped_view.page == 3 and #clamped_view._item_rows == 5,
     "last bookshelf page was not clamped and sliced correctly")
 
+local refresh_requests = 0
 local single_page_view = LibraryView.show({
     mode = "books", books = { books[1], books[2], books[3] }, accounts = {},
     paged = true, page = 1, page_size = 10,
-}, {})
+}, {
+    on_page_changed = function() error("single-page turn must not run") end,
+    on_refresh = function() refresh_requests = refresh_requests + 1 end,
+})
 expect(single_page_view.page_count == 1
         and #single_page_view._item_rows == 3
         and single_page_view._page_buttons == nil,
     "single-page bookshelf created unnecessary navigation controls")
+-- The actual top-bar refresh action remains available when pagination rejects
+-- a same-page request, allowing a low-memory cover batch to be retried.
+expect(single_page_view:requestPage(1) == false, "single-page turn unexpectedly accepted")
+single_page_view.refresh_button.callback()
+expect(refresh_requests == 1, "single-page top-bar refresh button did not invoke the refresh action")
 
 local exact_page_change
 local exact_page_view = LibraryView.show({
