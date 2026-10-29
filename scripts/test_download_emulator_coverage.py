@@ -4,6 +4,7 @@
 import io
 import json
 import os
+import shutil
 from pathlib import Path
 import subprocess
 import textwrap
@@ -166,6 +167,154 @@ class CoverageArtifactsTest(unittest.TestCase):
                     if not accepted:
                         self.assertIn(b"not an ancestor of main", result.stdout)
 
+
+    def test_release_persists_real_reports_and_rechecks_a_racing_higher_floor(self):
+        from test_coverage_tools import luacov_report, POLICY
+        workflow = Path(__file__).resolve().parent.parent / ".github/workflows/release.yml"
+        step = workflow.read_text().split("- name: Persist main measurement before publication\n", 1)[1].split("\n  package-and-release:", 1)[0]
+        command = textwrap.dedent(step.split("run: |\n", 1)[1])
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source, remote, seed = [root / name for name in ("source", "remote.git", "seed")]
+            source.mkdir()
+            def git(repo, *args):
+                return subprocess.check_output(["git", "-C", str(repo), *args], text=True, stderr=subprocess.DEVNULL).strip()
+            git(root, "init", "-q", "--bare", str(remote))
+            git(source, "init", "-q", "-b", "main")
+            (source / ".ci").mkdir()
+            (source / ".ci/coverage-policy.json").write_text(json.dumps(dict(POLICY, diff_unit_min=80, diff_combined_min=90)))
+            module = source / "weread/lib/m.lua"
+            module.parent.mkdir(parents=True)
+            rows = ["line_%d()" % i for i in range(20)]
+            def commit():
+                module.write_text("\n".join(rows) + "\n")
+                git(source, "add", ".")
+                git(source, "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "source")
+                return git(source, "rev-parse", "HEAD")
+            base = commit()
+            rows[0] = "candidate_A()"
+            candidate = commit()
+            git(source, "remote", "add", "origin", str(remote))
+            git(source, "push", "-q", "origin", "main")
+            git(root, "clone", "-q", str(remote), str(seed))
+            git(seed, "checkout", "-q", "--orphan", "coverage")
+            (seed / "history.jsonl").write_text(json.dumps({"sha": base, "date": "2026-10-28", "run": "", "unit": {"percent": 80}, "combined": {"percent": 90}}) + "\n")
+            git(seed, "add", ".")
+            git(seed, "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "history")
+            git(seed, "push", "-q", "origin", "coverage")
+            run = root / "run"
+            reports = run / "accepted-coverage"
+            tools = run / "coverage-tooling/scripts"
+            reports.mkdir(parents=True)
+            tools.mkdir(parents=True)
+            (tools / "coverage_tools.py").symlink_to(Path(__file__).resolve().parent / "coverage_tools.py")
+            binaries = root / "bin"
+            binaries.mkdir()
+            (binaries / "sleep").write_text("#!/bin/sh\nexit 0\n")
+            (binaries / "sleep").chmod(0o755)
+            (binaries / "git").write_text('#!/bin/sh\nif [ "$REJECT_COVERAGE_PUSH" = 1 ]; then\n for arg do [ "$arg" != push ] || exit 9; done\nfi\nexec "' + shutil.which("git") + '" "$@"\n')
+            (binaries / "git").chmod(0o755)
+            env = dict(os.environ, RUNNER_TEMP=str(run), COVERAGE_REPO=str(source), SHA=candidate,
+                       RUN_URL="https://example.invalid/runs/10", PATH=str(binaries) + os.pathsep + os.environ["PATH"])
+            def measure(sha, missed):
+                (reports / "unit.report.out").write_text(luacov_report({"weread/lib/m.lua": [(1, row) for row in rows]}))
+                (reports / "combined.report.out").write_text(luacov_report({"weread/lib/m.lua": [(0 if i in missed else 1, row) for i,row in enumerate(rows)]}))
+                (reports / "release-gate.json").write_text(json.dumps(dict(mode="release", passed=True, measured_sha=sha)))
+                env["SHA"] = sha
+                return subprocess.run(["bash", "-e", "-c", command], cwd=source, env=env, capture_output=True, text=True)
+            env["REJECT_COVERAGE_PUSH"] = "1"
+            result = measure(candidate, [19])
+            self.assertNotEqual(result.returncode, 0, "a failed history push completed publication")
+            records = [json.loads(line) for line in git(remote, "show", "coverage:history.jsonl").splitlines()]
+            self.assertNotIn(candidate, [r["sha"] for r in records])
+            env["REJECT_COVERAGE_PUSH"] = "0"
+            result = measure(candidate, [19])
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            records = [json.loads(line) for line in git(remote, "show", "coverage:history.jsonl").splitlines()]
+            self.assertEqual(next(r["combined"]["percent"] for r in records if r["sha"] == candidate), 95)
+            rows[1] = "candidate_B()"
+            next_candidate = commit()
+            git(source, "push", "-q", "origin", "main")
+            result = measure(next_candidate, [18,19])
+            self.assertNotEqual(result.returncode, 0, "a newly persisted higher floor was ignored")
+            self.assertIn("95.00%", result.stdout)
+            records = [json.loads(line) for line in git(remote, "show", "coverage:history.jsonl").splitlines()]
+            self.assertNotIn(next_candidate, [r["sha"] for r in records])
+
+    def test_failed_release_persistence_cannot_drop_an_accepted_ancestor_floor(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            def git(*args):
+                return subprocess.check_output(["git", "-C", str(root), *args], text=True).strip()
+            git("init", "-q")
+            shas = []
+            for value in ["A", "B"]:
+                (root / "source").write_text(value)
+                git("add", ".")
+                git("-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", value)
+                shas.append(git("rev-parse", "HEAD"))
+            ancestor, target = shas
+            history = root / "history.jsonl"
+            def persist(percent=None):
+                record = {"sha": ancestor, "unit": {"percent": 80}}
+                if percent is not None:
+                    record["combined"] = {"percent": percent}
+                history.write_text(json.dumps(record) + "\n")
+            gate = dict(mode="release", passed=True, measured_sha=ancestor, overall_combined={"percent": 95})
+            manifest = dict(run_id=10, candidate=True, target_sha=ancestor, ci_run=9)
+            current_gate = root / "current-gate.json"
+            current_gate.write_text(json.dumps(dict(passed=True, measured_sha=target, overall_combined={"percent": 90})))
+            gate_succeeded = True
+            def zipped(name, value):
+                output = io.BytesIO()
+                with zipfile.ZipFile(output, "w") as archive:
+                    archive.writestr(name, json.dumps(value))
+                return output.getvalue()
+            def api(endpoint, *_):
+                if "/workflows/release.yml/runs?" in endpoint:
+                    return json.dumps([{"workflow_runs": [
+                        {"id": 20, "conclusion": None}, {"id": 10, "conclusion": "failure"},
+                        {"id": 5, "conclusion": "success"}]}]).encode()
+                if "/20/jobs?" in endpoint:
+                    return json.dumps([{"jobs": []}]).encode()
+                if "/10/jobs?" in endpoint:
+                    return json.dumps([{"jobs": [{"name": "Release combined coverage gate",
+                        "conclusion": "success" if gate_succeeded else "failure"}]}]).encode()
+                if "/10/artifacts?" in endpoint:
+                    return json.dumps([{"artifacts": [
+                        {"id": 100, "name": "release-candidate", "created_at": "2026-10-29T00:00:00Z"},
+                        {"id": 101, "name": "release-coverage", "created_at": "2026-10-29T00:00:00Z"}]}]).encode()
+                if "/100/zip" in endpoint:
+                    return zipped("candidate.json", manifest)
+                if "/101/zip" in endpoint:
+                    return zipped("release-gate.json", gate)
+                self.fail("Unexpected endpoint: " + endpoint)
+            with mock.patch.object(dc, "gh_api", side_effect=api):
+                for percent in [None, 94]:
+                    persist(percent)
+                    with self.subTest(persisted=percent), self.assertRaisesRegex(ValueError, "not persisted"):
+                        dc.require_release_history("owner/plugin", 20, target, history, current_gate, cwd=root)
+                for percent in [95, 96]:
+                    persist(percent)
+                    dc.require_release_history("owner/plugin", 20, target, history, current_gate, cwd=root)
+                persist()
+                gate_succeeded = False
+                dc.require_release_history("owner/plugin", 20, target, history, current_gate, cwd=root)
+                gate_succeeded = True
+                current_gate.write_text(json.dumps(dict(passed=True, measured_sha=ancestor, overall_combined={"percent": 96})))
+                dc.require_release_history("owner/plugin", 20, ancestor, history, current_gate, cwd=root)
+                current_gate.write_text(json.dumps(dict(passed=True, measured_sha=ancestor, overall_combined={"percent": 94})))
+                with self.assertRaisesRegex(ValueError, "not persisted"):
+                    dc.require_release_history("owner/plugin", 20, ancestor, history, current_gate, cwd=root)
+                manifest["target_sha"] = target
+                gate["measured_sha"] = target
+                # Revalidating old A must not acquire a floor from its descendant B.
+                dc.require_release_history("owner/plugin", 20, ancestor, history, current_gate, cwd=root)
+                current_gate.write_text(json.dumps(dict(passed=True, measured_sha=target, overall_combined={"percent": 96})))
+                manifest["target_sha"] = ancestor
+                gate["measured_sha"] = target
+                with self.assertRaisesRegex(ValueError, "inconsistent"):
+                    dc.require_release_history("owner/plugin", 20, target, history, current_gate, cwd=root)
 
     def test_integration_records_the_candidate_when_caller_main_advanced(self):
         workflow = Path(__file__).resolve().parent.parent / ".github/workflows/integration.yml"

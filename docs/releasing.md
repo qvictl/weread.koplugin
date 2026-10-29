@@ -103,3 +103,18 @@ all three coverage shards must measure that source. Reruns select artifacts by
 latest creation time and reject partial, ambiguous or mismatched data. Publication
 keeps main ancestry checks, fixed-workflow tooling and non-persistent checkout
 credentials. Daily unit history never fabricates or erases combined coverage.
+
+Release candidates serialize through combined-history persistence. A dedicated
+job validates the exact accepted reports, fetches main ancestry and current
+history again, rechecks the gate, and pushes the measurement before packaging.
+A main candidate cannot finish successfully while its combined record is still
+pending in a separate workflow. Package-only candidates outside main do not
+write main history. Daily Coverage runs publish unit records only; manual
+historical backfills remain available.
+
+A failed or cancelled Release with a previously successful combined gate must
+have that ancestor measurement in history before a later candidate proceeds.
+Retry the failed candidate's persistence first. Revalidating the same candidate
+may repair it, provided its new measurement retains every still-available
+accepted attempt's combined floor. Missing or inconsistent accepted evidence
+fails closed; a lower subsequent rerun cannot replace an earlier high floor.

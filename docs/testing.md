@@ -246,8 +246,8 @@ How coverage is measured:
   diff starts at the nearest real combined ancestor, skipping unit-only
   records and excluding the candidate itself. Overall combined ratchet
   includes any previous measurement for the same candidate;
-- main CI publishes unit-only history. Successful Release candidates publish
-  genuine combined history; absent combined values are never copied from unit.
+- main CI publishes unit-only history. Release synchronously persists
+  genuine combined history before packaging; absent combined values are never copied from unit.
   Publishing checks actual main ancestry and preserves prior same-SHA combined data.
 
 Locally (LuaCov checkout on `LUA_PATH`):
