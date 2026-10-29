@@ -336,7 +336,7 @@ downloader:_beginStandby()
 downloader:_ensureProgressDialog(transferred)
 trapper:wrap(function() downloader:_step(transferred) end)
 -- With images enabled one worker fetches the text and the images.
-resumed({ xhtml = "<p>final</p>", assets = {}, state = { css = "body{}" },
+resumed({ xhtml = "<p>final</p>", assets = {}, state_delta = { css = { value = "body{}" } },
     book = { book_id = "book", psvts = "fresh" }, finalized = true })
 expect(transferred.state.css == "body{}"
     and transferred.book.psvts == "fresh" and transferred.book.token == nil,

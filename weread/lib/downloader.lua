@@ -18,6 +18,7 @@ local time = require("ui/time")
 local T = require("ffi/util").template
 
 local Content = require("weread.lib.content")
+local ChapterState = require("weread.lib.chapter_state")
 local DownloadDialog = require("weread.ui.download_dialog")
 local ErrorText = require("weread.lib.error_text")
 local Footnotes = require("weread.lib.footnotes")
@@ -1419,7 +1420,7 @@ function Downloader:_finishChapter(dl)
     if dl.current.finalized then
         -- The worker already fetched the images together with the text.
         ok, result = true, {
-            xhtml = dl.current.xhtml, assets = dl.current.assets, state = dl.state,
+            xhtml = dl.current.xhtml, assets = dl.current.assets,
         }
     else
         local cache = self.settings:get("cache") or {}
@@ -1434,9 +1435,10 @@ function Downloader:_finishChapter(dl)
         local started = time.now()
         ok, result = pcall(function()
             local function finalize()
+                local state, collect = ChapterState.begin(dl.state)
                 local xhtml, assets = Content.finalize_single_chapter_content(
-                    self.client, self.settings, dl.book, chapter, dl.current.xhtml, dl.state)
-                return { xhtml = xhtml, assets = assets, state = dl.state }
+                    self.client, self.settings, dl.book, chapter, dl.current.xhtml, state)
+                return { xhtml = xhtml, assets = assets, state_delta = collect() }
             end
             -- Only reached when images were enabled after the source was
             -- fetched without them; the normal image path never forks here.
@@ -1451,7 +1453,7 @@ function Downloader:_finishChapter(dl)
         end
     end
     local xhtml, chapter_assets = result.xhtml, result.assets
-    dl.state = result.state
+    if result.state_delta then ChapterState.apply(dl.state, result.state_delta) end
     local uid = tostring(chapter.chapterUid or dl.index)
     if dl.resumable then
         -- The stylesheet comes with the first chapter; rewrite it only when
@@ -1828,16 +1830,18 @@ function Downloader:_step(dl)
     local started = time.now()
     local ok, result = pcall(function()
         return self:_runInterruptible(dl, function()
+            local state, collect = ChapterState.begin(dl.state)
             local xhtml = Content.fetch_single_chapter_source(
-                self.client, self.settings, dl.book, chapter, dl.state)
-            local value = { xhtml = xhtml, state = dl.state, book = reader_book(dl.book) }
+                self.client, self.settings, dl.book, chapter, state)
+            local value = { xhtml = xhtml, book = reader_book(dl.book) }
             if with_images then
-                -- Fetch the images in the same worker: one fork per chapter
-                -- instead of two, and the source text never crosses the pipe.
+                -- Fetch text and images in one worker; only the finalized
+                -- XHTML and this chapter's state changes come back.
                 value.xhtml, value.assets = Content.finalize_single_chapter_content(
-                    self.client, self.settings, dl.book, chapter, xhtml, dl.state)
+                    self.client, self.settings, dl.book, chapter, xhtml, state)
                 value.finalized = true
             end
+            value.state_delta = collect()
             return value
         end)
     end)
@@ -1849,7 +1853,7 @@ function Downloader:_step(dl)
         return
     end
     local xhtml = result.xhtml
-    dl.state = result.state
+    ChapterState.apply(dl.state, result.state_delta)
     apply_reader_book(dl.book, result.book)
     if dl.chapter_source_retries then
         dl.chapter_source_retries[tostring(chapter.chapterUid or dl.index)] = nil
