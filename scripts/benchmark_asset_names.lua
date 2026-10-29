@@ -17,9 +17,10 @@ if revision then
 end
 
 local name = require("weread.lib.content")._unique_asset_name
-local warm = {}
-for _ = 1, 100 do name(warm, "same-image", ".png") end
-warm = nil
+do
+    local warm = {}
+    for _ = 1, 100 do name(warm, "same-image", ".png") end
+end
 for _, count in ipairs({ 1000, 2000 }) do
     collectgarbage("collect")
     local before_kb = collectgarbage("count")
