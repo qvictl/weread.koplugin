@@ -33,6 +33,26 @@ expect(name(sparse, "photo", ".png") == "photo-4.png", "cursor still checks name
 expect(name(sparse, "photo-4", ".png") == "photo-4-2.png", "numbered stems have an independent suffix")
 expect(name(sparse, "photo", ".jpg") == "photo.jpg", "extensions have independent suffixes")
 
+local distinct = {}
+for i = 1, 512 do name(distinct, "image-" .. i, ".png") end
+expect(distinct.__next_asset_suffix == nil, "unique stems do not need a second per-image map")
+
+-- Bound accesses so the old cover.* infinite loop fails without hanging
+-- this process. MIME sniffing can disagree with a remote image's extension.
+local cover_probes, cover_names = 0, { ["cover-jpg-2.png"] = true }
+local covers = setmetatable({}, {
+    __index = function(_, key)
+        cover_probes = cover_probes + 1
+        assert(cover_probes < 100, "cover name allocation did not converge")
+        return cover_names[key]
+    end,
+    __newindex = function(_, key, value) cover_names[key] = value end,
+})
+expect(name(covers, "Cover.jpg", ".png") == "Cover-jpg-3.png",
+    "a cover with a mismatched MIME extension escapes the reserved prefix")
+expect(name(covers, "cover.artwork.png", ".png") == "cover-artwork-2.png",
+    "a dotted cover stem escapes the reserved prefix")
+
 -- Count map accesses instead of relying on machine speed to detect the old
 -- quadratic scan. The set is a proxy so reads of occupied names count too.
 local probes, backing = 0, {}

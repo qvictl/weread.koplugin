@@ -72,6 +72,11 @@ return function(H)
             end
             H.equal(lfs.attributes(workspace.asset_dir .. "/existing.png", "size"), #png + #"existing",
                 "bulk extraction preserves the previous chapter's image")
+            bytes = entry("Cover.jpg", png .. "mismatched extension") .. string.rep("\0", 1024)
+            local covers = Content.download_chapter_assets_to_files(
+                client, { book_id = "synthetic" }, chapter, names, workspace)
+            H.equal(covers[1].href, "images/Cover-jpg-2.png",
+                "MIME extension mismatch cannot loop within the reserved cover prefix")
         end)
     end)
 end

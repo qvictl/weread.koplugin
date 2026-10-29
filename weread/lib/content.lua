@@ -239,16 +239,22 @@ local function unique_asset_name(used, name, ext)
     local candidate = base
     -- This set travels between chapter workers. Keep the next suffix with it
     -- so repeated names do not rescan every previously allocated image.
-    local suffixes = used.__next_asset_suffix or {}
-    used.__next_asset_suffix = suffixes
+    local suffixes = used.__next_asset_suffix
     local key = base:lower()
-    local index = suffixes[key] or 2
+    local index = suffixes and suffixes[key] or 2
     local stem = base:gsub("%.[^%.]+$", "")
+    -- A mismatched extension (cover.jpg.png) must also escape cover.*;
+    -- appending a numeric suffix alone would leave every candidate reserved.
+    if stem:lower():match("^cover%.") then stem = stem:gsub("%.", "-", 1) end
     while asset_name_taken(used, candidate) do
         candidate = stem .. "-" .. tostring(index) .. ext
         index = index + 1
     end
-    suffixes[key] = index
+    if index > 2 then
+        suffixes = suffixes or {}
+        suffixes[key] = index
+        used.__next_asset_suffix = suffixes
+    end
     used[candidate:lower()] = true
     return candidate
 end
