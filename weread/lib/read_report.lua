@@ -39,7 +39,7 @@ local CONTEXT_FIELDS = {
     -- position (sent by a report); false when they are a cloud position
     -- merged in or re-asserted. Only the former counts as "ours" for the
     -- monotonic guard.
-    "reported_local",
+    "reported_local", "reported_local_owner",
 }
 
 local ReadReport = {}
@@ -641,7 +641,7 @@ end
 -- pipeline to a subprocess (or run it inline as a fallback).
 -- ------------------------------------------------------------------
 
--- No persistence here: credentials already select the new account's store.
+-- No persistence here: the shared book store may still contain old-owner records.
 function ReadReport:on_account_changed()
     self:stop("account_changed")
     self.owner = RequestOwner.capture(self.settings)
@@ -1166,7 +1166,8 @@ function ReadReport:_run_pipeline(book_id, opts)
     local stored
     if opts.guard then
         local record = get_book(self.settings, book_id)
-        if type(record) == "table" and record.reported_local == true then
+        if type(record) == "table" and record.reported_local == true
+            and record.reported_local_owner == RequestOwner.digest(RequestOwner.capture(self.settings)) then
             stored = slim_position(record)
         end
     end
@@ -1503,7 +1504,7 @@ function ReadReport:ensure_context(book_id, force, opts)
     return book
 end
 
-local function apply_position(book, position)
+local function apply_position(book, position, owner)
     if type(position) ~= "table" then return book end
     book.chapter_uid = position.chapter_uid or book.chapter_uid
     book.chapter_idx = tonumber(position.chapter_idx) or tonumber(book.chapter_idx) or 0
@@ -1514,12 +1515,13 @@ local function apply_position(book, position)
     book.summary = position.summary or book.summary or ""
     -- Positions marked `cloud` re-assert the cloud's own position.
     book.reported_local = position.cloud ~= true
+    book.reported_local_owner = RequestOwner.digest(owner)
     return book
 end
 
 function ReadReport:build_payload(book_id, elapsed_seconds, book, position)
     book = book or self:ensure_context(book_id, false)
-    apply_position(book, position)
+    apply_position(book, position, RequestOwner.capture(self.settings))
     return WeRead.make_read_payload{
         book_id = book_id,
         chapter_uid = book.chapter_uid,
@@ -1537,7 +1539,7 @@ end
 
 function ReadReport:_send(book_id, book, position, elapsed_seconds, opts)
     opts = opts or {}
-    apply_position(book, position)
+    apply_position(book, position, RequestOwner.capture(self.settings))
     if book.pclts == nil or book.pclts == "" or tonumber(book.pclts) == 0 then
         book.pclts = WeRead.e(self.now())
     end

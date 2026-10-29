@@ -352,6 +352,7 @@ test("cloud unchanged since this device wrote it: local far ahead wins quietly",
         chapterOffset = 150,
         updateTime = 10,
     })
+    f.values.books.book.last_uploaded_position_owner = require("weread.lib.request_owner").digest(f.sync.session_owner)
     f.values.books.book.last_uploaded_position = {
         chapter_uid = 22, chapter_offset = 150, percent = 25,
     }
@@ -372,6 +373,7 @@ test("cloud moved elsewhere: local far ahead still asks", function()
         chapterOffset = 200,
         updateTime = 10,
     })
+    f.values.books.book.last_uploaded_position_owner = require("weread.lib.request_owner").digest(f.sync.session_owner)
     f.values.books.book.last_uploaded_position = {
         chapter_uid = 22, chapter_offset = 150, percent = 25,
     }
@@ -1735,6 +1737,33 @@ test("pending owner digest restores only a proven account across instances", fun
     eq(f.values.books.book.pending_upload_position.percent, 50, "fresh local position replaces legacy")
     eq(f.values.books.book.pending_upload_owner, Owner.digest(Owner.capture(f.sync.settings)),
         "fresh pending position is owned by current account")
+end)
+
+test("shared book baselines retain separate owners across gateway changes", function()
+    local Owner = require("weread.lib.request_owner")
+    local f = async_fixture()
+    local position = { chapter_uid = 22, chapter_offset = 150, percent = 25 }
+    f.sync:_persist("book", { last_remote_position = position, last_uploaded_position = position })
+    local book = f.values.books.book
+    local old_digest = Owner.digest(f.sync.session_owner)
+    book.reported_local, book.reported_local_owner = true, old_digest
+    book.chapter_uid, book.chapter_offset, book.progress = 22, 150, 25
+    eq(#f.sync:_known_cloud_positions("book"), 3, "all current-owner baseline fields trusted")
+    f.sync.last_uploaded_position = position
+    f.values.api_key = "synthetic-api-two"
+    eq(#f.sync:_known_cloud_positions("book"), 0, "stale in-memory owner trusts no baseline")
+    f.sync:on_reader_ready()
+    eq(f.sync.last_uploaded_position, nil, "reader ready invalidates old in-memory upload")
+    eq(#f.sync:_known_cloud_positions("book"), 0, "new gateway trusts none of the old fields")
+    eq(f.sync:_cloud_unchanged(position, f.sync:_known_cloud_positions("book")), false,
+        "old gateway cannot silently verify new gateway's cloud")
+    f.sync:_persist("book", { last_remote_position = position })
+    eq(#f.sync:_known_cloud_positions("book"), 1, "new pull tags only the new remote field")
+    eq(book.last_uploaded_position_owner, old_digest, "old upload is not relabelled by unrelated pull")
+    eq(book.reported_local_owner, old_digest, "old reading report is not relabelled by unrelated pull")
+    book.last_remote_position_owner = nil
+    eq(#f.sync:_known_cloud_positions("book"), 0, "unsigned legacy fields are unknown")
+    eq(book.last_remote_position.percent, 25, "unsigned position remains on disk")
 end)
 
 for _, change in ipairs({ "unsigned", "uid", "api_key", "ticket" }) do

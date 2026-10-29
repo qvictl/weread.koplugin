@@ -260,6 +260,7 @@ end)
 test("a cloud position the read report re-asserted is not this device's own", function()
     local f = fixture(cloud(25))
     f.book.reported_local = true
+    f.book.reported_local_owner = require("weread.lib.request_owner").digest(f.sync.session_owner)
     f.book.chapter_uid, f.book.chapter_offset, f.book.progress = 22, 150, 25
     f.document.page = 60
     f.open()

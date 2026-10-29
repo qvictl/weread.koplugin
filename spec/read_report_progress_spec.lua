@@ -590,15 +590,32 @@ test("first report after a gap never sends a position behind newer cloud progres
 end)
 
 test("a cloud position this device sent itself does not block moving back", function()
-    local report, records = guard_fixture(
+    local report, records, book = guard_fixture(
         { chapter_uid = 22, chapter_idx = 2, chapter_offset = 200, percent = 30 },
         { bookId = "book", progress = 40, chapterUid = 33, chapterIdx = 3, chapterOffset = 10 },
         { chapter_uid = 33, chapter_offset = 10, progress = 40, reported_local = true })
+    book.reported_local_owner = require("weread.lib.request_owner").digest(report.owner)
     report:_tick(report.generation, report.task)
     eq(records[1].chapter_uid, 22, "local position sent")
     eq(records[1].chapter_offset, 200, "local offset sent")
     eq(report.report_floor, nil, "no floor")
 end)
+
+for _, mode in ipairs({ "unsigned", "foreign", "same" }) do
+    test("stored report baseline owner " .. mode, function()
+        local report, records, book = guard_fixture(
+            { chapter_uid = 22, chapter_idx = 2, chapter_offset = 200, percent = 30 },
+            { bookId = "book", progress = 40, chapterUid = 33, chapterIdx = 3, chapterOffset = 10 },
+            { chapter_uid = 33, chapter_offset = 10, progress = 40, reported_local = true })
+        if mode == "same" then book.reported_local_owner = require("weread.lib.request_owner").digest(report.owner)
+        elseif mode == "foreign" then book.reported_local_owner = "other-owner-digest" end
+        report:_tick(report.generation, report.task)
+        eq(records[1].chapter_uid, mode == "same" and 22 or 33,
+            "only a proven current-owner report permits moving cloud back")
+        eq(records[1].chapter_offset, mode == "same" and 200 or 10,
+            "unsigned/foreign reported position remains an unknown cloud baseline")
+    end)
+end
 
 test("a cloud position only re-asserted earlier is not treated as ours", function()
     -- A previous session found the cloud ahead and re-sent it as a floor;

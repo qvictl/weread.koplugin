@@ -145,6 +145,13 @@ function ProgressSync:_persist(book_id, patch)
             book[key] = copy(value)
         end
     end
+    -- Tag only the position actually replaced by this patch. A shared
+    -- book record may still contain another owner's older baseline.
+    for _, field in ipairs({ "last_remote_position", "last_uploaded_position" }) do
+        if patch[field] ~= nil then
+            book[field .. "_owner"] = patch[field] ~= false and RequestOwner.digest(self.session_owner) or nil
+        end
+    end
     store_book(self.settings, book_id, book)
     self.settings:flush()
     return true
@@ -939,6 +946,7 @@ end
 -- and uploaded positions and the last position the read report sent (its
 -- context fields). Must be collected before a pull persists its result.
 function ProgressSync:_known_cloud_positions(book_id, extra)
+    if not RequestOwner.matches(self.settings, self.session_owner) then return {} end
     local result = {}
     local function add(position)
         if type(position) == "table" and (position.chapter_uid ~= nil
@@ -952,11 +960,12 @@ function ProgressSync:_known_cloud_positions(book_id, extra)
     add(self.last_uploaded_position)
     local ok, book = pcall(self.get_book, book_id)
     if ok and type(book) == "table" then
-        add(book.last_remote_position)
-        add(book.last_uploaded_position)
+        local digest = RequestOwner.digest(self.session_owner)
+        if book.last_remote_position_owner == digest then add(book.last_remote_position) end
+        if book.last_uploaded_position_owner == digest then add(book.last_uploaded_position) end
         -- The read report's last position counts only when it was this
         -- device's reading position, not a cloud position it re-asserted.
-        if book.reported_local == true
+        if book.reported_local == true and book.reported_local_owner == digest
             and book.chapter_uid ~= nil and book.chapter_offset ~= nil then
             add({
                 chapter_uid = book.chapter_uid,
@@ -1366,6 +1375,7 @@ function ProgressSync:on_account_changed()
     self.upload_queue, self.uploading = {}, nil
     self.current_book_id, self.pending_jump = nil, nil
     self.local_position, self.remote_position, self.remote_floor = nil, nil, nil
+    self.last_uploaded_position = nil
     self.report_fallback, self.document_context, self.jump_echo = nil, nil, nil
     self.verified, self.dirty, self.state = false, false, "unverified"
     if type(self.scheduler.unschedule) == "function" then
@@ -1375,6 +1385,9 @@ function ProgressSync:on_account_changed()
 end
 
 function ProgressSync:on_reader_ready()
+    if self.session_owner and not RequestOwner.matches(self.settings, self.session_owner) then
+        self:on_account_changed()
+    end
     self:_cancel_pull()
     self.session_owner = RequestOwner.capture(self.settings)
     self:_close_choice("document_changed")
