@@ -318,5 +318,226 @@ class RatchetBaselineTest(unittest.TestCase):
                 self.assertEqual((site / name).read_text(encoding="utf-8"), text, name)
 
 
+class CoveragePhaseTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.repo = GitRepo(self.tmp.name, 0)
+        self.env = dict(os.environ, COVERAGE_REPO=self.tmp.name, GIT_AUTHOR_NAME="t",
+                        GIT_AUTHOR_EMAIL="t@example.com", GIT_COMMITTER_NAME="t",
+                        GIT_COMMITTER_EMAIL="t@example.com")
+        (self.root / ".ci").mkdir()
+        policy = dict(POLICY, diff_unit_min=80, diff_combined_min=90, ratchet_tolerance_pp=0.1)
+        (self.root / ".ci/coverage-policy.json").write_text(json.dumps(policy))
+        (self.root / "weread/lib").mkdir(parents=True)
+        self.module = self.root / "weread/lib/m.lua"
+        self.rows = ["old_%d()" % i for i in range(10)]
+        self.module.write_text("\n".join(self.rows) + "\n")
+        (self.root / "_meta.lua").write_text('version = "1.0.0"\n')
+        self.base = self.commit("previous release")
+        self.rows[:5] = ["new_%d()" % i for i in range(5)]
+        self.module.write_text("\n".join(self.rows) + "\n")
+        self.production = self.commit("unreleased production change")
+        (self.root / "_meta.lua").write_text('version = "1.0.1"\n')
+        self.candidate = self.commit("version-only candidate")
+        self.unit = self.report("unit", [])
+
+    def commit(self, title):
+        self.repo.git("add", ".")
+        self.repo.git("commit", "-qm", title, env=self.env)
+        return self.repo.git("rev-parse", "HEAD")
+
+    def report(self, name, missed):
+        path = self.root / (name + ".report")
+        path.write_text(luacov_report({"weread/lib/m.lua": [
+            (0 if i in missed else 1, row) for i, row in enumerate(self.rows)]}))
+        return path
+
+    def history_record(self, sha, combined=None):
+        result = dict(sha=sha, date="2026-10-28", unit=dict(percent=80), run="")
+        if combined is not None:
+            result["combined"] = dict(percent=combined)
+        return result
+
+    def run_gate(self, mode, combined=None, records=None, **options):
+        history = self.root / "history.jsonl"
+        if records is None:
+            records = [self.history_record(self.base, 90), self.history_record(self.production)]
+        history.write_text("".join(json.dumps(r) + "\n" for r in records))
+        output = self.root / "gate.json"
+        args = [sys.executable, ct.__file__, "gate", "--mode", mode, "--unit", str(self.unit),
+                "--base", self.production, "--head", self.candidate, "--history", str(history),
+                "--today", options.get("today", "2026-10-28"), "--json", str(output)]
+        if combined is not None:
+            args += ["--combined", str(combined)]
+        if options.get("labels"):
+            args += ["--labels", options["labels"]]
+        process = subprocess.run(args, cwd=self.root, env=self.env, capture_output=True, text=True)
+        self.assertTrue(output.is_file(), process.stderr)
+        return process.returncode, json.loads(output.read_text())
+
+    def test_unit_mode_never_requires_emulator_even_after_combined_target_dates(self):
+        code, data = self.run_gate("unit", today="2027-01-02")
+        self.assertEqual(code, 0, data)
+        self.assertIsNone(data["overall_combined"])
+        self.assertFalse(any("emulator" in item["name"] for item in data["checks"]))
+
+    def test_release_diff_spans_production_and_skips_unit_only_history(self):
+        code, data = self.run_gate("release", self.report("combined", [0]), labels="no-tests-needed")
+        self.assertEqual(code, 1)
+        self.assertEqual(data["diff_base"], self.base)
+        self.assertEqual(data["diff_combined"]["executable"], 5)
+        self.assertEqual(data["diff_combined"]["percent"], 80)
+        self.assertEqual(data["combined_diff_baseline_sha"], self.base)
+
+    def test_same_candidate_record_is_excluded_from_diff_but_keeps_high_ratchet(self):
+        history = [self.history_record(self.base, 90), self.history_record(self.production),
+                   self.history_record(self.candidate, 100)]
+        code, data = self.run_gate("release", self.report("combined", [9]), history)
+        self.assertEqual(data["diff_combined"]["percent"], 100)
+        self.assertEqual(data["diff_base"], self.base)
+        self.assertEqual(data["combined_baseline_sha"], self.candidate)
+        self.assertEqual(data["baseline_combined"], 100)
+        self.assertEqual(code, 1, "same-source coverage fell but an older low floor hid it")
+
+    def test_release_git_history_failure_cannot_lower_the_ratchet(self):
+        import shutil
+        binary = self.root / "bin"
+        binary.mkdir()
+        wrapper = binary / "git"
+        wrapper.write_text('#!/bin/sh\nif [ "$1" = rev-list ]; then exit 9; fi\nexec "' + shutil.which("git") + '" "$@"\n')
+        wrapper.chmod(0o755)
+        history = self.root / "history.jsonl"
+        history.write_text(json.dumps(self.history_record(self.base, 95)) + "\n")
+        output = self.root / "gate.json"
+        env = dict(self.env, PATH=str(binary) + os.pathsep + self.env["PATH"])
+        process = subprocess.run([sys.executable, ct.__file__, "gate", "--mode", "release",
+                                  "--unit", str(self.unit), "--combined", str(self.report("combined", [9])),
+                                  "--base", self.base, "--head", self.candidate, "--history", str(history),
+                                  "--today", "2026-10-28", "--json", str(output)],
+                                 cwd=self.root, env=env, capture_output=True, text=True)
+        self.assertNotEqual(process.returncode, 0, "Git failure was reclassified as a first release")
+        self.assertFalse(output.exists(), "unreadable history produced a passing measurement")
+
+    def test_release_rejects_corrupt_combined_history_instead_of_day_one(self):
+        history = self.root / "history.jsonl"
+        good = json.dumps(self.history_record(self.production)) + "\n"
+        invalid = ["not json", "{}", "[]", "", "\udcff"]
+        for combined in ({}, None, {"percent": "95"}, {"percent": True},
+                         {"percent": float("nan")}, {"percent": float("inf")},
+                         {"percent": -1}, {"percent": 101}):
+            broken = self.history_record(self.base)
+            broken["combined"] = combined
+            invalid.append(json.dumps(broken))
+        output = self.root / "corrupt-gate.json"
+        for broken in invalid:
+            with self.subTest(history=repr(broken)):
+                output.unlink(missing_ok=True)
+                if broken == "":
+                    history.write_text("")
+                else:
+                    history.write_bytes((good + broken + "\n").encode("utf-8", errors="surrogateescape"))
+                process = subprocess.run([sys.executable, ct.__file__, "gate", "--mode", "release",
+                                          "--unit", str(self.unit), "--combined", str(self.report("combined", [9])),
+                                          "--base", self.base, "--head", self.candidate, "--history", str(history),
+                                          "--today", "2026-10-28", "--json", str(output)],
+                                         cwd=self.root, env=self.env, capture_output=True, text=True)
+                self.assertNotEqual(process.returncode, 0, "corrupt combined history fell back to day-one")
+                self.assertFalse(output.exists())
+        history.unlink()
+        with self.assertRaises(ValueError):
+            ct.read_history(history, strict=True)
+        history.write_text(json.dumps(self.history_record(self.base)) + "\n")
+        self.assertEqual(ct.read_history(history, strict=True)[0]["sha"], self.base)
+
+    def test_first_release_counts_all_code_and_never_fakes_combined(self):
+        code, data = self.run_gate("release", self.report("combined", [9]), records=[self.history_record(self.base)])
+        self.assertEqual(code, 0, data)
+        self.assertEqual(data["diff_combined"]["executable"], 10)
+        self.assertIsNone(data["combined_diff_baseline_sha"])
+        code, data = self.run_gate("release", labels="upstream-sync")
+        self.assertEqual(code, 1)
+        self.assertIsNone(data["overall_combined"])
+
+    def test_unit_diff_floor_and_ratchet_remain_blocking(self):
+        self.candidate = self.production
+        self.production = self.base
+        self.unit = self.report("unit", [0])
+        self.assertEqual(self.run_gate("unit")[0], 0)
+        self.unit = self.report("unit", [0, 1])
+        self.assertEqual(self.run_gate("unit")[0], 1)
+
+    def test_unit_publisher_rejects_corrupt_existing_history_without_writing(self):
+        site = self.root / "site"
+        site.mkdir()
+        history = site / "history.jsonl"
+        args = [sys.executable, ct.__file__, "baseline", "--unit", str(self.unit),
+                "--sha", self.candidate, "--out-dir", str(site)]
+        subprocess.run(args, cwd=self.root, env=self.env, capture_output=True, check=True)
+        history.write_text(history.read_text() + "broken combined row\n")
+        before = {path.name: path.read_bytes() for path in site.iterdir()}
+        process = subprocess.run(args, cwd=self.root, env=self.env, capture_output=True)
+        self.assertNotEqual(process.returncode, 0)
+        self.assertEqual({path.name: path.read_bytes() for path in site.iterdir()}, before)
+
+    def test_durable_release_checks_survive_unit_updates_and_keep_accepted_floors(self):
+        self.rows = ["row_%d()" % index for index in range(10000)]
+        self.module.write_text("\n".join(self.rows) + "\n")
+        self.candidate = self.commit("coverage precision fixture")
+        self.unit = self.report("unit", [])
+        site = self.root / "site"
+        site.mkdir()
+        record = self.history_record(self.candidate, 95)
+        record["release_checks"] = {"10": {"attempt": 2, "sha": self.candidate, "combined": 95}}
+        (site / "history.jsonl").write_text(json.dumps(record) + "\n")
+        args = [sys.executable, ct.__file__, "baseline", "--unit", str(self.unit),
+                "--sha", self.candidate, "--out-dir", str(site)]
+        subprocess.run(args, cwd=self.root, env=self.env, capture_output=True, check=True)
+        saved = ct.read_history(site / "history.jsonl", strict=True)[0]
+        self.assertEqual(saved, record, "late unit publication erased accepted release evidence")
+        checks = self.root / "checks.json"
+        checks.write_text(json.dumps({"10": {"attempt": 3}}))
+        combined = self.report("combined", range(9495, 10000))
+        subprocess.run(args + ["--combined", str(combined), "--release-checks", str(checks)],
+                       cwd=self.root, env=self.env, capture_output=True, check=True)
+        saved = ct.read_history(site / "history.jsonl", strict=True)[0]
+        self.assertEqual(saved["combined"]["percent"], 94.95)
+        self.assertEqual(saved["release_checks"]["10"], {"attempt": 3, "sha": self.candidate, "combined": 95})
+        before = {path.name: path.read_bytes() for path in site.iterdir()}
+        lower = self.report("lower", range(9489, 10000))
+        for measured, expected in [(combined, 0), (lower, 1)]:
+            output = self.root / "proof-gate.json"
+            gate = subprocess.run([sys.executable, ct.__file__, "gate", "--mode", "release", "--unit", str(self.unit),
+                                   "--combined", str(measured), "--base", self.base, "--head", self.candidate,
+                                   "--history", str(site / "history.jsonl"), "--today", "2026-10-28", "--json", str(output)],
+                                  cwd=self.root, env=self.env, capture_output=True)
+            self.assertEqual(gate.returncode, expected, gate.stderr)
+            self.assertEqual(json.loads(output.read_text())["baseline_combined"], 95)
+        process = subprocess.run(args + ["--combined", str(lower)], cwd=self.root, env=self.env, capture_output=True)
+        self.assertNotEqual(process.returncode, 0)
+        self.assertEqual({path.name: path.read_bytes() for path in site.iterdir()}, before)
+
+    def test_unit_publisher_preserves_real_combined_and_separate_latest_badge(self):
+        site = self.root / "site"
+        def publish(sha, combined=None):
+            args = [sys.executable, ct.__file__, "baseline", "--unit", str(self.unit),
+                    "--sha", sha, "--out-dir", str(site)]
+            if combined:
+                args += ["--combined", str(combined)]
+            subprocess.run(args, cwd=self.root, env=self.env, capture_output=True, check=True)
+        publish(self.production)
+        publish(self.base, self.report("combined", [9]))
+        self.assertEqual(json.loads((site / "baseline.json").read_text())["sha"], self.production)
+        self.assertEqual(json.loads((site / "badge.json").read_text())["message"], "90.0%")
+        publish(self.base)
+        publish(self.candidate)
+        records = {r["sha"]: r for r in ct.read_history(site / "history.jsonl")}
+        self.assertEqual(records[self.base]["combined"]["percent"], 90)
+        self.assertNotIn("combined", records[self.candidate])
+        self.assertEqual(json.loads((site / "badge.json").read_text())["message"], "90.0%")
+        self.assertIn("—", (site / "README.md").read_text())
+
+
 if __name__ == "__main__":
     unittest.main()

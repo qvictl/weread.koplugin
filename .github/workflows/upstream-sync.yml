@@ -254,6 +254,5 @@ jobs:
           if (( approved == 0 )); then
             echo "::warning::Could not approve the PR's workflow runs; dispatching them on $BRANCH instead."
             gh workflow run ci.yml --ref "$BRANCH"
-            gh workflow run integration.yml --ref "$BRANCH"
             gh workflow run pr-policy.yml --ref "$BRANCH" -f pr="$NUMBER"
           fi
