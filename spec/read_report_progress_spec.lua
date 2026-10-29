@@ -232,6 +232,7 @@ test("restored session credits wall time without entering again", function()
             return { succ = 1 }
         end,
     }
+    stored.session_owner_digest = require("weread.lib.request_owner").digest(report.owner)
     local elapsed, session_open = report:_reading_credit("book")
     eq(session_open, true, "session restored inside the ttl")
     eq(elapsed, 180, "credit is capped at max(interval, 180)")

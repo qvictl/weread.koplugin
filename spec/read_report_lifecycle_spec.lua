@@ -117,6 +117,7 @@ test("a restored server session waits a full interval before the first tick", fu
         enabled = true, mode = "auto", interval_seconds = 60,
         session_book_id = "book", session_started_at = 940, last_credit_at = 980,
     } }
+    env.settings.config.session_owner_digest = require("weread.lib.request_owner").digest(report.owner)
     expect(report:maybe_start("reader_ready") == true, "started")
     expect(env.scheduler:delays() == "60", "no new enter right away")
     expect(report.server_session_ready == true, "session restored")
@@ -825,6 +826,44 @@ test("account change rebuilds the same book context and enters a new server sess
         "old owner context was reused before its TTL expired")
     expect(settings:get_book("book").read_session_id == report.session_id,
         "new session context did not reach parent persistence")
+end)
+
+for _, change in ipairs({ "uid", "api_key", "unsigned", "ticket" }) do
+    test("restored reading credit owner " .. change, function()
+        local settings = H.settings()
+        settings.store.account, settings.store.api_key = { user_vid = "first" }, "synthetic-api-one"
+        local first = H.new_report{ inline = true, settings = settings }
+        settings:put_book("book", H.ready_book(first, { read_context_updated_at = 1000,
+            chapters = { { chapterUid = 5, chapterIdx = 1, wordCount = 100 } } }))
+        first:_remember_session("book", { accepted = true, entered = true })
+        local old_digest = settings.config.session_owner_digest
+        if change == "uid" then settings.store.account.user_vid = "second"
+        elseif change == "api_key" then settings.store.api_key = "synthetic-api-two"
+        elseif change == "unsigned" then settings.config.session_owner_digest = nil
+        else settings.store.wr_ticket = "rotated" end
+        local next_report, env = H.new_report{ inline = true, settings = settings }
+        local _, restored = next_report:_reading_credit("book")
+        expect(restored == (change == "ticket"), "unproven account inherited old session credit")
+        local expected_digest = old_digest
+        if change == "unsigned" then expected_digest = nil end
+        expect(settings.config.session_owner_digest == expected_digest,
+            "credit read rewrote old persisted ownership")
+        local accepted = next_report:upload_position("book", { chapter_uid = 5, percent = 4 }, 0)
+        expect(accepted and env.client.sent[1].kind == (change == "ticket" and "report" or "enter"),
+            "new instance reused an unproven server session")
+    end)
+end
+
+test("old in-memory reading credit cannot be relabelled at close", function()
+    local report, env = H.new_report()
+    report:_remember_session("book", { accepted = true, entered = true })
+    env.settings.store.api_key = "synthetic-different-api"
+    local flushes = env.settings.flushes
+    expect(report:_persist_session() == false and env.settings.flushes == flushes,
+        "old session was persisted under new credentials")
+    local _, open = report:_reading_credit("book")
+    expect(not open and not report.server_session_ready and env.settings.flushes == flushes,
+        "old memory credit survived owner invalidation")
 end)
 
 test("old owner cannot write context or renewed auth", function()

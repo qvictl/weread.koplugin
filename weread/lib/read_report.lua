@@ -353,8 +353,10 @@ end
 -- interval in the same second as enter is stored as a heartbeat and dropped
 -- from readingTime. Later ticks send the wall time since the last credit.
 function ReadReport:_persist_session()
+    if not RequestOwner.matches(self.settings, self.owner) then return false end
     local cfg = self:_config()
     if self.server_session_ready then
+        cfg.session_owner_digest = RequestOwner.digest(self.owner)
         cfg.session_book_id = self.server_session_book_id
         cfg.session_started_at = self.server_session_ready_at
         cfg.last_credit_at = self.last_credit_at
@@ -370,6 +372,7 @@ function ReadReport:_restore_session(book_id)
         return
     end
     local cfg = self:_config()
+    if cfg.session_owner_digest ~= RequestOwner.digest(self.owner) then return end
     if tostring(cfg.session_book_id or "") ~= book_id then return end
     local started = tonumber(cfg.session_started_at) or 0
     -- Past this age the server session token is stale and a new enter is required.
@@ -387,6 +390,10 @@ function ReadReport:_restore_session(book_id)
 end
 
 function ReadReport:_reading_credit(book_id)
+    if not RequestOwner.matches(self.settings, self.owner) then
+        self:on_account_changed()
+        return 0, false
+    end
     book_id = tostring(book_id or "")
     self:_restore_session(book_id)
     if not self.server_session_ready or self.server_session_book_id ~= book_id then
