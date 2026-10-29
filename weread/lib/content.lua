@@ -237,12 +237,18 @@ local function unique_asset_name(used, name, ext)
         base = base .. ext
     end
     local candidate = base
-    local index = 2
+    -- This set travels between chapter workers. Keep the next suffix with it
+    -- so repeated names do not rescan every previously allocated image.
+    local suffixes = used.__next_asset_suffix or {}
+    used.__next_asset_suffix = suffixes
+    local key = base:lower()
+    local index = suffixes[key] or 2
+    local stem = base:gsub("%.[^%.]+$", "")
     while asset_name_taken(used, candidate) do
-        local stem = base:gsub("%.[^%.]+$", "")
         candidate = stem .. "-" .. tostring(index) .. ext
         index = index + 1
     end
+    suffixes[key] = index
     used[candidate:lower()] = true
     return candidate
 end
@@ -1416,6 +1422,8 @@ local FILE_COPY_CHUNK_BYTES = 64 * 1024
 local function discard_extracted_images(paths, names, used_names)
     for _, path in ipairs(paths) do os.remove(path) end
     for _, name in ipairs(names) do used_names[name:lower()] = nil end
+    -- Rolled-back names become available again; retries keep the same names.
+    used_names.__next_asset_suffix = nil
 end
 
 -- WeRead's catalog field is named `tar`, but cloud-converted documents may
