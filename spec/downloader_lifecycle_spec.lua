@@ -26,9 +26,9 @@ package.preload["ui/uimanager"] = function()
     return {
         preventStandby = function() prevented = prevented + 1 end,
         allowStandby = function() allowed = allowed + 1 end,
-        scheduleIn = function(_self, _delay, callback)
+        scheduleIn = function(_self, delay, callback)
             scheduled[#scheduled + 1] = callback
-            scheduled_delays[#scheduled] = _delay
+            scheduled_delays[#scheduled] = delay
         end,
         show = function() end,
     }

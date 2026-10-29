@@ -106,6 +106,7 @@ Current scenarios (`python3 scripts/run_emulator_scenarios.py --list`):
 | `13_https_credentials` | an https → http redirect from the service is refused; no request (and so no cookie) goes to plain http |
 | `14_shelf_snapshot` | shelf synced with an entry without a book id is still stored; the second open uses the snapshot, no second `/shelf/sync` |
 | `15_queued_manual_download` | manual download queued behind a stopping prefetch is not replaced by a later prefetch and completes |
+| `30_reader_session` | three-chapter fresh/reuse EPUB equivalence and HTTP counts; explicit context rejection versus transport retry; cancelled full job resumes with fresh state and no completed-chapter refetch |
 
 Every scenario exits non-zero on failure. Evidence per scenario: `crash.log`
 (KOReader output), `requests.jsonl` (mock requests), `result.json` (steps,

@@ -139,6 +139,7 @@ python3 scripts/mock_weread.py --port 8765 \
 | `status` | 注入的 HTTP 错误码，400–599 |
 | `times` | 失败次数；0 关闭失败、1 仅下一次、-1 持续失败 |
 | `drop` | 为 `true` 时注入的失败不返回任何 HTTP 响应，直接断开连接（模拟连接被关闭），布尔值 |
+| `empty_chapter` | 对匹配的章节分片返回 HTTP 200 和 `{}`；按 `times` 消耗次数，用于验证缓存阅读会话被明确拒绝后的回退，布尔值 |
 | `empty_shelf` / `empty_annotations` | 返回空书架 / 空划线想法，布尔值 |
 | `downgrade_path` | 该路径的 https 请求返回 302，跳转到同一 URL 的 http 版本；空字符串关闭 |
 | `shelf_idless_entry` | 书架同步额外返回一条没有任何书籍 ID 的条目，布尔值 |
@@ -166,7 +167,7 @@ curl --noproxy '*' -sS http://127.0.0.1:8765/__control \
 ```bash
 curl --noproxy '*' -sS http://127.0.0.1:8765/__control \
     -H 'Content-Type: application/json' \
-    -d '{"match":"","delay":0,"status":503,"times":0,"empty_shelf":false,"empty_annotations":false}'
+    -d '{"match":"","delay":0,"status":503,"times":0,"empty_shelf":false,"empty_annotations":false,"empty_chapter":false}'
 curl --noproxy '*' -sS http://127.0.0.1:8765/__state
 ```
 

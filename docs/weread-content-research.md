@@ -271,3 +271,19 @@ Spot checks:
 - Add throttling, retry, and resume cache.
 - Decide plugin UX for cookie import/renewal and session expiration.
 - Avoid bulk export by default in the KOReader UI; fetch chapters on demand and cache locally.
+
+## Bounded reader-session verification
+
+A manual or full download refreshes its first chapter, then reuses the accepted reader fields within that job. New jobs and resumed jobs start fresh. Readiness belongs to the download job and is not saved in the book record. Direct Content callers keep their existing fresh-reader behavior unless they explicitly opt in. A reused context rejected by an empty shard object or a shard checksum failure gets one fresh attempt; transport errors retain the existing downloader retries and delays.
+
+The offline HTTP scenario `30_reader_session` compares all EPUB entry bytes (apart from the publication timestamp) and checks actual reader requests: three chapters need four reader pages in the fresh control, two with reuse. Both counts include the unchanged download initialization. The scenario also covers rejection, transport failure, cancellation, checkpoint reuse and the UI heartbeat. These request counts are not a network latency benchmark.
+
+`scripts/probe_reader_session.py` independently compares the decoded XHTML and CSS for the first two catalog chapters of a local EPUB, alternating fresh/reused order. Its unit tests are offline:
+
+```bash
+python3 scripts/test_probe_reader_session.py
+python3 scripts/probe_reader_session.py --live \
+    --settings /path/to/private/weread.lua --epub /path/to/local/book.epub --rounds 3
+```
+
+Live reads require all three explicit inputs: `--live`, the private settings file, and the local EPUB with a valid reader URL in its metadata. The tool keeps credentials and decoded content in memory, does not renew credentials or report reading progress, and never writes to either input. Output contains chapter ordinals, byte counts, equality, elapsed milliseconds and error classes. It omits credentials, account and book identifiers, titles and content. A small successful sample establishes content equality for that sample, not a statistical speed claim or a guarantee about every book.
