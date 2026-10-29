@@ -3,7 +3,10 @@
 
 import io
 import json
+import os
 from pathlib import Path
+import subprocess
+import textwrap
 import tempfile
 import unittest
 from unittest import mock
@@ -70,10 +73,11 @@ class CoverageArtifactsTest(unittest.TestCase):
         self.assertEqual(dc.select_artifacts(items)[dc.SHARDS[0]]["id"], 50)
 
     def test_newest_metadata_only_artifact_cannot_fall_back_to_older_stats(self):
-        items = [artifact(100, 1), artifact(200, 2), artifact(300, 3)]
+        items = [artifact(100, 1), artifact(90, 1, "2026-10-29T03:35:00Z"),
+                 artifact(200, 2), artifact(300, 3)]
         with tempfile.TemporaryDirectory() as directory:
             with self.assertRaises(KeyError):
-                self.run_download(items, {100: archive(stats=None)}, directory)
+                self.run_download(items, {100: archive(stats=None), 90: archive()}, directory)
             self.assertEqual(list(Path(directory).iterdir()), [])
 
     def test_mixed_measured_commits_cannot_produce_partial_coverage(self):
@@ -90,6 +94,45 @@ class CoverageArtifactsTest(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "Invalid coverage"):
                     self.run_download(items, {100: invalid}, directory)
                 self.assertEqual(list(Path(directory).iterdir()), [])
+
+    def test_workflow_tooling_is_isolated_from_an_older_or_modified_pr_head(self):
+        workflows = Path(__file__).resolve().parent.parent / ".github/workflows"
+        commands = []
+        for name in ["pr-policy.yml", "coverage.yml"]:
+            source = (workflows / name).read_text()
+            step = source.split("- name: Checkout coverage tooling\n", 1)[1].split("\n      - name:", 1)[0]
+            commands.append(textwrap.dedent(step.split("run: |\n", 1)[1]))
+        self.assertEqual(commands[0], commands[1])
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repository = root / "repository"
+            repository.mkdir()
+            def git(*args):
+                return subprocess.check_output(["git", "-C", str(repository), *args], text=True).strip()
+            git("init", "--quiet")
+            (repository / "old.txt").write_text("historical source has no downloader\n")
+            git("add", ".")
+            git("-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "--quiet", "-m", "old head")
+            historical = git("rev-parse", "HEAD")
+            script = repository / "scripts/download_emulator_coverage.py"
+            script.parent.mkdir()
+            script.write_text("# trusted workflow tooling\n")
+            git("add", ".")
+            git("-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "--quiet", "-m", "workflow tooling")
+            workflow_sha = git("rev-parse", "HEAD")
+            script.write_text("# arbitrary PR head tooling must not run\n")
+            git("add", ".")
+            git("-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "--quiet", "-m", "modified head")
+            for head in [historical, git("rev-parse", "HEAD")]:
+                with self.subTest(head=head), tempfile.TemporaryDirectory() as run_temp:
+                    environment = dict(os.environ, GITHUB_REPOSITORY="owner/plugin", GITHUB_WORKFLOW_SHA=workflow_sha,
+                                       GITHUB_SHA=head, RUNNER_TEMP=run_temp, GIT_CONFIG_COUNT="1",
+                                       GIT_CONFIG_KEY_0=f"url.{repository.as_uri()}.insteadOf",
+                                       GIT_CONFIG_VALUE_0="https://github.com/owner/plugin.git")
+                    subprocess.run(["bash", "-e", "-c", commands[0]], env=environment, check=True, capture_output=True)
+                    tooling = Path(run_temp) / "coverage-tooling"
+                    self.assertEqual((tooling / "scripts/download_emulator_coverage.py").read_text(), "# trusted workflow tooling\n")
+                    self.assertFalse((tooling / "old.txt").exists())
 
 
 if __name__ == "__main__":
