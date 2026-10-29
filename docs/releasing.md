@@ -116,8 +116,8 @@ A dedicated
 job validates the exact accepted reports, fetches main ancestry and current
 history again, rechecks the gate, and pushes the measurement before packaging.
 A main candidate cannot finish successfully while its combined record is still
-pending in a separate workflow. Package-only candidates outside main do not
-write main history. Daily Coverage runs publish unit records only; manual
+pending in a separate workflow. Package-only candidates from non-main refs do not
+write main history, even when their SHA is an ancestor of main. Daily Coverage runs publish unit records only; manual
 historical backfills remain available.
 
 A failed or cancelled Release with a previously successful combined gate must

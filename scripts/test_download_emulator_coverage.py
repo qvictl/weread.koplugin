@@ -271,7 +271,7 @@ class CoverageArtifactsTest(unittest.TestCase):
             (binaries / "git").write_text('#!/bin/sh\nif [ "$REJECT_COVERAGE_PUSH" = 1 ]; then\n for arg do [ "$arg" != push ] || exit 9; done\nfi\nexec "' + shutil.which("git") + '" "$@"\n')
             (binaries / "git").chmod(0o755)
             env = dict(os.environ, RUNNER_TEMP=str(run), COVERAGE_REPO=str(source), SHA=candidate,
-                       RUN_URL="https://example.invalid/runs/10", GITHUB_RUN_ID="10", GITHUB_RUN_ATTEMPT="1", PATH=str(binaries) + os.pathsep + os.environ["PATH"])
+                       RUN_URL="https://example.invalid/runs/10", GITHUB_RUN_ID="10", GITHUB_RUN_ATTEMPT="1", GITHUB_REF="refs/heads/main", PATH=str(binaries) + os.pathsep + os.environ["PATH"])
             def measure(sha, missed, publish=True):
                 (reports / "unit.report.out").write_text(luacov_report({"weread/lib/m.lua": [(1, row) for row in rows]}))
                 (reports / "combined.report.out").write_text(luacov_report({"weread/lib/m.lua": [(0 if i in missed else 1, row) for i,row in enumerate(rows)]}))
@@ -288,6 +288,15 @@ class CoverageArtifactsTest(unittest.TestCase):
             original = {path.name: path.read_bytes() for path in reports.iterdir()}
             records = [json.loads(line) for line in git(remote, "show", "coverage:history.jsonl").splitlines()]
             self.assertNotIn(candidate, [r["sha"] for r in records])
+            git(source, "branch", "nonmain-alias", candidate)
+            self.assertEqual(git(source, "rev-parse", "nonmain-alias"), candidate)
+            history_before = git(remote, "show", "coverage:history.jsonl")
+            env["GITHUB_REF"] = "refs/heads/nonmain-alias"
+            result = subprocess.run(["bash", "-e", "-c", command], cwd=source, env=env, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("non-main ref", result.stdout)
+            self.assertEqual(git(remote, "show", "coverage:history.jsonl"), history_before)
+            env["GITHUB_REF"] = "refs/heads/main"
             env["GITHUB_RUN_ATTEMPT"] = "2"
             measure(candidate, [19], publish=False)
             failed = {path.name: path.read_bytes() for path in reports.iterdir()}
@@ -316,7 +325,7 @@ class CoverageArtifactsTest(unittest.TestCase):
                     return zipped(failed)
                 self.fail("Unexpected endpoint: " + endpoint)
             with mock.patch.object(dc, "gh_api", side_effect=api):
-                with self.assertRaisesRegex(ValueError, "not persisted"):
+                with self.assertRaisesRegex(ValueError, "accepted floor"):
                     dc.require_release_history("owner/plugin", 10, candidate, seed / "history.jsonl",
                                                reports / "release-gate.json", cwd=source, current_attempt=2)
                 # A failed full rerun uploaded its 95% report, yet persistence-only
@@ -417,6 +426,10 @@ class CoverageArtifactsTest(unittest.TestCase):
                 requests.reset_mock()
                 dc.require_release_history("owner/plugin", 20, target, history, current_gate, cwd=root)
                 self.assertFalse(any("/10/jobs?" in call.args[0] or "/10/artifacts?" in call.args[0] for call in requests.call_args_list))
+                current_gate.write_text(json.dumps(dict(passed=True, measured_sha=ancestor, overall_combined={"percent": 94.99})))
+                with self.assertRaisesRegex(ValueError, "accepted floor"):
+                    dc.require_release_history("owner/plugin", 10, ancestor, history, current_gate, cwd=root)
+                current_gate.write_text(json.dumps(dict(passed=True, measured_sha=target, overall_combined={"percent": 90})))
                 run_attempt = 3
                 third_succeeded = True
                 with self.assertRaisesRegex(ValueError, "missing or inconsistent"):
@@ -434,7 +447,7 @@ class CoverageArtifactsTest(unittest.TestCase):
                 dc.require_release_history("owner/plugin", 20, ancestor, history, current_gate, cwd=root)
                 dc.require_release_history("owner/plugin", 10, ancestor, history, current_gate, cwd=root)
                 current_gate.write_text(json.dumps(dict(passed=True, measured_sha=ancestor, overall_combined={"percent": 94})))
-                with self.assertRaisesRegex(ValueError, "not persisted"):
+                with self.assertRaisesRegex(ValueError, "accepted floor"):
                     dc.require_release_history("owner/plugin", 10, ancestor, history, current_gate, cwd=root)
                 manifest["target_sha"] = target
                 gate["measured_sha"] = target

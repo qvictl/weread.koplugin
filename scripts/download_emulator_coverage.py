@@ -131,9 +131,11 @@ def require_release_history(repo, run_id, target_sha, history, current_gate, cwd
             return
         if ancestry.returncode != 0:
             raise ValueError("Cannot resolve earlier release ancestry")
-        if any(record["sha"] == sha and record.get("combined", {}).get("percent", -1) >= floor for record in records):
+        if sha == target_sha:
+            if current < floor:
+                raise ValueError("Current measurement is below this candidate's accepted floor")
             return
-        if sha == target_sha and floor <= current:
+        if any(record["sha"] == sha and record.get("combined", {}).get("percent", -1) >= floor for record in records):
             return
         raise ValueError("An accepted combined floor is not persisted; rerun that candidate first")
     pages = json.loads(gh_api(
