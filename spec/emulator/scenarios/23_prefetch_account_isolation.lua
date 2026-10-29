@@ -1,6 +1,7 @@
 -- @title Prefetch result isolation across queued QR login completion
 -- @timeout 60
 return function(H)
+    local prepare_login = dofile(os.getenv("WEREAD_TEST_HARNESS_DIR") .. "/qr_credentials.lua")
     local plugin, book, chapters, state = nil, nil, nil, {}
     local function with_response_gate(action, endpoint)
         H.mock_control({ match = endpoint or "/web/book/chapter/e_0", delay = 0, times = 0, hold_response = true })
@@ -19,6 +20,7 @@ return function(H)
     end)
     H.step("queued QR completion must discard old-account prefetch metadata", function()
         local requests_before = H.mock_state().started_counts["/web/book/chapter/e_0"] or 0
+        local apply_login = prepare_login(H, plugin)
         with_response_gate(function()
             H.call(function()
                 plugin.settings:delete_book("900001")
@@ -33,9 +35,7 @@ return function(H)
                 return (H.mock_state().started_counts["/web/book/chapter/e_0"] or 0) > requests_before
             end, 5)
             H.call(function()
-                plugin.qr_login:_complete({ succeed = true, webLoginVid = "900000",
-                    accessToken = "mock-access-token", refreshToken = "mock-refresh-token" },
-                    plugin.qr_login.generation)
+                apply_login()
             end)
             H.wait_until("queued QR credentials committed before releasing the old response", function()
                 return plugin.settings:get("account", {}).user_vid == "900000"
@@ -91,6 +91,7 @@ return function(H)
         local blocker_done
         local chapter_before = H.mock_state().started_counts["/web/book/chapter/e_0"] or 0
         local blocker_before = H.mock_state().started_counts["/book/getprogress"] or 0
+        local apply_login = prepare_login(H, plugin)
         with_response_gate(function()
             H.call(function()
                 plugin.settings:delete_book("900001")
@@ -113,9 +114,7 @@ return function(H)
                 return worker.pending and (H.mock_state().started_counts["/book/getprogress"] or 0) > blocker_before
             end, 5)
             H.call(function()
-                plugin.qr_login:_complete({ succeed = true, webLoginVid = "900000",
-                    accessToken = "mock-access-token", refreshToken = "mock-refresh-token" },
-                    plugin.qr_login.generation)
+                apply_login()
             end)
             H.wait_until("new account commits before queued task can launch", function()
                 return plugin.settings:get("account", {}).user_vid == "900000"
@@ -147,6 +146,7 @@ return function(H)
             local mp_before = H.mock_state().started_counts["/web/mp/content"] or 0
             local original_finish, raw_finish = dl._finishJob, rawget(dl, "_finishJob")
             local before = H.mock_state().started_counts["/web/book/chapter/e_0"] or 0
+            local apply_login = prepare_login(H, plugin)
             local ok, err = xpcall(function()
                 with_response_gate(function()
                     H.call(function()
@@ -180,9 +180,7 @@ return function(H)
                         return held_job and dl._pending_start and not dl.background_worker.job
                     end, 10)
                     H.call(function()
-                        plugin.qr_login:_complete({ succeed = true, webLoginVid = "900000",
-                            accessToken = "mock-access-token", refreshToken = "mock-refresh-token" },
-                            plugin.qr_login.generation)
+                        apply_login()
                     end)
                     H.wait_until("QR login commits before replacement restart", function()
                         return plugin.settings:get("account", {}).user_vid == "900000"

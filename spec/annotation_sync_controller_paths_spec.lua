@@ -7,6 +7,7 @@
 --   luajit spec/annotation_sync_controller_paths_spec.lua
 
 package.path = "./?.lua;" .. package.path
+local restore_subprocess = require("spec.helpers.subprocess_stub").install()
 
 local checks = 0
 local function expect(value, message)
@@ -626,3 +627,5 @@ do
 end
 
 print(("annotation_sync_controller_paths_spec: %d checks"):format(checks))
+
+restore_subprocess()

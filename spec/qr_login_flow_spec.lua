@@ -693,9 +693,14 @@ local function make_scheduler()
     return scheduler
 end
 
+local previous_runner
 local function job_login(routes, runner_options)
+    -- Independent fixtures finish their own fake OS process.
+    if previous_runner then previous_runner.done = true end
+    require("weread.lib.fork_budget").available()
     reset_ui()
     local runner, scheduler = make_runner(), make_scheduler()
+    previous_runner = runner
     for key, value in pairs(runner_options or {}) do runner[key] = value end
     local login = new_login(routes, { subprocess = runner, scheduler = scheduler })
     local stash = {}

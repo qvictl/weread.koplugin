@@ -159,7 +159,7 @@ end
 -- thread freezes taps and repaints for the whole request. on_success runs in
 -- the parent with the task's result; failures are reported with error_label.
 -- Refuse to run network tasks when the runtime cannot provide a worker.
-function M:_runNetworkRequest(busy_text, error_label, task, on_success, on_failure)
+function M:_runNetworkRequest(busy_text, error_label, task, on_success, on_failure, options)
     local original_owner = self._network_task_owner or RequestOwner.capture(self.settings)
     if not RequestOwner.matches(self.settings, original_owner) then
         if on_failure then on_failure(nil, true, "account_changed") end
@@ -186,11 +186,22 @@ function M:_runNetworkRequest(busy_text, error_label, task, on_success, on_failu
     local WorkerSettings = require("weread.lib.worker_settings")
     Trapper:wrap(function()
         local fingerprint = WorkerSettings.fingerprint(self.settings)
-        local completed, encoded, failure_reason = Trapper:dismissableRunInSubprocess(function()
+        local completed, encoded, failure_reason = require("weread.lib.subprocess").run(function()
             local auth_result = WorkerSettings.capture(self.settings)
             local ok, value = xpcall(task, debug.traceback)
             return Json.encode({ ok = ok, value = value, auth = auth_result() })
-        end, busy_text, true)
+        end, busy_text, true, {
+            settings = self.settings,
+            before_launch = function()
+                if not RequestOwner.matches(self.settings, original_owner) then
+                    return false, "account_changed"
+                end
+                if options and options.before_launch and not options.before_launch() then
+                    return false, "cancelled"
+                end
+                return true
+            end,
+        })
         -- A queued QR completion can switch accounts while the UI loop keeps
         -- running. Cookie/ticket renewal within the same account is harmless.
         if not RequestOwner.matches(self.settings, original_owner) then

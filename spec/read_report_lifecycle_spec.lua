@@ -20,6 +20,7 @@ local function test(name, fn)
     H.clear_logs()
     H.reset_content()
     local ok, err = pcall(fn)
+    H.finish_runners()
     if not ok then error(name .. ": " .. tostring(err), 0) end
 end
 
@@ -551,6 +552,7 @@ test("the subprocess runner wraps KOReader's ffi/util", function()
     fake.done = false
     report:stop("user")
     expect(#fake.terminated == 1, "terminateSubProcess")
+    H.finish_runners() -- collect the adapter child before replacing ffi/util.
     H.ffi = {}
 end)
 
@@ -724,7 +726,11 @@ test("an upload job that times out or returns nothing fails for the caller", fun
     expect(accepted == false and outcome.error_kind == "transport", "timeout result")
     expect(contains(outcome.error, "timed out"), "timeout text")
 
-    env.scheduler.queue = {}
+    accepted, outcome = report:upload_position("book", position, 0)
+    expect(not accepted and outcome.error_kind == "busy" and runner.forks == 1,
+        "timed-out but unreaped child allowed another fork")
+    runner.done = true
+    while env.scheduler:run_next() do end
     runner.done = false
     report:upload_position("book", position, 0)
     runner.done = true

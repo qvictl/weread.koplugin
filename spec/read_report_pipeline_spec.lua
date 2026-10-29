@@ -21,6 +21,7 @@ local function test(name, fn)
     H.reset_content()
     CatalogMemo.written = {}
     local ok, err = pcall(fn)
+    H.finish_runners()
     if not ok then error(name .. ": " .. tostring(err), 0) end
 end
 

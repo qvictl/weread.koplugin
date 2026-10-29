@@ -31,6 +31,7 @@ local POLL_JOB_INTERVAL_SECONDS = 0.5
 local INLINE_POLL_TIMEOUT = { 2, 3 }
 local INLINE_POLL_INTERVAL_SECONDS = 1.5
 
+local ForkBudget = require("weread.lib.fork_budget")
 local QRLogin = {}
 QRLogin.__index = QRLogin
 
@@ -392,7 +393,7 @@ function QRLogin:_run_protocol_request(busy_text, generation, task, on_success, 
             if not valid() then return end
             if cancelled then self:cancel(); return end
             on_failure(err)
-        end)
+        end, { before_launch = valid })
     end, 0.1, { link_only = true })
     if scheduled == false and generation == self.generation then self:cancel() end
 end
@@ -500,7 +501,7 @@ function QRLogin:_start_poll_job(uid, generation)
     local runner = self.subprocess
     if not runner then return false end
     local deadline = (self.started_at or self.now()) + LOGIN_SESSION_TIMEOUT_SECONDS
-    local ok_run, pid, read_fd = pcall(runner.run, function(_pid, write_fd)
+    local ok_run, pid, read_fd, reservation = pcall(ForkBudget.run, runner, function(_pid, write_fd)
         local result
         while os.time() < deadline do
             local ok, data = pcall(self._poll_protocol, self, uid, "")
@@ -527,7 +528,8 @@ function QRLogin:_start_poll_job(uid, generation)
             tostring(ok_run and read_fd or pid))
         return false
     end
-    local job = { pid = pid, read_fd = read_fd, uid = uid, generation = generation }
+    local job = { pid = pid, read_fd = read_fd, reservation = reservation,
+        uid = uid, generation = generation }
     job.check = function() self:_check_poll_job(job) end
     self.poll_job = job
     self.scheduler:scheduleIn(POLL_JOB_CHECK_SECONDS, job.check)
@@ -537,7 +539,7 @@ end
 function QRLogin:_check_poll_job(job)
     if self.poll_job ~= job then return end
     local runner = self.subprocess
-    local done = runner.is_done(job.pid)
+    local done = ForkBudget.is_done(job.reservation)
     local readable = job.read_fd and runner.read_size(job.read_fd)
     if not done and not (readable and readable > 0) then
         self.scheduler:scheduleIn(POLL_JOB_CHECK_SECONDS, job.check)
@@ -546,7 +548,7 @@ function QRLogin:_check_poll_job(job)
     local payload = job.read_fd and runner.read_all(job.read_fd)
     job.read_fd = nil
     self.poll_job = nil
-    if not done then self:_reap(job.pid) end
+    if not done then self:_reap(job.reservation) end
     if job.generation ~= self.generation then return end
     if self.session_account ~= nil and self.session_account ~= self:_account_id() then
         self:cancel()
@@ -566,19 +568,18 @@ function QRLogin:_stop_poll_job()
     self.poll_job = nil
     local runner = self.subprocess
     if self.scheduler.unschedule then self.scheduler:unschedule(job.check) end
-    pcall(runner.terminate, job.pid)
+    pcall(ForkBudget.terminate, job.reservation)
     if job.read_fd then
         pcall(runner.read_all, job.read_fd)
         job.read_fd = nil
     end
-    self:_reap(job.pid)
+    self:_reap(job.reservation)
 end
 
-function QRLogin:_reap(pid)
-    local runner = self.subprocess
+function QRLogin:_reap(reservation)
     local reap
     reap = function()
-        local ok, done = pcall(runner.is_done, pid)
+        local ok, done = pcall(ForkBudget.is_done, reservation)
         if ok and not done then
             self.scheduler:scheduleIn(2, reap)
         end
