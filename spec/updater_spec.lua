@@ -327,7 +327,7 @@ local meta_version = meta:match('version%s*=%s*"([^"]+)"')
 local main_version = main:match('version%s*=%s*"([^"]+)"')
 expect(meta_version == main_version, "main.lua and _meta.lua versions must match")
 
--- A 1.6.90 installation must recognize the assets produced for this release;
+-- Prior published installations must recognize this release's actual assets;
 -- after restart its actual main.lua version must suppress the same update.
 local release_tag = "v" .. meta_version
 local archive_name = "weread.koplugin-" .. release_tag .. ".zip"
@@ -345,12 +345,14 @@ local upgrade_settings = {
     set = function(_, _, value) upgrade_state = value end,
     flush = function() end,
 }
-local previous_install = Updater:new{
-    settings = upgrade_settings, current_version = "1.6.90", plugin_dir = "/unused/weread.koplugin",
-}
-previous_install:cache_release(published)
-expect(previous_install:has_update() and previous_install:available_version() == meta_version
-    and previous_install:should_notify(published.version), "previous release cannot discover the new package")
+for _, previous_version in ipairs({ "1.6.90", "1.6.91" }) do
+    local previous_install = Updater:new{
+        settings = upgrade_settings, current_version = previous_version, plugin_dir = "/unused/weread.koplugin",
+    }
+    previous_install:cache_release(published)
+    expect(previous_install:has_update() and previous_install:available_version() == meta_version
+        and previous_install:should_notify(published.version), previous_version .. " cannot discover the new package")
+end
 local restarted_install = Updater:new{
     settings = upgrade_settings, current_version = main_version, plugin_dir = "/unused/weread.koplugin",
 }
