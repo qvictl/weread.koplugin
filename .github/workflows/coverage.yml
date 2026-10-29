@@ -1,12 +1,8 @@
 name: Coverage
 
-# Main CI publishes unit-only records. Release persists authentic combined
-# measurements synchronously; manual dispatch can backfill historical runs.
+# Release persists authentic full measurements synchronously. Manual dispatch
+# can backfill historical runs; ordinary main CI never republishes partial UT.
 on:
-  workflow_run:
-    workflows: [CI]
-    types: [completed]
-    branches: [main]
   workflow_dispatch:
     inputs:
       source_run:
@@ -19,12 +15,11 @@ permissions:
   contents: read
   actions: read
 concurrency:
-  group: coverage-main-${{ github.event.workflow_run.id || inputs.source_run || inputs.integration_run || github.run_id }}
+  group: coverage-main-${{ inputs.source_run || inputs.integration_run || github.run_id }}
   cancel-in-progress: false
 jobs:
   resolve:
     name: Resolve authentic measurement
-    if: github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event != 'pull_request' && github.event.workflow_run.head_branch == 'main')
     runs-on: ubuntu-latest
     outputs:
       measure: ${{ steps.run.outputs.measure }}
@@ -36,7 +31,7 @@ jobs:
         run: |
           tools="$RUNNER_TEMP/coverage-tooling"
           git init --quiet "$tools"
-          git -C "$tools" sparse-checkout set --no-cone /scripts/download_emulator_coverage.py /scripts/coverage_tools.py
+          git -C "$tools" sparse-checkout set --no-cone /scripts/download_emulator_coverage.py /scripts/coverage_tools.py /scripts/select_lua_tests.py
           GIT_TERMINAL_PROMPT=0 git -C "$tools" -c credential.helper= fetch --quiet --depth 1 \
             "https://github.com/$GITHUB_REPOSITORY.git" "$GITHUB_WORKFLOW_SHA"
           git -C "$tools" checkout --quiet --detach FETCH_HEAD
@@ -45,7 +40,6 @@ jobs:
         id: run
         env:
           GH_TOKEN: ${{ github.token }}
-          EVENT_RUN: ${{ github.event.workflow_run.id }}
           INPUT_RUN: ${{ inputs.source_run }}
           LEGACY_RUN: ${{ inputs.integration_run }}
         run: |
@@ -54,7 +48,7 @@ jobs:
             echo "::error::Conflicting coverage source run IDs."
             exit 1
           fi
-          run_id="${INPUT_RUN:-${LEGACY_RUN:-${EVENT_RUN:-}}}"
+          run_id="${INPUT_RUN:-${LEGACY_RUN:-}}"
           if [[ -z "$run_id" ]]; then
             run_id="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?branch=main&status=success&per_page=100" \
               --jq '[.workflow_runs[] | select(.event != "pull_request")][0].id // 0')"
@@ -84,7 +78,7 @@ jobs:
         run: |
           tools="$RUNNER_TEMP/coverage-tooling"
           git init --quiet "$tools"
-          git -C "$tools" sparse-checkout set --no-cone /scripts/download_emulator_coverage.py /scripts/coverage_tools.py
+          git -C "$tools" sparse-checkout set --no-cone /scripts/download_emulator_coverage.py /scripts/coverage_tools.py /scripts/select_lua_tests.py
           GIT_TERMINAL_PROMPT=0 git -C "$tools" -c credential.helper= fetch --quiet --depth 1 \
             "https://github.com/$GITHUB_REPOSITORY.git" "$GITHUB_WORKFLOW_SHA"
           git -C "$tools" checkout --quiet --detach FETCH_HEAD
@@ -121,6 +115,9 @@ jobs:
           sudo apt-get install -y luajit libsqlite3-0
           git clone --quiet --depth 1 --branch v0.16.0 https://github.com/lunarmodules/luacov.git "$RUNNER_TEMP/luacov"
           echo "LUA_PATH=$RUNNER_TEMP/luacov/src/?.lua;;" >> "$GITHUB_ENV"
+
+      - name: Normal full unit backfill checks
+        run: bash scripts/run_lua_specs.sh
 
       - name: Unit specs under LuaCov
         run: bash scripts/run_lua_coverage.sh
