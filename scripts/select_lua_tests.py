@@ -264,6 +264,14 @@ def graph(sha: str, repo: Path) -> tuple[dict[str, set[str]], list[str]]:
         if path not in reachable:
             reachable.add(path)
             queue.extend(result.get(path, ()))
+    # Runtime accepts arbitrary option tables, including computed preload keys.
+    # Its consumers can therefore load any repository Lua module. Add these
+    # conservative edges after checking actual imports, so possible IT helpers
+    # do not make their unrelated dynamic loaders global unit dependencies.
+    runtime_consumers = [path for path, edges in result.items()
+                         if "weread/lib/runtime.lua" in edges]
+    for path in runtime_consumers:
+        result[path].update(inventory)
     return result, sorted({problem for path in reachable for problem in problems.get(path, ())})
 
 

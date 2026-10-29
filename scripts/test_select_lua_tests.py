@@ -237,6 +237,39 @@ class SelectionTest(unittest.TestCase):
                 self.write("weread/lib/leaf.lua", "return {}\n")
                 self.save()
 
+    def test_runtime_computed_option_keys_keep_all_possible_consumers(self):
+        self.write("weread/lib/runtime.lua", 'Runtime.PRELOAD_MODULES = { "weread.lib.other" }\n'
+                   'for _i, name in ipairs(options.preload_modules or Runtime.PRELOAD_MODULES) do\n'
+                   'local ok, err = pcall(require, name)\nend\nreturn {}\n')
+        self.write("spec/independent_spec.lua", 'require("weread.lib.other")\n')
+        for options in ('local key = "pre" .. "load_modules"\n'
+                        'Runtime.new({ [key] = { "weread.lib." .. "leaf" } })',
+                        'Runtime.new({ ["pre" .. "load_modules"] = { "weread.lib." .. "leaf" } })',
+                        'Runtime.new(read_options())'):
+            with self.subTest(options=options):
+                self.write("spec/unrelated_spec.lua", 'local Runtime = require("weread.lib.runtime")\n'
+                           + options + '\n')
+                self.write("weread/lib/leaf.lua", "return {}\n")
+                base = self.save()
+                self.write("weread/lib/leaf.lua", "return { changed = true }\n")
+                self.save()
+                result = self.select(base)
+                self.assertEqual(result["mode"], "selected")
+                self.assertEqual(result["tests"], ["spec/affected_spec.lua", "spec/unrelated_spec.lua"])
+                self.write("weread/lib/leaf.lua", "return {}\n")
+                self.save()
+
+    def test_runtime_computed_preload_can_depend_on_integration_helpers(self):
+        self.write("weread/lib/runtime.lua", "return {}\n")
+        self.write("spec/emulator/helper.lua", "return {}\n")
+        self.write("spec/affected_spec.lua", 'local Runtime = require("weread.lib.runtime")\n'
+                   'local key = "pre" .. "load_modules"\n'
+                   'Runtime.new({ [key] = { "spec.emulator." .. "helper" } })\n')
+        base = self.save()
+        self.write("spec/emulator/helper.lua", "return { changed = true }\n")
+        self.save()
+        self.assertEqual(self.select(base)["tests"], ["spec/affected_spec.lua"])
+
     def test_production_change_with_no_test_is_full(self):
         self.write("weread/lib/new.lua", "return {}\n")
         self.save()
