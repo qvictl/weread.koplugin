@@ -137,6 +137,7 @@ return function(H)
                     H.equal(job.reader_session_ready, nil, "outer retry discards the accepted session")
                     return value
                 end
+                last = H.now_ms()
                 beat()
             end)
         end)
