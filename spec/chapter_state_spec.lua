@@ -229,10 +229,14 @@ if has_buffer then
     for index = 1, 10000 do parent.used_asset_names["old-" .. index .. ".png"] = true end
     child, collect = ChapterState.begin(parent)
     child.used_asset_names["new.png"] = true
-    local encoded = buffer.encode({ { ok = true, value = { state_delta = collect() } }, n = 1 })
+    local binary = "\137PNG\r\n\26\n\0\255\254synthetic"
+    local encoded = buffer.encode({ { ok = true, value = {
+        state_delta = collect(), assets = { { data = binary } },
+    } }, n = 1 })
     expect(#encoded < 512, "wire size must depend on the current chapter, not 10,000 accepted names")
-    local received = buffer.decode(encoded)[1].value.state_delta
-    ChapterState.apply(parent, received)
+    local received = buffer.decode(encoded)[1].value
+    expect(received.assets[1].data == binary, "binary image bytes survive the delta result codec")
+    ChapterState.apply(parent, received.state_delta)
     expect(parent.used_asset_names["old-10000.png"] and parent.used_asset_names["new.png"],
         "actual codec roundtrip preserves history and applies current chapter")
 else
