@@ -28,8 +28,8 @@ python3 scripts/coverage_tools.py total coverage/unit.report.out         # 73.80
 | 2026-12-22 | ≥ 88% | ≥ 85% | ≥ 70% |
 
 三项都写在 `.ci/coverage-policy.json` 的 `targets`（`unit_min`、`combined_min`、`module_unit_min`）里：
-生效日前只在 PR 报告中显示，生效日起成为阻塞项。按 20110 行可执行代码估算，80% 需要再覆盖约 1250 行，
-88% 约 2860 行。另外每个 PR 仍需满足改动行单元 ≥ 80%、合计 ≥ 90%，整体覆盖率不得下降（ratchet）。
+单元/模块目标在PR执行，合计目标只在发版候选执行；生效日前仅报告，生效日起阻塞。按 20110 行可执行代码估算，80% 需要再覆盖约 1250 行，
+88% 约 2860 行。普通PR仍需改动行单元≥80%及自身基线单元整体棘轮；发版候选需整批未发布改动合计≥90%及真实combined整体棘轮。unit-only历史不代替combined历史；release diff排除candidate自身，overall棘轮包含其已有实测。
 
 ## 3. 优先级
 
