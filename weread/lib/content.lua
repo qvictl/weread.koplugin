@@ -1786,9 +1786,7 @@ function Content.fetch_txt_as_xhtml(client, settings, book, chapter)
     return Content.txt_to_xhtml(plain)
 end
 
-function Content.fetch_chapter_xhtml(client, settings, book, chapter)
-    Content.refresh_reader_state(client, book, chapter)
-
+local function fetch_chapter_with_state(client, settings, book, chapter)
     if book._content_format == "txt" then
         return Content.fetch_txt_as_xhtml(client, settings, book, chapter)
     end
@@ -1811,6 +1809,30 @@ function Content.fetch_chapter_xhtml(client, settings, book, chapter)
         Content.fetch_chapter_shard(client, settings, book, chapter, "/web/book/chapter/e_1"),
         Content.fetch_chapter_shard(client, settings, book, chapter, "/web/book/chapter/e_3")
     )
+end
+
+local function rejected_reader_state(err)
+    if type(err) ~= "string" then return false end
+    return err:match("^/web/book/chapter/[et]_[0-3] returned empty object$") ~= nil
+        or err:match("content%.lua:%d+: Shard MD5 mismatch$") ~= nil
+end
+
+function Content.fetch_chapter_xhtml(client, settings, book, chapter, options)
+    local reuse = options and options.reuse_reader_state and book.psvts and book.psvts ~= ""
+    if not reuse then
+        Content.refresh_reader_state(client, book, chapter)
+        return fetch_chapter_with_state(client, settings, book, chapter)
+    end
+    if chapter and chapter.chapterUid then
+        book.reader_url = WeRead.reader_url(book.book_id or book.bookId, chapter.chapterUid)
+    end
+    local ok, value = pcall(fetch_chapter_with_state, client, settings, book, chapter)
+    if ok then return value end
+    if not rejected_reader_state(value) then error(value, 0) end
+    -- Only an explicitly rejected cached context gets one fresh attempt.
+    -- HTTP/transport errors retain the downloader's existing retry policy.
+    Content.refresh_reader_state(client, book, chapter)
+    return fetch_chapter_with_state(client, settings, book, chapter)
 end
 
 -- True when the text following the literal "0" of a font-size declaration
@@ -2005,9 +2027,9 @@ end
 
 -- Split chapter downloading around annotation fetching so the UI can request
 -- thought batches cooperatively instead of blocking inside Thoughts.apply().
-function Content.fetch_single_chapter_source(client, settings, book, chapter, state)
+function Content.fetch_single_chapter_source(client, settings, book, chapter, state, options)
     state = state or {}
-    local xhtml = Content.fetch_chapter_xhtml(client, settings, book, chapter)
+    local xhtml = Content.fetch_chapter_xhtml(client, settings, book, chapter, options)
     Content.cache_annotation_source(settings, book, chapter, xhtml)
     if not state.css then
         state.css = Content.fetch_chapter_css(client, settings, book, chapter)

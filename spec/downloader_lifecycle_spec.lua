@@ -9,6 +9,7 @@ end
 local prevented = 0
 local allowed = 0
 local scheduled = {}
+local scheduled_delays = {}
 local dialog
 package.preload["ui/widget/confirmbox"] = function()
     return { new = function(_self, options) return options end }
@@ -27,6 +28,7 @@ package.preload["ui/uimanager"] = function()
         allowStandby = function() allowed = allowed + 1 end,
         scheduleIn = function(_self, _delay, callback)
             scheduled[#scheduled + 1] = callback
+            scheduled_delays[#scheduled] = _delay
         end,
         show = function() end,
     }
@@ -163,6 +165,7 @@ expect(#messages >= 2, "lifecycle failures were not surfaced to the user")
 expect(prevented == 2, "standby guard was not acquired exactly once per job")
 
 local retry_download = {
+    reader_session_ready = true,
     book = { book_id = "book" },
     chapters = { { chapterUid = 30, title = "Chapter 30" } },
     index = 1,
@@ -175,9 +178,12 @@ expect(retry_download.index == 1 and #retry_download.failed == 0,
     "first transient chapter failure was not retained for retry")
 expect(#scheduled == scheduled_before_retry + 1,
     "first chapter retry was not scheduled")
+expect(not retry_download.reader_session_ready and scheduled_delays[#scheduled] == 0.8,
+    "source retry must discard its reader session without changing the first delay")
 scheduled[#scheduled]()
 expect(retry_download.index == 1 and #retry_download.failed == 0,
     "second transient chapter failure was not retained for retry")
+expect(scheduled_delays[#scheduled] == 1.6, "second source retry delay changed")
 scheduled[#scheduled]()
 expect(retry_download.index == 2 and retry_download.failed[1] == "30",
     "chapter was not skipped after exhausting two retries")
@@ -539,7 +545,7 @@ end
 -- One fork per chapter: the worker runs source + images, the parent never
 -- forks again; without images only the source runs in the worker.
 do
-    local forks, calls = 0, {}
+    local forks, calls, sessions = 0, {}, {}
     local inline_trapper = {
         wrap = function(_self, callback) callback() end,
         dismissableRunInSubprocess = function(_self, task)
@@ -550,8 +556,9 @@ do
     local restore_inline = TaskStub.install(function(task, widget)
         return inline_trapper:dismissableRunInSubprocess(task, widget)
     end)
-    Content.fetch_single_chapter_source = function(_client, _settings, _book, chapter)
+    Content.fetch_single_chapter_source = function(_client, _settings, _book, chapter, _state, options)
         calls[#calls + 1] = "source"
+        sessions[#sessions + 1] = options.reuse_reader_state
         return "<p>source " .. tostring(chapter.chapterUid) .. "</p>"
     end
     Content.finalize_single_chapter_content = function(_c, _s, _b, _chapter, xhtml)
@@ -584,6 +591,17 @@ do
     expect(forks == 1 and #calls == 2 and calls[1] == "source" and calls[2] == "finalize",
         "text-only chapter did not finalize in the parent after one worker")
     expect(job.bodies["7"] == "<p>final 7</p>", "text-only chapter was not staged")
+    expect(sessions[1] == false and sessions[2] == false,
+        "independent jobs must start with a fresh reader session")
+    local continued = one_chapter_job()
+    continued.book.psvts = "an-earlier-job"
+    continued.chapters[2], continued.total = { chapterUid = 8 }, 2
+    downloader:_step(continued)
+    downloader:_step(continued)
+    expect(sessions[3] == false and sessions[4] == true,
+        "only a previously accepted chapter may opt in to session reuse")
+    expect(continued.reader_session_ready and continued.book.reader_session_ready == nil,
+        "session readiness must remain scoped to the download job")
     restore_inline()
 end
 

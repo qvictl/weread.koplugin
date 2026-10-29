@@ -483,6 +483,85 @@ do
         "HTTP 503", "a failing e_1 shard did not fail the chapter")
 end
 
+-- A caller must explicitly opt in to an already accepted job's session.
+do
+    local parts = { ["/web/book/chapter/e_0"] = SHARDS.hi[1],
+        ["/web/book/chapter/e_1"] = SHARDS.hi[2], ["/web/book/chapter/e_3"] = SHARDS.hi[3] }
+    local client = new_client({ shard = shard_router(parts) })
+    local book, settings = { book_id = "B1" }, settings_with({})
+    local options = { reuse_reader_state = true }
+    expect(Content.fetch_chapter_xhtml(client, settings, book, { chapterUid = 1 }, options) == "<p>Hi</p>"
+        and client.pages == 1, "reuse without a session must still start fresh")
+    expect(Content.fetch_chapter_xhtml(client, settings, book, { chapterUid = 2 }, options) == "<p>Hi</p>"
+        and client.pages == 1, "accepted session was not reused")
+    expect(book.reader_url == "https://weread.qq.com/web/reader/B1k2"
+        and content_params[#content_params].ps == "PS1", "reuse lost the current chapter referer or accepted session")
+    Content.fetch_chapter_xhtml(client, settings, book, { chapterUid = 3 })
+    Content.fetch_chapter_xhtml(client, settings, book, { chapterUid = 4 }, { reuse_reader_state = false })
+    expect(client.pages == 3 and book.psvts == "PS3", "raw/default callers must keep per-chapter refresh")
+
+    local old = { book_id = "B1", psvts = "accepted", pclts = "old-clock", token = "old-token" }
+    local rejected
+    rejected = new_client({ shard = function(endpoint)
+        if rejected.pages == 0 then return ok_shard("{}") end
+        return ok_shard(parts[endpoint])
+    end })
+    expect(Content.fetch_chapter_xhtml(rejected, settings, old, { chapterUid = 9 }, options) == "<p>Hi</p>",
+        "explicit context rejection did not refresh the accepted session")
+    expect(rejected.pages == 1 and rejected:count("request", "/e_0") == 2,
+        "context rejection must get exactly one fresh attempt")
+    expect(old.psvts == "PS1" and old.pclts == nil and old.token == "tok",
+        "fallback retained credentials omitted by the fresh reader")
+
+    local permanent = new_client({ shard = function() return ok_shard("{}") end })
+    expect_error(function()
+        Content.fetch_chapter_xhtml(permanent, settings, { book_id = "B1", psvts = "accepted" }, { chapterUid = 1 }, options)
+    end, "returned empty object", "permanent context refusal must fail")
+    expect(permanent.pages == 1 and permanent:count("request") == 2,
+        "a rejected fresh attempt must not loop or perform another reader refresh")
+
+    local checksum
+    checksum = new_client({ shard = function(endpoint)
+        if checksum.pages == 0 and endpoint == "/web/book/chapter/e_1" then
+            return ok_shard(string.rep("0", 32) .. "invalid-checked-shard")
+        end
+        return ok_shard(parts[endpoint])
+    end })
+    expect(Content.fetch_chapter_xhtml(checksum, settings, { book_id = "B1", psvts = "accepted" },
+        { chapterUid = 1 }, options) == "<p>Hi</p>" and checksum.pages == 1,
+        "a cached shard checksum rejection did not get one fresh attempt")
+
+    for _, failure in ipairs({ "transport", "http" }) do
+        local failed = new_client({ shard = function()
+            if failure == "transport" then return nil, nil, {}, "wantread" end
+            return "unavailable", 503, {}, "HTTP/1.1 503"
+        end })
+        expect_error(function()
+            Content.fetch_chapter_xhtml(failed, settings, { book_id = "B1", psvts = "accepted" }, { chapterUid = 1 }, options)
+        end, failure == "transport" and "wantread" or "HTTP 503", "cached request failure changed")
+        expect(failed.pages == 0 and failed:count("request") == 1,
+            "transport/HTTP failure must keep the outer downloader's retry policy")
+    end
+    local exception = { reason = "worker aborted" }
+    local throws = new_client({ shard = function() error(exception, 0) end })
+    local ok, err = pcall(Content.fetch_chapter_xhtml, throws, settings,
+        { book_id = "B1", psvts = "accepted" }, { chapterUid = 1 }, options)
+    expect(not ok and err == exception and throws.pages == 0, "non-string errors must propagate without a fresh attempt")
+
+    local txt_client = new_client({ shard = shard_router({
+        ["/web/book/chapter/t_0"] = SHARDS.txt_whole, ["/web/book/chapter/t_1"] = "",
+    }) })
+    expect(has(Content.fetch_chapter_xhtml(txt_client, settings,
+        { book_id = "B1", psvts = "accepted", _content_format = "txt" }, { chapterUid = 1 }, options), "<p>Line A</p>")
+        and txt_client.pages == 0, "known TXT chapters must retain the opt-in reuse behavior")
+
+    local source_client = new_client({ shard = shard_router(parts) })
+    local state = { css = "accepted stylesheet" }
+    expect(Content.fetch_single_chapter_source(source_client, settings, { book_id = "B1", psvts = "accepted" },
+        { chapterUid = 2 }, state, options) == "<p>Hi</p>" and source_client.pages == 0
+        and state.css == "accepted stylesheet", "chapter source did not forward its job's reuse option")
+end
+
 -- ------------------------------------------------------- fetch_chapter_css --
 
 do
