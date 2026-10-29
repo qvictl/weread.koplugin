@@ -4,6 +4,7 @@ local Content = require("weread.lib.content")
 local Chapters = require("weread.lib.annotation_chapters")
 local PluginUtil = require("weread.lib.plugin_util")
 local logger = require("weread.lib.logger")
+local RequestOwner = require("weread.lib.request_owner")
 local _ = PluginUtil.tr
 local T = PluginUtil.T
 local M = {}
@@ -132,6 +133,7 @@ function M:_prepareAnnotationContext(online, refresh_catalog, options)
     if not binding then return nil end
     local context = self._annotation_context
     if not refresh_catalog and context and context.path == path and context.book_id == tostring(binding.book_id)
+        and RequestOwner.matches(self.settings, context.owner)
         and (context.catalog and #context.catalog > 0 or not online) then
         perf("context_cached", started)
         return context
@@ -183,6 +185,7 @@ function M:_prepareAnnotationContext(online, refresh_catalog, options)
     store:importLegacy(book_id, path, document_key)
     started = perf("legacy_import", started)
     context = { path = path, book_id = book_id, binding = binding, book = book,
+        owner = RequestOwner.capture(self.settings),
         store = store, document_key = document_key, chapters = selected, ranges = ranges,
         descriptor = descriptor, catalog = catalog, overrides = overrides,
         statuses = store:reconcileRanges(book_id, document_key, ranges) }
@@ -368,6 +371,7 @@ function M:_finishAnnotationPrefetchWorker(request, result)
     end
     request.worker_handle = nil
     if self._external_annotation_sync ~= request then return end
+    if not RequestOwner.matches(self.settings, request.owner) then request.cancelled = true end
     if not request.cancelled and type(result) == "table" and result.ok then
         if result.value and result.value.auth then
             local WorkerSettings = require("weread.lib.worker_settings")
@@ -383,7 +387,9 @@ function M:_finishAnnotationPrefetchWorker(request, result)
     self._external_annotation_sync = nil
     local pending = self._annotation_pending_prefetch
     self._annotation_pending_prefetch = nil
-    if pending then self:_runAnnotationJob(pending.context, pending.options) end
+    if pending and RequestOwner.matches(self.settings, pending.owner) then
+        self:_runAnnotationJob(pending.context, pending.options)
+    end
 end
 
 function M:_runAnnotationPrefetchWorker(request, context, options)
@@ -400,6 +406,10 @@ function M:_runAnnotationPrefetchWorker(request, context, options)
         kind = "annotation",
         queue = true,
         timeout = 180,
+        before_launch = function()
+            return self._external_annotation_sync == request and not request.cancelled
+                and RequestOwner.matches(self.settings, request.owner), "account_changed"
+        end,
         task = function(worker_context)
             return AnnotationWorker.run(self.settings, self.client, context,
                 options.chapters or context.chapters, worker_context)
@@ -437,7 +447,7 @@ function M:_runAnnotationNetwork(request, task)
     if not ok_json then Json = require("rapidjson") end
     local WorkerSettings = require("weread.lib.worker_settings")
     local fingerprint = WorkerSettings.fingerprint(self.settings)
-    local completed, encoded = request.trapper:dismissableRunInSubprocess(function()
+    local completed, encoded = require("weread.lib.subprocess").run(function()
         local auth_result = WorkerSettings.capture(self.settings)
         local ok, values = xpcall(function()
             local first, second, third = task()
@@ -447,9 +457,19 @@ function M:_runAnnotationNetwork(request, task)
         -- LuaJSON represents null as a function, which Trapper's binary table
         -- serializer rejects. Send JSON over its existing plain-string pipe.
         return Json.encode({ ok = ok, values = values, auth = auth_result() })
-    end, request.progress, true)
+    end, request.progress, true, {
+        settings = self.settings,
+        before_launch = function()
+            return self._external_annotation_sync == request and not request.cancelled
+                and RequestOwner.matches(self.settings, request.owner), "account_changed"
+        end,
+    })
     request.progress.dismiss_callback = nil
     if self._external_annotation_sync ~= request or request.cancelled then return end
+    if not RequestOwner.matches(self.settings, request.owner) then
+        self:_cancelUnifiedAnnotationSync()
+        return
+    end
     if not completed then error("could not start annotation worker") end
     if not encoded or encoded == "" then error("annotation worker returned no result") end
     local result = Json.decode(encoded)
@@ -460,6 +480,8 @@ end
 
 function M:_runAnnotationJob(context, options)
     options = options or {}
+    local owner = context.owner or RequestOwner.capture(self.settings)
+    if not RequestOwner.matches(self.settings, owner) then return false end
     if options.background or options.prefetch then
         if not self:canPrefetchAnnotations() then return false end
         -- Every automatic path must use the headless worker. Hiding a progress
@@ -468,18 +490,19 @@ function M:_runAnnotationJob(context, options)
     end
     if self._external_annotation_sync then
         if options.background then
-            self._annotation_pending_prefetch = { context = context, options = options }
+            self._annotation_pending_prefetch = { context = context, options = options, owner = owner }
             return
         end
         if self._external_annotation_sync.worker_handle then
-            self._annotation_pending_prefetch = { context = context, options = options }
+            self._annotation_pending_prefetch = { context = context, options = options, owner = owner }
             self:_cancelUnifiedAnnotationSync(true)
             return
         end
         self:_cancelUnifiedAnnotationSync()
     end
     local Sync = require("weread.lib.annotation_sync")
-    local request = { context = context, session = self._reader_session_gen, prefetch = options.prefetch }
+    local request = { context = context, session = self._reader_session_gen, prefetch = options.prefetch,
+        owner = owner }
     self._external_annotation_sync = request
     if options.prefetch then
         return self:_runAnnotationPrefetchWorker(request, context, options)
@@ -564,6 +587,10 @@ function M:_runAnnotationJob(context, options)
     local step, safe_step
     step = function()
         if self._external_annotation_sync ~= request then return end
+        if not RequestOwner.matches(self.settings, request.owner) then
+            self:_cancelUnifiedAnnotationSync()
+            return
+        end
         if not options.prefetch and (file(self) ~= context.path
             or self._reader_session_gen ~= request.session) then
             self:_cancelUnifiedAnnotationSync()
@@ -609,7 +636,9 @@ function M:_runAnnotationJob(context, options)
                         tostring(summary.chapters), tostring(#context.chapters)))
                 end
             end
-            if done and pending then self:_runAnnotationJob(pending.context, pending.options) end
+            if done and pending and RequestOwner.matches(self.settings, pending.owner) then
+                self:_runAnnotationJob(pending.context, pending.options)
+            end
             return
         end
         if request.progress then

@@ -185,6 +185,11 @@ local function new_login(routes, options)
     return QRLogin:new(host, client, settings, options or { subprocess = false })
 end
 
+-- Fake runner admission must not depend on the host's available RAM.
+local Memory = require("weread.lib.memory_gate")
+local read_memory = Memory.read_meminfo
+Memory.read_meminfo = function() return "MemAvailable: 1048576 kB\n" end
+local succeeded, failure = xpcall(function()
 -- _request_json / _poll_protocol ---------------------------------------------
 
 do
@@ -693,9 +698,14 @@ local function make_scheduler()
     return scheduler
 end
 
+local previous_runner
 local function job_login(routes, runner_options)
+    -- Independent fixtures finish their own fake OS process.
+    if previous_runner then previous_runner.done = true end
+    require("weread.lib.fork_budget").available()
     reset_ui()
     local runner, scheduler = make_runner(), make_scheduler()
+    previous_runner = runner
     for key, value in pairs(runner_options or {}) do runner[key] = value end
     local login = new_login(routes, { subprocess = runner, scheduler = scheduler })
     local stash = {}
@@ -1091,5 +1101,9 @@ do
     reset_ui()
     if not ok then error(err, 0) end
 end
+
+end, debug.traceback)
+Memory.read_meminfo = read_memory
+if not succeeded then error(failure, 0) end
 
 print("qr_login_flow_spec: " .. checks .. " checks passed")

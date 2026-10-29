@@ -30,6 +30,17 @@ package.preload["logger"] = function()
     }
 end
 
+-- Admission is exercised with fake OS children, so host memory must not
+-- decide whether they launch. Each case restores even after an assertion.
+function H.with_memory(fn)
+    local memory = require("weread.lib.memory_gate")
+    local read_memory = memory.read_meminfo
+    memory.read_meminfo = function() return "MemAvailable: 1048576 kB\n" end
+    local ok, err = pcall(fn)
+    memory.read_meminfo = read_memory
+    return ok, err
+end
+
 function H.clear_logs()
     H.logs = {}
 end
@@ -289,8 +300,10 @@ end
 
 -- In-process stand-in for a forked child: `finish()` runs the child body,
 -- which writes its encoded outcome to the "pipe".
+local runners = {}
 function H.runner()
     local runner = { forks = 0, done = false, terminated = {}, reads = 0, pid = 100 }
+    runners[#runners + 1] = runner
     function runner.run(child, with_pipe)
         runner.forks = runner.forks + 1
         runner.child = child
@@ -315,6 +328,14 @@ function H.runner()
     function runner.terminate(pid) runner.terminated[#runner.terminated + 1] = pid end
     function runner.finish() runner.child(runner.pid, 7) end
     return runner
+end
+
+-- Independent cases finish their simulated OS sessions. Dropping a Lua job
+-- alone does not mean that a process has exited or been reaped.
+function H.finish_runners()
+    for _, runner in ipairs(runners) do runner.done = true end
+    require("weread.lib.fork_budget").available()
+    runners = {}
 end
 
 -- Builds a ReadReport with a controllable clock, document, network state

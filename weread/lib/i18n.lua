@@ -1,6 +1,10 @@
 local I18n = {}
 
 local zh = {
+    ["Not enough free memory. Close the open book and try again."] = "可用内存不足，请关闭正在阅读的书后重试。",
+    ["This operation is unavailable on this device."] = "当前设备无法执行此操作。",
+    ["The operation did not return a result. Please try again."] = "操作未返回结果，请重试。",
+    ["The operation timed out. Please try again."] = "操作超时，请重试。",
     ["A local cache scan is already running."] = "本地缓存扫描正在进行中。",
     ["Background downloads are unavailable on this device."] = "当前设备无法使用后台下载。",
     ["Another background task is running. Try again shortly."] = "另一个后台任务正在运行，请稍后重试。",

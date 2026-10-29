@@ -19,6 +19,7 @@ local log_error = PluginUtil.log_error
 local display_error = PluginUtil.display_error
 local file_exists = PluginUtil.file_exists
 
+local ForkBudget = require("weread.lib.fork_budget")
 local M = {}
 local sortBooks
 
@@ -159,6 +160,8 @@ function M:showTrackedList(...)
 end
 
 function M:onWeReadAccountChanged()
+    if self._cancelUnifiedAnnotationSync then self:_cancelUnifiedAnnotationSync() end
+    self._annotation_context = nil
     if self.progress_sync and self.progress_sync.on_account_changed then self.progress_sync:on_account_changed() end
     if self.read_report and self.read_report.on_account_changed then self.read_report:on_account_changed() end
     self:closeWeReadUI()
@@ -365,7 +368,14 @@ function M:fetchVisibleShelfCovers(view, items, options)
             return
         end
 
-        local pid, read_fd = runner.run(function(_pid, child_write_fd)
+        if not ForkBudget.available() then
+            -- Keep this batch registered while it waits; a repaint must not
+            -- start another polling loop for the same visible covers.
+            self.shelf_cover_job = self.shelf_cover_job or {}
+            UIManager:scheduleIn(0.15, fetch_next)
+            return
+        end
+        local pid, read_fd, reservation = ForkBudget.run(runner, function(_pid, child_write_fd)
             local ok, path = pcall(cache.thumbnailFromCached, cache, book)
             if not (ok and path) and online then
                 local downloaded, data = pcall(function()
@@ -380,20 +390,29 @@ function M:fetchVisibleShelfCovers(view, items, options)
             runner.write_all(child_write_fd, ok and path and "ok" or "error")
         end)
         if not pid then
+            if read_fd == "low_memory" then
+                finish_batch()
+                return
+            end
+            if read_fd == "worker_busy" then
+                self.shelf_cover_job = self.shelf_cover_job or {}
+                UIManager:scheduleIn(0.15, fetch_next)
+                return
+            end
             logger.warn("bookshelf cover background worker failed to start")
             index = index + 1
             UIManager:scheduleIn(0.1, fetch_next)
             return
         end
 
-        local job = { pid = pid, read_fd = read_fd, started_at = os.time() }
+        local job = { pid = pid, read_fd = read_fd, reservation = reservation, started_at = os.time() }
         self.shelf_cover_job = job
         local poll
         poll = function()
             if self.shelf_cover_job ~= job then return end
-            if not runner.is_done(job.pid) then
+            if not ForkBudget.is_done(job.reservation) then
                 if os.time() - job.started_at > 30 then
-                    runner.terminate(job.pid)
+                    ForkBudget.terminate(job.reservation)
                 end
                 UIManager:scheduleIn(0.15, poll)
                 return

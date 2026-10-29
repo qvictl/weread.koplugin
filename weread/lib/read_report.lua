@@ -7,6 +7,7 @@ local WeRead = require("weread.lib.protocol")
 local logger = require("weread.lib.logger").scoped("ReadReport")
 
 local MemoryGate = require("weread.lib.memory_gate")
+local ForkBudget = require("weread.lib.fork_budget")
 local ok_ffiutil, ffiutil = pcall(require, "ffi/util")
 if not ok_ffiutil then
     ffiutil = nil
@@ -823,12 +824,15 @@ function ReadReport:_spawn_job(spec, on_done)
     if not runner then
         return false, "no subprocess support", true
     end
+    -- Reject busy admission before collecting the parent heap: collecting
+    -- while another child is alive would dirty its shared COW pages.
+    if not ForkBudget.available() then return false, "worker_busy" end
     local memory_ok, available_kb = self.memory_gate()
     if not memory_ok then
         return false, "low memory (" .. tostring(available_kb) .. " kB available)"
     end
     local owner = RequestOwner.capture(self.settings)
-    local pid, read_fd = runner.run(function(_pid, child_write_fd)
+    local pid, read_fd, reservation = ForkBudget.run(runner, function(_pid, child_write_fd)
         local outcome = self:_child_report(spec.book_id, spec.allow_renewal,
             spec.position, spec.credit, spec)
         local ok, encoded = pcall(function()
@@ -850,6 +854,7 @@ function ReadReport:_spawn_job(spec, on_done)
         key = spec.key,
         pid = pid,
         read_fd = read_fd,
+        reservation = reservation,
         book_id = spec.book_id,
         started_at = self.now(),
         timeout = spec.timeout or JOB_TIMEOUT_SECONDS,
@@ -891,7 +896,7 @@ function ReadReport:_poll_job(job)
     end
     if not RequestOwner.matches(self.settings, job.owner) then self:on_account_changed(); return end
     local runner = self.subprocess
-    local done = runner.is_done(job.pid)
+    local done = ForkBudget.is_done(job.reservation)
     local readable = job.read_fd and runner.read_size(job.read_fd)
     if done or (readable and readable > 0) then
         local payload
@@ -903,7 +908,7 @@ function ReadReport:_poll_job(job)
         if not done then
             -- Output was read while the child was still exiting; reap it in
             -- the background so it does not linger as a zombie.
-            self:_collect_pid(job.pid)
+            self:_collect_pid(job.reservation)
         end
         job.on_done(job, self:_decode_outcome(payload), false)
         return
@@ -933,10 +938,10 @@ function ReadReport:_abandon_job(job)
     if job.poll then
         self.scheduler:unschedule(job.poll)
     end
-    runner.terminate(job.pid)
+    ForkBudget.terminate(job.reservation)
     local collect
     collect = function()
-        if runner.is_done(job.pid) then
+        if ForkBudget.is_done(job.reservation) then
             if job.read_fd then
                 runner.read_all(job.read_fd)
                 job.read_fd = nil
@@ -953,11 +958,10 @@ function ReadReport:_abandon_job(job)
     collect()
 end
 
-function ReadReport:_collect_pid(pid)
-    local runner = self.subprocess
+function ReadReport:_collect_pid(reservation)
     local collect
     collect = function()
-        if not runner.is_done(pid) then
+        if not ForkBudget.is_done(reservation) then
             self.scheduler:scheduleIn(JOB_COLLECT_INTERVAL_SECONDS, collect)
         end
     end

@@ -5,6 +5,7 @@
 --   luajit spec/annotation_network_subprocess_spec.lua
 
 package.path = "./?.lua;" .. package.path
+local restore_subprocess = require("spec.helpers.subprocess_stub").install()
 local helper = require("spec.helpers.annotation_test_store")
 
 for _, name in ipairs({ "ui/bidi", "ui/widget/infomessage", "ui/widget/menu", "ui/widget/confirmbox" }) do
@@ -178,3 +179,5 @@ dismiss = false
 
 helper.cleanup()
 print(("annotation_network_subprocess_spec: %d checks"):format(checks))
+
+restore_subprocess()

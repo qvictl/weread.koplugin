@@ -71,6 +71,13 @@ end
 function UpdaterUI.display_error(err)
     if err == nil or err == "" then return _("Unknown error") end
     local text = tostring(err)
+    local messages = {
+        low_memory = "Not enough free memory. Close the open book and try again.",
+        worker_unavailable = "This operation is unavailable on this device.",
+        worker_no_result = "The operation did not return a result. Please try again.",
+        worker_timeout = "The operation timed out. Please try again.",
+    }
+    if messages[text] then return _(messages[text]) end
     local code = text:match("^HTTP (%d+)$")
     if code then return T(_("Server returned HTTP %1"), code) end
     local status = text:match("^HTTP (.+)$")
@@ -122,13 +129,17 @@ function UpdaterUI:_run_subprocess(message, task, callback, trap_widget)
         callback(result)
     end
     if ok_trapper and Trapper and Trapper.dismissableRunInSubprocess then
-        local completed, result = Trapper:dismissableRunInSubprocess(
-            safe_task, trap_widget)
+        local completed, result, reason = require("weread.lib.subprocess").run(
+            safe_task, trap_widget, false, { settings = self.settings })
         if completed then
             UIManager:scheduleIn(0.1, function() finish(result) end)
         else
             UIManager:scheduleIn(0.1, function()
-                finish{ cancelled = true, error = "cancelled" }
+                if reason == nil and result == nil then
+                    finish{ cancelled = true, error = "cancelled" }
+                else
+                    finish{ error = tostring(result or reason) }
+                end
             end)
         end
     else

@@ -23,6 +23,7 @@ local ErrorText = require("weread.lib.error_text")
 local Footnotes = require("weread.lib.footnotes")
 local I18n = require("weread.lib.i18n")
 local MemoryGate = require("weread.lib.memory_gate")
+local ForkBudget = require("weread.lib.fork_budget")
 local StandbyGuard = require("weread.lib.standby_guard")
 local WeRead = require("weread.lib.protocol")
 local WorkerSettings = require("weread.lib.worker_settings")
@@ -642,7 +643,16 @@ end
 -- Raises a LOW_MEMORY_ERROR when memory does not recover; callers route it to
 -- _stopForLowMemory instead of counting a chapter failure.
 function Downloader:_waitForMemory(dl)
-    local ok, available, required = self.memory_gate()
+    local function check_memory()
+        -- Busy is not low memory. Wait without collecting the parent heap
+        -- while an existing child still shares its COW pages.
+        while not ForkBudget.available() do
+            if self:_accountChanged(dl) or dl.cancelled then return end
+            if not self:_sleepInJob(dl, 0.125) then return end
+        end
+        return self.memory_gate()
+    end
+    local ok, available, required = check_memory()
     if ok then return end
     local previous_title, previous_progress = dl.stage_title, dl.stage_progress
     for attempt, delay in ipairs(MEMORY_WAIT_SCHEDULE) do
@@ -657,7 +667,7 @@ function Downloader:_waitForMemory(dl)
             kb_to_mb(available), kb_to_mb(required)), previous_progress)
         if not self:_sleepInJob(dl, delay) then break end
         if self:_accountChanged(dl) or dl.cancelled then return end
-        ok, available, required = self.memory_gate()
+        ok, available, required = check_memory()
         if ok then
             logger.info("download memory recovered:",
                 "available_kb=", tostring(available),
@@ -712,15 +722,32 @@ function Downloader:_runInterruptible(dl, task)
     local dialog = dl.progress_dialog
     local fingerprint = WorkerSettings.fingerprint(self.settings)
     local prepare_child = self.prepare_worker_child or prepare_worker_child
-    local completed, result = dl.trapper:dismissableRunInSubprocess(function()
+    local completed, result, failure_reason = require("weread.lib.subprocess").run(function()
         pcall(prepare_child)
         local auth_result = WorkerSettings.capture(self.settings)
         local ok, value = xpcall(task, debug.traceback)
         return { ok = ok, value = value, auth = auth_result() }
-    end, dialog)
+    end, dialog, false, {
+        settings = self.settings,
+        before_launch = function()
+            return not self:_accountChanged(dl) and not dl.cancelled
+        end,
+        required_memory_kb = function()
+            return MemoryGate.fork_requirement_kb(collectgarbage("count"))
+        end,
+    })
     if dialog then dialog.dismiss_callback = nil end
     if self:_accountChanged(dl) or dl.cancelled then return nil end
-    if not completed then error("could not start download worker") end
+    if not completed then
+        if failure_reason == "low_memory" then error(LOW_MEMORY_ERROR, 0) end
+        local reason = result or failure_reason
+        if reason == "worker_no_result" then
+            error(_("The operation did not return a result. Please try again."), 0)
+        elseif reason == "worker_timeout" then
+            error(_("The operation timed out. Please try again."), 0)
+        end
+        error("could not start download worker")
+    end
     if not result then error("download worker returned no result") end
     if result.auth then WorkerSettings.merge(self.settings, fingerprint, result.auth) end
     if not result.ok then error(result.value, 0) end

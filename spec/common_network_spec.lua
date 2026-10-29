@@ -1,6 +1,7 @@
 -- Unit tests for shared network task behavior.
 
 package.path = "./?.lua;" .. package.path
+local restore_subprocess = require("spec.helpers.subprocess_stub").install()
 
 local checks = 0
 
@@ -196,4 +197,23 @@ for _, change in ipairs({ "uid", "api_key", "ticket" }) do
 end
 UIManager.scheduleIn = schedule
 
+local old_worker = package.loaded["ui/trapper"].dismissableRunInSubprocess
+for code, message in pairs({
+    low_memory = "Not enough free memory. Close the open book and try again.",
+    worker_unavailable = "This operation is unavailable on this device.",
+    worker_no_result = "The operation did not return a result. Please try again.",
+    worker_timeout = "The operation timed out. Please try again.",
+}) do
+    package.loaded["ui/trapper"].dismissableRunInSubprocess = function() return false, code, "start_failed" end
+    local received
+    host:_runNetworkRequest("Loading", "Load", function() error("failed worker ran task") end,
+        function() error("failed worker delivered success") end, function(err, cancelled)
+            received = err; eq(cancelled, false, "worker failure remains a failure")
+        end)
+    eq(received, message, code .. " has a user-facing explanation")
+end
+package.loaded["ui/trapper"].dismissableRunInSubprocess = old_worker
+
 print(string.format("common_network_spec: %d checks", checks))
+
+restore_subprocess()

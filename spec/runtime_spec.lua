@@ -23,7 +23,7 @@ package.preload["ui/widget/infomessage"] = function()
     return { new = function(_self, options) return options end }
 end
 
-local counts = { settings = 0, client = 0, worker = 0, downloader = 0, recover = 0 }
+local counts = { settings = 0, client = 0, worker = 0, downloader = 0, recover = 0, worker_recover = 0 }
 local fakes = {
     Settings = { new = function()
         counts.settings = counts.settings + 1
@@ -35,7 +35,7 @@ local fakes = {
     end },
     BackgroundWorker = { new = function(_self, options)
         counts.worker = counts.worker + 1
-        return { options = options }
+        return { options = options, recover = function() counts.worker_recover = counts.worker_recover + 1; return 0 end }
     end },
     Downloader = { new = function(_self, options)
         counts.downloader = counts.downloader + 1
@@ -67,6 +67,7 @@ expect(preloaded == 1, "lazily required worker modules were not preloaded")
 
 expect(first:recover() == true and first:recover() == false and counts.recover == 1,
     "recover must run once per process")
+expect(counts.worker_recover == 1, "worker credentials were not cleaned exactly once at startup")
 local once_runs = 0
 first:once("migrations", function() once_runs = once_runs + 1 end)
 first:once("migrations", function() once_runs = once_runs + 1 end)

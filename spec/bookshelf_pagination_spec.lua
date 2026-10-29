@@ -172,6 +172,11 @@ for key, value in pairs(Library) do
     if host[key] == nil then host[key] = value end
 end
 
+local Memory = require("weread.lib.memory_gate")
+local read_memory = Memory.read_meminfo
+local function enough_memory() return "MemAvailable: 1048576 kB\n" end
+Memory.read_meminfo = enough_memory
+local succeeded, failure = xpcall(function()
 host:showShelfView("books", nil, nil, {})
 expect(shown[1].data.paged == true, "bookshelf did not enable pagination by default")
 expect(shown[1].data.page_size == 10, "bookshelf used the wrong page size")
@@ -299,6 +304,58 @@ expect(#cover_requests == requests_before_qlogo + 1
         and cover_requests[#cover_requests].url == "https://wx.qlogo.cn/avatar",
     "public-account avatar cover was not upgraded to HTTPS and fetched")
 
+-- Low memory stops background wakeups. The top-bar refresh action rebuilds
+-- even a single-page shelf and retries covers after memory recovers.
+do
+    local ui = package.loaded["ui/uimanager"]
+    local schedule = ui.scheduleIn
+    local queued = {}
+    ui.scheduleIn = function(_, _, fn) queued[#queued + 1] = fn end
+    local saved = {}
+    for _, key in ipairs({ "requireLogin", "showBusy", "closeBusy", "runOnlineTask", "_runNetworkRequest" }) do
+        saved[key] = host[key]
+    end
+    local saved_get_shelf = host.client.get_shelf
+    local ok, err = pcall(function()
+        local book = { bookId = "memory-retry", cover = "https://cdn.example/memory-retry" }
+        local before = #cover_requests
+        Memory.read_meminfo = function() return "MemAvailable: 1 kB\n" end
+        host:showShelfView("books", nil, nil, {
+            page = 1, prepared_shelf = { books = { book }, accounts = {} },
+        })
+        local paused = shown[#shown]
+        expect(#cover_requests == before and not host.shelf_cover_job and #queued == 0,
+            "persistent low memory retained a cover batch or wakeup timer")
+        expect(paused.view.page_count == 1, "low-memory recovery fixture is not a single-page shelf")
+        local refreshes = 0
+        host.requireLogin = function() return true end
+        host.showBusy = function() end
+        host.closeBusy = function() end
+        host.runOnlineTask = function(_, _, fn) ui:scheduleIn(0.1, fn) return true end
+        host._runNetworkRequest = require("spec.helpers.immediate_network_request")
+        host.client.get_shelf = function()
+            refreshes = refreshes + 1
+            return { books = { book }, archive = {} }
+        end
+        Memory.read_meminfo = enough_memory
+        -- LibraryView's top-bar refresh button invokes this public action;
+        -- same-page pagination is deliberately not used for recovery.
+        paused.view.on_refresh()
+        expect(refreshes == 0 and #queued == 1, "shelf refresh did not remain deferred")
+        for _ = 1, 8 do local fn = table.remove(queued, 1); if fn then fn() end end
+        expect(refreshes == 1 and #cover_requests == before + 1 and cached_covers[book]
+            and not host.shelf_cover_job and #queued == 0,
+            "single-page refresh did not retry the cover after memory recovery")
+    end)
+    for _, key in ipairs({ "requireLogin", "showBusy", "closeBusy", "runOnlineTask", "_runNetworkRequest" }) do
+        host[key] = saved[key]
+    end
+    host.client.get_shelf = saved_get_shelf
+    Memory.read_meminfo = enough_memory
+    ui.scheduleIn = schedule
+    if not ok then error(err, 0) end
+end
+
 -- Groups are projected once per snapshot and share the existing shelf records.
 local grouped_books = {}
 for index = 1, 30 do grouped_books[index] = { bookId = tostring(index), title = "Group book " .. index } end
@@ -424,5 +481,9 @@ expect(#dialogs == 1, "old shelf cache repeated the upgrade hint before a refres
 host.shelf_group_key = "archive:7"
 host:onWeReadAccountChanged()
 expect(host.shelf_groups == nil and host.shelf_group_key == nil, "account switch retained old groups")
+
+end, debug.traceback)
+Memory.read_meminfo = read_memory
+if not succeeded then error(failure, 0) end
 
 print(("bookshelf_pagination_spec: %d checks"):format(checks))
