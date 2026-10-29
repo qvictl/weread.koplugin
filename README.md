@@ -1,11 +1,12 @@
 # Coverage history (main)
 
-Unit coverage follows main CI; combined coverage is measured only by Release candidates. A dash means no emulator measurement for that commit. Scope: `main.lua`, `weread/`, `integrations/`. Policy: `.ci/coverage-policy.json` on main.
+Whole coverage comes from full Release measurements or manual full backfills; partial CI never publishes it. A dash means no emulator measurement for that commit. Scope: `main.lua`, `weread/`, `integrations/`. Policy: `.ci/coverage-policy.json` on main.
 
 Targets: from 2026-11-24: unit + emulator ≥ 80.78%, unit ≥ 80.00%; from 2026-12-22: unit + emulator ≥ 85.00%, unit ≥ 88.00%, each `^weread/lib/` file unit ≥ 70%
 
 | Date (UTC) | Commit | Unit | Unit + emulator | Run |
 | --- | --- | --- | --- | --- |
+| 2026-10-29T17:20:19+00:00 | `c5855b31` | 91.55% | 93.65% | [run](https://github.com/qvictl/weread.koplugin/actions/runs/40919127472) |
 | 2026-10-29T10:35:42+00:00 | `16ee4a6e` | 91.51% | — | [run](https://github.com/qvictl/weread.koplugin/actions/runs/40858279604) |
 | 2026-10-29T09:06:37+00:00 | `d653e154` | 91.35% | 93.53% | [run](https://github.com/qvictl/weread.koplugin/actions/runs/40846034244) |
 | 2026-10-29T05:06:12+00:00 | `46926f16` | 91.35% | 93.54% | [run](https://github.com/qvictl/weread.koplugin/actions/runs/40820707769) |
