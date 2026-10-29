@@ -216,6 +216,8 @@ jobs:
     name: Package and publish validated candidate
     needs: [integration, coverage, persist-coverage]
     runs-on: ubuntu-latest
+    env:
+      ARCHIVE: ${{ inputs.archive }}
     permissions:
       contents: write
     steps:
@@ -227,33 +229,33 @@ jobs:
           persist-credentials: false
 
       - name: Build plugin package
-        run: bash scripts/package_release.sh "${{ inputs.archive }}"
+        run: bash scripts/package_release.sh "$ARCHIVE"
 
       - name: Generate checksum
         run: |
-          archive="${{ inputs.archive }}"
+          archive="$ARCHIVE"
           (
             cd "$(dirname "$archive")"
             sha256sum "$(basename "$archive")" > "$(basename "$archive").sha256"
           )
-          cat "${{ inputs.archive }}.sha256"
+          cat "$ARCHIVE.sha256"
 
       - name: Verify package contents
         run: |
-          unzip -l "${{ inputs.archive }}"
-          test "$(unzip -Z1 "${{ inputs.archive }}" | head -n 1)" \
+          unzip -l "$ARCHIVE"
+          test "$(unzip -Z1 "$ARCHIVE" | head -n 1)" \
             = "weread.koplugin/"
-          unzip -Z1 "${{ inputs.archive }}" \
+          unzip -Z1 "$ARCHIVE" \
             | grep -qx "weread.koplugin/main.lua"
-          unzip -Z1 "${{ inputs.archive }}" \
+          unzip -Z1 "$ARCHIVE" \
             | grep -qx "weread.koplugin/_meta.lua"
-          unzip -Z1 "${{ inputs.archive }}" \
+          unzip -Z1 "$ARCHIVE" \
             | grep -qx "weread.koplugin/icons/weread-w-book.svg"
-          unzip -Z1 "${{ inputs.archive }}" \
+          unzip -Z1 "$ARCHIVE" \
             | grep -qx "weread.koplugin/integrations/init.lua"
-          unzip -Z1 "${{ inputs.archive }}" \
+          unzip -Z1 "$ARCHIVE" \
             | grep -qx "weread.koplugin/integrations/zenui.lua"
-          if unzip -Z1 "${{ inputs.archive }}" \
+          if unzip -Z1 "$ARCHIVE" \
             | grep -Eq '^weread\.koplugin/(spec|scripts|docs|\.github)/'; then
             echo "error: development-only files were included in the release package" >&2
             exit 1
