@@ -274,6 +274,10 @@ local trapper = {
         return coroutine.yield()
     end,
 }
+local TaskStub = require("spec.helpers.subprocess_stub")
+local restore_process = TaskStub.install(function(task, widget)
+    return trapper:dismissableRunInSubprocess(task, widget)
+end)
 require("ffi/util").runInSubProcess = function() end
 package.preload["ui/trapper"] = function() return trapper end
 downloader.run_online_task = function(_label, callback) callback(); return true end
@@ -357,9 +361,11 @@ expect(child_value == "result" and dialog.dismiss_callback == nil,
     "finished child left a stale coroutine cancellation callback")
 
 dl.trapper = { dismissableRunInSubprocess = function() return false end }
+local restore_failure = TaskStub.install(function() return false end)
 local worker_ok, worker_err = pcall(downloader._runInterruptible, downloader, dl, function() end)
 expect(not worker_ok and tostring(worker_err):find("could not start download worker", 1, true)
     and not dl.cancelled, "worker launch failure was mistaken for user cancellation")
+restore_failure()
 
 -- Low memory: wait (yielding to the UI) before forking, then fork once it frees up.
 do
@@ -503,6 +509,9 @@ do
     local inline_trapper = {
         dismissableRunInSubprocess = function(_self, task) return true, task() end,
     }
+    local restore_inline = TaskStub.install(function(task, widget)
+        return inline_trapper:dismissableRunInSubprocess(task, widget)
+    end)
     local child_dl = { book = {}, total = 1, trapper = inline_trapper }
     downloader.prepare_worker_child = function() order[#order + 1] = "prepare" end
     local value = downloader:_runInterruptible(child_dl, function()
@@ -524,6 +533,7 @@ do
     collectgarbage("restart")
     expect(child_pause >= 200 and child_pause <= 1000 and child_pause ~= 200,
         "worker child did not postpone its first GC cycle: " .. tostring(child_pause))
+    restore_inline()
 end
 
 -- One fork per chapter: the worker runs source + images, the parent never
@@ -537,6 +547,9 @@ do
             return true, task()
         end,
     }
+    local restore_inline = TaskStub.install(function(task, widget)
+        return inline_trapper:dismissableRunInSubprocess(task, widget)
+    end)
     Content.fetch_single_chapter_source = function(_client, _settings, _book, chapter)
         calls[#calls + 1] = "source"
         return "<p>source " .. tostring(chapter.chapterUid) .. "</p>"
@@ -571,6 +584,7 @@ do
     expect(forks == 1 and #calls == 2 and calls[1] == "source" and calls[2] == "finalize",
         "text-only chapter did not finalize in the parent after one worker")
     expect(job.bodies["7"] == "<p>final 7</p>", "text-only chapter was not staged")
+    restore_inline()
 end
 
 -- Ordinary workers also retain the accepting account across every yield.
@@ -582,12 +596,15 @@ do
         show_transient = function() end,
     }
     local forks = 0
+    local queued_task
+    local restore_worker = TaskStub.install(function()
+        forks = forks + 1
+        if queued_task then queued_task() end
+        return true, { ok = true, value = "child-result" }
+    end)
     local function job(task)
-        return { account_id = "one", trapper = { dismissableRunInSubprocess = function()
-            forks = forks + 1
-            if task then task() end
-            return true, { ok = true, value = "child-result" }
-        end } }
+        queued_task = task
+        return { account_id = "one", trapper = {} }
     end
     local pending = job()
     values.account.user_vid = "two"
@@ -621,6 +638,7 @@ do
     d:_step(direct)
     expect(direct_reason == "account_changed" and d._active_job == nil,
         "direct continuation after a coroutine yield entered finalization")
+    restore_worker()
 
     -- Local finalize slices must stop too, even when no network task follows.
     for _, resumable in ipairs({ false, true }) do
@@ -642,3 +660,5 @@ do
 end
 
 print(("downloader_lifecycle_spec: %d checks"):format(checks))
+
+restore_process()

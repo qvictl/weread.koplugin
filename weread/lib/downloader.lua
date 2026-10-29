@@ -712,12 +712,17 @@ function Downloader:_runInterruptible(dl, task)
     local dialog = dl.progress_dialog
     local fingerprint = WorkerSettings.fingerprint(self.settings)
     local prepare_child = self.prepare_worker_child or prepare_worker_child
-    local completed, result = dl.trapper:dismissableRunInSubprocess(function()
+    local completed, result = require("weread.lib.subprocess").run(function()
         pcall(prepare_child)
         local auth_result = WorkerSettings.capture(self.settings)
         local ok, value = xpcall(task, debug.traceback)
         return { ok = ok, value = value, auth = auth_result() }
-    end, dialog)
+    end, dialog, false, {
+        settings = self.settings,
+        before_launch = function()
+            return not self:_accountChanged(dl) and not dl.cancelled
+        end,
+    })
     if dialog then dialog.dismiss_callback = nil end
     if self:_accountChanged(dl) or dl.cancelled then return nil end
     if not completed then error("could not start download worker") end

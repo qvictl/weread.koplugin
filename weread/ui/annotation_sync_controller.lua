@@ -437,7 +437,7 @@ function M:_runAnnotationNetwork(request, task)
     if not ok_json then Json = require("rapidjson") end
     local WorkerSettings = require("weread.lib.worker_settings")
     local fingerprint = WorkerSettings.fingerprint(self.settings)
-    local completed, encoded = request.trapper:dismissableRunInSubprocess(function()
+    local completed, encoded = require("weread.lib.subprocess").run(function()
         local auth_result = WorkerSettings.capture(self.settings)
         local ok, values = xpcall(function()
             local first, second, third = task()
@@ -447,7 +447,12 @@ function M:_runAnnotationNetwork(request, task)
         -- LuaJSON represents null as a function, which Trapper's binary table
         -- serializer rejects. Send JSON over its existing plain-string pipe.
         return Json.encode({ ok = ok, values = values, auth = auth_result() })
-    end, request.progress, true)
+    end, request.progress, true, {
+        settings = self.settings,
+        before_launch = function()
+            return self._external_annotation_sync == request and not request.cancelled
+        end,
+    })
     request.progress.dismiss_callback = nil
     if self._external_annotation_sync ~= request or request.cancelled then return end
     if not completed then error("could not start annotation worker") end

@@ -1,6 +1,7 @@
 -- Unit tests for shared network task behavior.
 
 package.path = "./?.lua;" .. package.path
+local restore_subprocess = require("spec.helpers.subprocess_stub").install()
 
 local checks = 0
 
@@ -197,3 +198,5 @@ end
 UIManager.scheduleIn = schedule
 
 print(string.format("common_network_spec: %d checks", checks))
+
+restore_subprocess()

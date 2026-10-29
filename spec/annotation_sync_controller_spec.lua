@@ -1,4 +1,5 @@
 package.path = "./?.lua;" .. package.path
+local restore_subprocess = require("spec.helpers.subprocess_stub").install()
 local helper = require("spec.helpers.annotation_test_store")
 local scheduled, shown, notices, progress_titles, progress_updates, prevented, allowed = {}, {}, {}, {}, {}, 0, 0
 package.preload["ui/uimanager"] = function()
@@ -675,3 +676,5 @@ do
 end
 helper.cleanup()
 print("annotation_sync_controller_spec: consent, completion, cancellation, sessions and prefetch passed")
+
+restore_subprocess()

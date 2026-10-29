@@ -760,12 +760,12 @@ function M:getMockMenuItems()
                 local config = Environment.read()
                 local Trapper = require("ui/trapper")
                 Trapper:wrap(function()
-                    local completed, result = Trapper:dismissableRunInSubprocess(function()
+                    local completed, result = require("weread.lib.subprocess").run(function()
                         local ok, value = pcall(function()
                             return require("weread.lib.client"):test_mock_connection(config)
                         end)
                         return { ok = ok, value = value }
-                    end, _("Testing mock connection..."))
+                    end, _("Testing mock connection..."), false, { settings = self.settings })
                     if not completed then return end
                     if result and result.ok then
                         self:showInfo(T(_("Mock connection succeeded: %1"), result.value))

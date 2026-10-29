@@ -7,12 +7,14 @@ local FFIUtil = require("ffi/util")
 local UIManager = require("ui/uimanager")
 local lfs = require("libs/libkoreader-lfs")
 local MemoryGate = require("weread.lib.memory_gate")
+local ForkBudget = require("weread.lib.fork_budget")
 
 local ok_json, Json = pcall(require, "json")
 if not ok_json then Json = require("rapidjson") end
 
 local Worker = {}
 Worker.__index = Worker
+local sequence = 0
 
 local DEFAULT_MIN_AVAILABLE_KB = 64 * 1024
 local DEFAULT_TIMEOUT_SECONDS = 180
@@ -104,7 +106,6 @@ function Worker:new(options)
         read_memory = options.read_memory or function()
             return read_file("/proc/meminfo")
         end,
-        sequence = 0,
     }, self)
     if not ensure_dir(obj.temp_dir) then obj.runner = nil end
     return obj
@@ -119,12 +120,12 @@ function Worker:available()
 end
 
 function Worker:busy()
-    return self.job ~= nil
+    return self.job ~= nil or self.pending ~= nil
 end
 
 function Worker:_token()
-    self.sequence = self.sequence + 1
-    return table.concat({ tostring(self.now()), tostring(self.sequence),
+    sequence = sequence + 1
+    return table.concat({ tostring(self.now()), tostring(sequence),
         tostring(math.random(100000, 999999)) }, "-")
 end
 
@@ -156,6 +157,7 @@ function Worker:_cleanup(job)
 end
 
 function Worker:_complete(request, result)
+    ForkBudget.withdraw(request)
     if request and request.options and type(request.options.on_done) == "function" then
         local ok, err = pcall(request.options.on_done, result)
         if not ok then
@@ -168,6 +170,20 @@ function Worker:_launch(request)
     if not self.runner then
         self:_complete(request, { ok = false, error = "worker_unavailable" })
         return false, "worker_unavailable"
+    end
+    if not ForkBudget.available(request) then
+        ForkBudget.wait(request)
+        self.pending = request
+        self:_schedule()
+        return true
+    end
+    if request.options.before_launch then
+        local ok, current, reason = pcall(request.options.before_launch)
+        if not ok or not current then
+            self:_complete(request, { ok = false, cancelled = ok,
+                error = ok and (reason or "cancelled") or current })
+            return false, ok and reason or current
+        end
     end
     local now = self.now()
     if self.memory_cooldown_until and now < self.memory_cooldown_until then
@@ -230,7 +246,7 @@ function Worker:_launch(request)
         local encoded_ok, encoded = pcall(Json.encode, payload)
         if encoded_ok then atomic_write(result_path, encoded) end
     end
-    local ok, pid, err = pcall(self.runner.run, child)
+    local ok, pid, err, reservation = pcall(ForkBudget.run, self.runner, child, request)
     if not ok or not pid then
         local detail = tostring(err or pid or "worker launch failed")
         if memory_error(detail) then
@@ -242,7 +258,7 @@ function Worker:_launch(request)
         return false, detail
     end
     self.job = {
-        request = request, pid = pid, started_at = now,
+        request = request, pid = pid, reservation = reservation, started_at = now,
         last_progress_at = self.clock(), progress_path = progress_path,
         result_path = result_path, cancel_path = cancel_path,
     }
@@ -264,7 +280,7 @@ function Worker:start(options)
     options = options or {}
     assert(type(options.task) == "function", "worker task required")
     local request = { token = self:_token(), options = options }
-    if self.job then
+    if self.job or self.pending then
         if not options.queue then return false, "worker_busy" end
         if self.pending then
             local previous = self.pending
@@ -273,7 +289,7 @@ function Worker:start(options)
                 error = "replaced" })
         end
         self.pending = request
-        if options.replace_active
+        if options.replace_active and self.job
             and self.job.request.options.kind == options.kind then
             self:cancel(self.job.request, "superseded")
         end
@@ -298,7 +314,7 @@ function Worker:cancel(request, reason)
         local ok = atomic_write(job.cancel_path, "1")
         job.cancel_requested_at = self.clock()
         if not ok then
-            pcall(self.runner.terminate, job.pid)
+            pcall(ForkBudget.terminate, job.reservation)
             job.terminated = true
         end
     end
@@ -323,17 +339,17 @@ function Worker:_poll()
     local now = self.clock()
     if job.cancel_requested_at and not job.terminated
         and now - job.cancel_requested_at >= self.cancel_grace then
-        pcall(self.runner.terminate, job.pid)
+        pcall(ForkBudget.terminate, job.reservation)
         job.terminated = true
     elseif not job.cancel_requested_at and not job.terminated
         and now - job.last_progress_at >= (tonumber(job.request.options.timeout)
             or self.timeout) then
         job.request.cancel_reason = "worker_timeout"
-        pcall(self.runner.terminate, job.pid)
+        pcall(ForkBudget.terminate, job.reservation)
         job.terminated = true
     end
 
-    local done_ok, done = pcall(self.runner.is_done, job.pid)
+    local done_ok, done = pcall(ForkBudget.is_done, job.reservation)
     if not done_ok or not done then
         self:_schedule()
         return

@@ -2,6 +2,7 @@
 -- @timeout 90
 -- @no_coverage Real UI heartbeat timing without instrumentation overhead.
 return function(H)
+    local prepare_login = dofile(os.getenv("WEREAD_TEST_HARNESS_DIR") .. "/qr_credentials.lua")
     local UIManager = require("ui/uimanager")
     local TrapWidget = require("ui/widget/trapwidget")
     local ffiutil = require("ffi/util")
@@ -186,6 +187,7 @@ return function(H)
                 cookies = { wr_vid = "900099", wr_skey = "mock-old-cookie" } }, { replace_cookies = true })
             plugin:onWeReadAccountChanged()
         end)
+        local apply_login = prepare_login(H, plugin)
         marker(456)
         local before = H.mock_state().started_counts["/book/getprogress"] or 0
         local writes, put = 0
@@ -201,8 +203,7 @@ return function(H)
                 end)
                 request_started(before)
                 H.call(function()
-                    plugin.qr_login:_complete({ succeed = true, webLoginVid = "900000",
-                        accessToken = "mock-access-token", refreshToken = "mock-refresh-token" }, plugin.qr_login.generation)
+                    apply_login()
                 end)
                 H.wait_until("QR commits and old progress cancels", function()
                     return plugin.settings:get("account", {}).user_vid == "900000" and not sync.pulling

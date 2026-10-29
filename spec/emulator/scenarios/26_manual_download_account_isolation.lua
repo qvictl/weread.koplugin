@@ -1,6 +1,7 @@
 -- @title Manual chapter downloads reject responses from an earlier account
 -- @timeout 90
 return function(H)
+    local prepare_login = dofile(os.getenv("WEREAD_TEST_HARNESS_DIR") .. "/qr_credentials.lua")
     local without_ui_dns = dofile(os.getenv("WEREAD_TEST_HARNESS_DIR") .. "/no_ui_dns.lua")
     local plugin, book, chapters
     H.step("setup manual chapter download", function()
@@ -21,6 +22,7 @@ return function(H)
                 plugin.settings:delete_book("900001")
                 plugin.settings:set("account", { user_vid = "900099" })
             end)
+            local apply_login = mode ~= "ticket" and prepare_login(H, plugin)
             local before = H.mock_state().started_counts["/web/book/chapter/e_0"] or 0
             H.mock_control({ match = "/web/book/chapter/e_0", times = 0, hold_response = true })
             local ok, err = xpcall(function()
@@ -39,9 +41,7 @@ return function(H)
                     H.call(function() plugin.settings:update_auth({ wr_ticket = "manual-rotated-ticket" }) end)
                 else
                     H.call(function()
-                        plugin.qr_login:_complete({ succeed = true, webLoginVid = "900000",
-                            accessToken = "mock-access-token", refreshToken = "mock-refresh-token" },
-                            plugin.qr_login.generation)
+                        apply_login()
                     end)
                     H.wait_until("QR login commits before manual worker returns", function()
                         return plugin.settings:get("account", {}).user_vid == "900000"

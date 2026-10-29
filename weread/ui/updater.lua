@@ -122,8 +122,8 @@ function UpdaterUI:_run_subprocess(message, task, callback, trap_widget)
         callback(result)
     end
     if ok_trapper and Trapper and Trapper.dismissableRunInSubprocess then
-        local completed, result = Trapper:dismissableRunInSubprocess(
-            safe_task, trap_widget)
+        local completed, result = require("weread.lib.subprocess").run(
+            safe_task, trap_widget, false, { settings = self.settings })
         if completed then
             UIManager:scheduleIn(0.1, function() finish(result) end)
         else
