@@ -66,7 +66,9 @@ jobs:
         run: python3 scripts/test_mock_weread.py
 
       - name: Coverage tooling tests
-        run: python3 scripts/test_coverage_tools.py
+        run: |
+          python3 scripts/test_coverage_tools.py
+          python3 scripts/test_download_emulator_coverage.py
 
       - name: Emulator scenario inventory
         run: python3 scripts/run_emulator_scenarios.py --list

@@ -110,12 +110,12 @@ jobs:
 
       - name: Download emulator coverage
         if: steps.integration.outputs.run_id != ''
-        continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
           RUN_ID: ${{ steps.integration.outputs.run_id }}
         run: |
-          gh run download "$RUN_ID" --repo "$GITHUB_REPOSITORY" -p 'coverage-emulator-shard-*' -D "$RUNNER_TEMP/emulator-coverage"
+          python3 scripts/download_emulator_coverage.py --repo "$GITHUB_REPOSITORY" \
+            --run "$RUN_ID" --out "$RUNNER_TEMP/emulator-coverage"
           find "$RUNNER_TEMP/emulator-coverage" -type f
 
       # Measure what the Integration run measured: unit specs, changed lines
