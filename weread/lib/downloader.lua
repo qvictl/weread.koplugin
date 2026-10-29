@@ -1829,8 +1829,8 @@ function Downloader:_step(dl)
                 self.client, self.settings, dl.book, chapter, state)
             local value = { xhtml = xhtml, book = reader_book(dl.book) }
             if with_images then
-                -- Fetch the images in the same worker: one fork per chapter
-                -- instead of two, and the source text never crosses the pipe.
+                -- Fetch text and images in one worker; only the finalized
+                -- XHTML and this chapter's state changes come back.
                 value.xhtml, value.assets = Content.finalize_single_chapter_content(
                     self.client, self.settings, dl.book, chapter, xhtml, state)
                 value.finalized = true
