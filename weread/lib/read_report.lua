@@ -824,6 +824,9 @@ function ReadReport:_spawn_job(spec, on_done)
     if not runner then
         return false, "no subprocess support", true
     end
+    -- Reject busy admission before collecting the parent heap: collecting
+    -- while another child is alive would dirty its shared COW pages.
+    if not ForkBudget.available() then return false, "worker_busy" end
     local memory_ok, available_kb = self.memory_gate()
     if not memory_ok then
         return false, "low memory (" .. tostring(available_kb) .. " kB available)"

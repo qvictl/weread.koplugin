@@ -25,7 +25,7 @@ function Process.run(task, trap, _simple_string, options)
     if owned then
         trap = require("ui/widget/trapwidget"):new{
             text = type(trap) == "string" and trap or nil,
-            resend_event = trap ~= false,
+            resend_event = type(trap) ~= "string" and trap ~= false,
         }
         UIManager:show(trap)
         if trap.text then UIManager:forceRePaint() end
@@ -48,7 +48,14 @@ function Process.run(task, trap, _simple_string, options)
     trap.dismiss_callback = dismiss
     local started, handle = worker:start{
         task = task,
-        before_launch = options.before_launch,
+        before_launch = function()
+            if options.before_launch then
+                local current, reason = options.before_launch()
+                if not current then return false, reason end
+            end
+            if options.required_memory_kb then worker.min_available_kb = options.required_memory_kb() end
+            return true
+        end,
         on_done = function(value) result = value; wake() end,
     }
     if started then request = handle end
@@ -60,6 +67,7 @@ function Process.run(task, trap, _simple_string, options)
         return false, nil, result and result.error
     end
     if not result or not result.ok then
+        if result and result.error == "low_memory" then return false, nil, "low_memory" end
         return false, result and result.error, "start_failed"
     end
     return true, result.value

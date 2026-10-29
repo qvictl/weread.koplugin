@@ -43,6 +43,11 @@ Memory.read_meminfo = function() return nil end -- unknown memory still permits 
 local Process = require("weread.lib.subprocess")
 local Budget = require("weread.lib.fork_budget")
 local H = require("spec.helpers.read_report_harness")
+local replaced_modules = {}
+local function replace_module(name, value)
+    replaced_modules[#replaced_modules + 1] = { name = name, value = package.loaded[name] }
+    package.loaded[name] = value
+end
 local real_open, real_remove, real_rename = io.open, os.remove, os.rename
 rawset(io, "open", function(path, mode)
     if mode == "rb" then
@@ -73,7 +78,8 @@ local ok, err = xpcall(function()
     local co_b, result_b = start(second)
     expect(launched == 1 and coroutine.status(co_b) == "suspended", "second coroutine forked concurrently")
     local runner = H.runner()
-    local report = H.new_report{ subprocess = runner }
+    local report = H.new_report{ subprocess = runner,
+        memory_gate = function() error("busy report must not collect the shared parent heap") end }
     local accepted, reason = report:_spawn_job({ book_id = "book" }, function() end)
     expect(not accepted and reason == "worker_busy" and runner.forks == 0,
         "reading report bypassed the shared process budget")
@@ -110,17 +116,97 @@ local ok, err = xpcall(function()
         "stale queued task performed a fork")
     local co_string, string_result = start("Loading")
     expect(next(shown) ~= nil, "visible task did not show its cancellable trap")
+    expect(next(shown).resend_event == false, "cancelling a visible request would replay its tap on the underlying UI")
     children[4].task(); children[4].done = true
     pump(5)
     expect(coroutine.status(co_string) == "dead" and string_result()[1] and next(shown) == nil,
         "owned trap was not closed after success")
+    local required = 96 * 1024
+    start({})
+    local co_memory, memory_result = start({}, { settings = { data_dir = "/data" },
+        required_memory_kb = function() return required end })
+    required = 160 * 1024 -- the parent grew while this task waited for admission.
+    files["/proc/meminfo"] = "MemAvailable: 131072 kB\n"
+    children[5].task(); children[5].done = true
+    pump(10)
+    expect(launched == 5 and coroutine.status(co_memory) == "dead"
+        and not memory_result()[1] and memory_result()[3] == "low_memory",
+        "queued download used the stale or generic 64 MiB memory requirement")
+    expect(Budget.available(), "late memory refusal blocked later tasks")
+    files["/proc/meminfo"] = nil
+    local co_failed, failed_result = start({}, { settings = { data_dir = "/data" },
+        before_launch = function() error("lifetime check failed") end })
+    expect(coroutine.status(co_failed) == "dead" and not failed_result()[1]
+        and failed_result()[2]:find("lifetime check failed", 1, true) and Budget.available(),
+        "a failing admission callback leaked the budget or coroutine")
+    start({})
+    local pending_trap = {}
+    local co_pending, pending_result = start(pending_trap)
+    pending_trap.dismiss_callback()
+    expect(coroutine.status(co_pending) == "dead" and not pending_result()[1] and launched == 6,
+        "cancelling a queued task forked or failed to return")
+    children[6].task(); children[6].done = true
+    pump(10)
+    expect(Budget.available() and launched == 6, "cancelled waiter stayed ahead of new work")
     local did_run = false
     expect(not Process.run(function() did_run = true end, {}, false, { settings = {data_dir="/data"} }),
         "unwrapped task fell back to inline work")
     expect(not did_run, "network ran on the UI loop")
+
+    -- Actual annotation producer + actual shared worker: admission ownership
+    -- must survive both queues while an unrelated live worker holds the slot.
+    replace_module("weread.lib.plugin_util", { tr = function(x) return x end, T = function(x) return x end })
+    replace_module("weread.lib.annotation_chapters", {})
+    replace_module("weread.lib.standby_guard", { acquire = function() return {} end, release = function() end })
+    local observed
+    replace_module("weread.lib.annotation_prefetch_worker", { run = function(settings, _, context)
+        observed = { uid = settings:get("account").user_vid, book = context.book_id }
+        return {}
+    end })
+    replace_module("weread.ui.annotation_sync_controller", nil)
+    local Controller = require("weread.ui.annotation_sync_controller")
+    local Worker = require("weread.lib.background_worker")
+    local Owner = require("weread.lib.request_owner")
+    for _, change in ipairs({ "uid", "api_key", "ticket" }) do
+        observed = nil
+        local held_pid = launched + 1
+        start({})
+        local values = { account = { user_vid = "A" }, cookies = { wr_vid = "A" }, api_key = "gateway-A",
+            cache = { auto_prefetch_next_chapter = true, prefetch_annotations = true } }
+        local settings = { data_dir = "/data", get = function(_, key, fallback) return values[key] or fallback end }
+        local request = { owner = Owner.capture(settings) }
+        local plugin = setmetatable({ settings = settings, client = {}, _external_annotation_sync = request,
+            isNetworkConnected = function() return true end,
+            prefetch_worker = Worker:new{ temp_dir = "/data/workers" } }, { __index = Controller })
+        expect(plugin:_runAnnotationPrefetchWorker(request, { book_id = "A-book", chapters = {} }, {}),
+            "annotation prefetch was not accepted")
+        expect(plugin.prefetch_worker.pending and launched == held_pid, "annotation did not queue behind the blocker")
+        plugin:_runAnnotationJob({ book_id = "A-next", owner = request.owner }, { background = true, prefetch = true })
+        expect(plugin._annotation_pending_prefetch.owner == request.owner, "second queue lost its owner")
+        if change == "uid" then values.account = { user_vid = "B" }; values.cookies = { wr_vid = "B" }
+        elseif change == "api_key" then values.api_key = "gateway-B"
+        else values.wr_ticket = "rotated-ticket" end
+        children[held_pid].task(); children[held_pid].done = true
+        pump(12)
+        if change ~= "ticket" then
+            expect(launched == held_pid and not observed and not plugin._external_annotation_sync
+                and not plugin._annotation_pending_prefetch, "queued annotation adopted another account or gateway")
+        else
+            plugin._annotation_pending_prefetch = nil
+            expect(launched == held_pid + 1, "same-account ticket rotation was rejected")
+            children[launched].task(); children[launched].done = true
+            pump(10)
+            expect(observed and observed.uid == "A" and observed.book == "A-book",
+                "same-account annotation did not retain its original context")
+        end
+    end
 end, debug.traceback)
 rawset(io, "open", real_open)
 rawset(os, "remove", real_remove)
 rawset(os, "rename", real_rename)
+for index = #replaced_modules, 1, -1 do
+    local entry = replaced_modules[index]
+    package.loaded[entry.name] = entry.value
+end
 if not ok then error(err, 0) end
 print("subprocess_budget_spec: " .. checks .. " checks")

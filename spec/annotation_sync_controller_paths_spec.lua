@@ -380,11 +380,12 @@ end
 -- Prefetch worker completion: auth write-back, failures and stale requests.
 do
     local host = new_host()
-    local request = { guard = {}, worker_handle = {}, auth_fingerprint = "fp-parent" }
+    local owner = require("weread.lib.request_owner").capture(host.settings)
+    local request = { guard = {}, worker_handle = {}, auth_fingerprint = "fp-parent", owner = owner }
     host._external_annotation_sync = request
     local queued = {}
     host._runAnnotationJob = function(_self, context, options) queued[#queued + 1] = { context, options } end
-    host._annotation_pending_prefetch = { context = "next", options = { prefetch = true } }
+    host._annotation_pending_prefetch = { context = "next", options = { prefetch = true }, owner = owner }
     merge_result, merges, logs.info = false, {}, {}
     local released = guards.released
     host:_finishAnnotationPrefetchWorker(request, { ok = true, value = { auth = { cookies = "c" } } })
@@ -397,16 +398,16 @@ do
     merge_result = true
 
     logs.warn = {}
-    request = { worker_handle = {} }
+    request = { worker_handle = {}, owner = owner }
     host._external_annotation_sync = request
     host:_finishAnnotationPrefetchWorker(request, { ok = false, error = "HTTP 500" })
     expect(#logs.warn == 1 and logs.warn[1]:find("HTTP 500", 1, true) and host._external_annotation_sync == nil,
         "a worker failure was not logged")
-    request = {}
+    request = { owner = owner }
     host._external_annotation_sync = request
     host:_finishAnnotationPrefetchWorker(request, nil)
     expect(#logs.warn == 2 and logs.warn[2]:find("no result", 1, true), "a missing result was not logged")
-    request = { cancelled = true }
+    request = { cancelled = true, owner = owner }
     host._external_annotation_sync = request
     host:_finishAnnotationPrefetchWorker(request, { ok = false, cancelled = true })
     expect(#logs.warn == 2, "a user cancellation was logged as a failure")

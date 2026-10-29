@@ -2,6 +2,7 @@
 -- Keep each child's handle after reaping: waitpid consumes the exit status,
 -- and checking that numeric pid again could accidentally observe a reused pid.
 local Budget = {}
+local MemoryGate = require("weread.lib.memory_gate")
 local active
 local waiting = {}
 
@@ -39,6 +40,12 @@ end
 -- The optional third result owns the pid until its exact exit is collected.
 function Budget.run(runner, task, request)
     if not Budget.available(request) then return nil, "worker_busy" end
+    -- QR and cover runners also pass here. Reading the floor does not run
+    -- another full GC after their caller already checked its own heap gate.
+    local available = MemoryGate.parse_available_kb(MemoryGate.read_meminfo())
+    if available and available < MemoryGate.DEFAULT_MIN_AVAILABLE_KB then
+        return nil, "low_memory"
+    end
     if request then Budget.withdraw(request) end
     local child = { runner = runner }
     active = child

@@ -2,6 +2,7 @@
 -- @timeout 90
 -- @no_coverage Timing measures the real event loop, without LuaCov overhead.
 return function(H)
+    local prepare_login = dofile(os.getenv("WEREAD_TEST_HARNESS_DIR") .. "/qr_credentials.lua")
     local UIManager = require("ui/uimanager")
     local Content = require("weread.lib.content")
     local lfs = require("libs/libkoreader-lfs")
@@ -104,6 +105,7 @@ return function(H)
         H.close_dialogs()
     end)
     H.step("queued QR completion discards an old-account download", function()
+        local apply_login = prepare_login(H, plugin)
         H.mock_control({ match = "/web/mp/content", delay = 1.5, times = 0 })
         local previous_record = { book_id = book.book_id, cache_dir = H.env.evidence .. "/previous-directory" }
         H.call(function()
@@ -112,9 +114,7 @@ return function(H)
             plugin.settings:set("account", { user_vid = "900099" })
             plugin:downloadMPArticleAndRead(book, article)
             UIManager:scheduleIn(0.35, function()
-                plugin.qr_login:_complete({ succeed = true, webLoginVid = "900000",
-                    accessToken = "mock-access-token", refreshToken = "mock-refresh-token" },
-                    plugin.qr_login.generation)
+                apply_login()
             end)
         end)
         H.wait_until("new login and old worker completion", function()

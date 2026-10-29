@@ -48,4 +48,17 @@ expect(admitted and not Budget.available(newer), "second queued task overlapped 
 Budget.withdraw(newer)
 exits[admitted.pid] = true
 expect(Budget.available(), "cancelled waiter blocked all later work")
+local Memory = require("weread.lib.memory_gate")
+local read_memory = Memory.read_meminfo
+Memory.read_meminfo = function() return "MemAvailable: 64000 kB\n" end
+local before = next_pid
+local denied, memory_reason = Budget.run(runner, function() end)
+expect(not denied and memory_reason == "low_memory" and next_pid == before and Budget.available(),
+    "a raw runner bypassed the shared memory floor")
+Memory.read_meminfo = function() return nil end
+local _, _, unknown = Budget.run(runner, function() end)
+expect(unknown ~= nil, "unknown memory permanently blocked the budget")
+exits[unknown.pid] = true
+expect(Budget.available(), "unknown-memory task did not release its slot")
+Memory.read_meminfo = read_memory
 print("fork_budget_spec: " .. checks .. " checks")
