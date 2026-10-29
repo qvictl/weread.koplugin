@@ -538,6 +538,8 @@ def gate(args) -> int:
         Path(args.json).write_text(json.dumps(dict(
             checks=checks, diff_unit=d_unit, diff_combined=d_comb, overall_unit=o_unit, overall_combined=o_comb,
             mode=mode, diff_base=diff_base, measured_sha=base_sha if mode == "release" else None,
+            run_id=int(os.environ.get("GITHUB_RUN_ID", "0")),
+            run_attempt=int(os.environ.get("GITHUB_RUN_ATTEMPT", "0")),
             baseline_unit=ratchet["unit"], baseline_combined=combined_floor if mode == "release" else None,
             combined_baseline_sha=combined_baseline["sha"] if combined_baseline else None,
             combined_diff_baseline_sha=combined_diff_baseline["sha"] if combined_diff_baseline else None,

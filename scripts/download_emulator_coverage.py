@@ -56,6 +56,29 @@ def release_manifest(repo, run_id):
     return manifest
 
 
+def download_accepted(repo, run_id, output, expected_sha):
+    jobs = json.loads(gh_api(
+        f"repos/{repo}/actions/runs/{run_id}/jobs?filter=all&per_page=100", "--paginate", "--slurp"))
+    attempts = [job.get("run_attempt") for page in jobs for job in page["jobs"]
+                if job.get("name") == "Release combined coverage gate" and job.get("conclusion") == "success"]
+    if not attempts or any(type(attempt) is not int or attempt <= 0 for attempt in attempts):
+        raise ValueError("This release has no accepted combined gate attempt")
+    artifact = select_artifacts(artifacts_for_run(repo, run_id), ("release-coverage",))["release-coverage"]
+    raw = gh_api(f"repos/{repo}/actions/artifacts/{artifact['id']}/zip", "--allow-escape-sequences")
+    with zipfile.ZipFile(io.BytesIO(raw)) as archive:
+        gate = json.loads(archive.read("release-gate.json"))
+        if (gate.get("mode") != "release" or gate.get("passed") is not True or gate.get("measured_sha") != expected_sha
+                or type(gate.get("run_id")) is not int or gate["run_id"] != int(run_id)
+                or type(gate.get("run_attempt")) is not int or gate["run_attempt"] != max(attempts)):
+            raise ValueError("Newest release coverage does not match the accepted candidate attempt")
+        files = {name: archive.read(name) for name in ("release-gate.json", "unit.report.out", "combined.report.out")}
+    if any(not content.strip() for content in files.values()):
+        raise ValueError("Accepted coverage reports are incomplete")
+    Path(output).mkdir(parents=True, exist_ok=True)
+    for name, content in files.items():
+        (Path(output) / name).write_bytes(content)
+
+
 def require_release_history(repo, run_id, target_sha, history, current_gate, cwd=None):
     """A failed publisher cannot silently drop an earlier accepted gate's floor."""
     from coverage_tools import read_history
@@ -70,9 +93,13 @@ def require_release_history(repo, run_id, target_sha, history, current_gate, cwd
             continue
         jobs = json.loads(gh_api(
             f"repos/{repo}/actions/runs/{run['id']}/jobs?filter=all&per_page=100", "--paginate", "--slurp"))
-        if not any(job.get("name") == "Release combined coverage gate" and job.get("conclusion") == "success"
-                   for page in jobs for job in page["jobs"]):
+        accepted = [job for page in jobs for job in page["jobs"]
+                    if job.get("name") == "Release combined coverage gate" and job.get("conclusion") == "success"]
+        if not accepted:
             continue  # An unsuccessful integration/gate established no accepted combined floor.
+        attempts = {job.get("run_attempt") for job in accepted}
+        if any(type(attempt) is not int or attempt <= 0 for attempt in attempts):
+            raise ValueError("Earlier accepted release attempt is unknown")
         manifest = release_manifest(repo, run["id"])
         if not manifest["candidate"]:
             raise ValueError("A successful release gate has no candidate")
@@ -84,22 +111,24 @@ def require_release_history(repo, run_id, target_sha, history, current_gate, cwd
             continue  # A manually revalidated old candidate is not judged against its descendants.
         if ancestry.returncode != 0:
             raise ValueError("Cannot resolve earlier release ancestry")
-        measured = []
+        measured = {}
         for artifact in artifacts_for_run(repo, run["id"]):
             if artifact["name"] != "release-coverage" or artifact.get("expired"):
                 continue
             raw = gh_api(f"repos/{repo}/actions/artifacts/{artifact['id']}/zip", "--allow-escape-sequences")
             with zipfile.ZipFile(io.BytesIO(raw)) as archive:
                 gate = json.loads(archive.read("release-gate.json"))
-            if gate.get("mode") != "release" or gate.get("passed") is not True or gate.get("measured_sha") != sha:
+            attempt = gate.get("run_attempt")
+            if (gate.get("mode") != "release" or gate.get("passed") is not True or gate.get("measured_sha") != sha
+                    or gate.get("run_id") != run["id"] or type(attempt) is not int or attempt not in attempts):
                 continue
             percent = gate.get("overall_combined", {}).get("percent")
             if type(percent) not in (int, float) or not 0 <= percent <= 100:
                 raise ValueError("Invalid earlier combined measurement")
-            measured.append(percent)
-        if not measured:
+            measured[attempt] = max(measured.get(attempt, 0), percent)
+        if attempts - measured.keys():
             raise ValueError("Earlier accepted gate evidence is missing or inconsistent; restore that candidate's evidence")
-        floor = max(measured)
+        floor = max(measured.values())
         if any(record["sha"] == sha and record.get("combined", {}).get("percent", -1) >= floor
                for record in records):
             continue
@@ -175,6 +204,7 @@ def main():
     parser.add_argument("--out")
     parser.add_argument("--expected-sha")
     parser.add_argument("--source-out", help="resolve CI/Release main measurement into JSON")
+    parser.add_argument("--accepted-out", help="download the exact latest accepted release reports")
     parser.add_argument("--current-gate", help="current accepted release gate for same-candidate repair")
     parser.add_argument("--require-release-history", help="reject earlier accepted but unpersisted release gates")
     args = parser.parse_args()
@@ -182,6 +212,10 @@ def main():
         if not args.expected_sha or not args.current_gate:
             parser.error("--require-release-history needs --expected-sha and --current-gate")
         require_release_history(args.repo, args.run, args.expected_sha, args.require_release_history, args.current_gate)
+    elif args.accepted_out:
+        if not args.expected_sha:
+            parser.error("--accepted-out needs --expected-sha")
+        download_accepted(args.repo, args.run, args.accepted_out, args.expected_sha)
     elif args.source_out:
         Path(args.source_out).write_text(json.dumps(source(args.repo, args.run)) + "\n", encoding="utf-8")
     elif args.out:

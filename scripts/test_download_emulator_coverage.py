@@ -169,6 +169,56 @@ class CoverageArtifactsTest(unittest.TestCase):
                         self.assertIn(b"not an ancestor of main", result.stdout)
 
 
+    def test_persist_download_uses_latest_created_exact_accepted_attempt(self):
+        items = [{"id": 900, "name": "release-coverage", "created_at": "2026-10-29T00:00:00Z"},
+                 {"id": 100, "name": "release-coverage", "created_at": "2026-10-29T01:00:00Z"}]
+        latest = dict(mode="release", passed=True, measured_sha=COMMIT, run_id=123, run_attempt=2)
+        missing_report = False
+        def zipped(gate):
+            output = io.BytesIO()
+            with zipfile.ZipFile(output, "w") as archive:
+                archive.writestr("release-gate.json", json.dumps(gate))
+                if not missing_report:
+                    archive.writestr("unit.report.out", "unit report")
+                    archive.writestr("combined.report.out", "combined report")
+            return output.getvalue()
+        def api(endpoint, *_):
+            if "/123/jobs?filter=all" in endpoint:
+                return json.dumps([{"jobs": [{"name": "Release combined coverage gate", "conclusion": "success", "run_attempt": 1}]},
+                    {"jobs": [{"name": "Release combined coverage gate", "conclusion": "success", "run_attempt": 2}]}]).encode()
+            if "/123/artifacts?" in endpoint:
+                return json.dumps([{"artifacts": items[:1]}, {"artifacts": items[1:]}]).encode()
+            if "/100/zip" in endpoint:
+                return zipped(latest)
+            if "/900/zip" in endpoint:
+                return zipped(dict(latest, run_attempt=1))
+            self.fail("Unexpected endpoint: " + endpoint)
+        with mock.patch.object(dc, "gh_api", side_effect=api):
+            with tempfile.TemporaryDirectory() as directory:
+                dc.download_accepted("owner/plugin", 123, directory, COMMIT)
+                self.assertEqual(json.loads((Path(directory) / "release-gate.json").read_text())["run_attempt"], 2)
+            for changed in [dict(run_attempt=1), dict(run_id=456), dict(measured_sha="b" * 40), dict(passed=False)]:
+                original = dict(latest)
+                latest.update(changed)
+                with self.subTest(changed=changed), tempfile.TemporaryDirectory() as directory:
+                    with self.assertRaises(ValueError):
+                        dc.download_accepted("owner/plugin", 123, directory, COMMIT)
+                    self.assertFalse(list(Path(directory).iterdir()))
+                latest = original
+            missing_report = True
+            with tempfile.TemporaryDirectory() as directory:
+                with self.assertRaises(KeyError):
+                    dc.download_accepted("owner/plugin", 123, directory, COMMIT)
+                self.assertFalse(list(Path(directory).iterdir()))
+            missing_report = False
+            items[1]["expired"] = True
+            with tempfile.TemporaryDirectory() as directory, self.assertRaises(ValueError):
+                dc.download_accepted("owner/plugin", 123, directory, COMMIT)
+            items[1]["expired"] = False
+            items.append(dict(items[1], id=101))
+            with tempfile.TemporaryDirectory() as directory, self.assertRaisesRegex(ValueError, "Ambiguous"):
+                dc.download_accepted("owner/plugin", 123, directory, COMMIT)
+
     def test_release_persists_real_reports_and_rechecks_a_racing_higher_floor(self):
         from test_coverage_tools import luacov_report, POLICY
         workflow = Path(__file__).resolve().parent.parent / ".github/workflows/release.yml"
@@ -261,7 +311,7 @@ class CoverageArtifactsTest(unittest.TestCase):
                 if percent is not None:
                     record["combined"] = {"percent": percent}
                 history.write_text(json.dumps(record) + "\n")
-            gate = dict(mode="release", passed=True, measured_sha=ancestor, overall_combined={"percent": 95})
+            gate = dict(mode="release", passed=True, measured_sha=ancestor, run_id=10, run_attempt=1, overall_combined={"percent": 95})
             manifest = dict(run_id=10, candidate=True, target_sha=ancestor, ci_run=9)
             current_gate = root / "current-gate.json"
             current_gate.write_text(json.dumps(dict(passed=True, measured_sha=target, overall_combined={"percent": 90})))
@@ -281,19 +331,21 @@ class CoverageArtifactsTest(unittest.TestCase):
                     return json.dumps([{"jobs": []}]).encode()
                 if "/10/jobs?" in endpoint:
                     return json.dumps([{"jobs": [{"name": "unrelated job", "conclusion": "success"}]},
-                        {"jobs": [{"name": "Release combined coverage gate",
+                        {"jobs": [{"name": "Release combined coverage gate", "run_attempt": 1,
+                        "conclusion": "success" if gate_succeeded else "failure"},
+                        {"name": "Release combined coverage gate", "run_attempt": 2,
                         "conclusion": "success" if gate_succeeded else "failure"}]}]).encode()
                 if "/10/artifacts?" in endpoint:
                     return json.dumps([{"artifacts": [
                         {"id": 100, "name": "release-candidate", "created_at": "2026-10-29T00:00:00Z"},
                         {"id": 101, "name": "release-coverage", "created_at": "2026-10-29T00:00:00Z", "expired": evidence_expired}]},
-                        {"artifacts": [{"id": 102, "name": "release-coverage", "created_at": "2026-10-29T01:00:00Z", "expired": evidence_expired}]}]).encode()
+                        {"artifacts": [{"id": 102, "name": "release-coverage", "created_at": "2026-10-29T01:00:00Z", "expired": False}]}]).encode()
                 if "/100/zip" in endpoint:
                     return zipped("candidate.json", manifest)
                 if "/101/zip" in endpoint:
                     return zipped("release-gate.json", gate)
                 if "/102/zip" in endpoint:
-                    return zipped("release-gate.json", dict(gate, overall_combined={"percent": 94}))
+                    return zipped("release-gate.json", dict(gate, run_attempt=2, overall_combined={"percent": 94}))
                 self.fail("Unexpected endpoint: " + endpoint)
             with mock.patch.object(dc, "gh_api", side_effect=api):
                 for percent in [None, 94]:

@@ -226,6 +226,7 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: write
+      actions: read
     steps:
       - name: Checkout measured candidate
         uses: actions/checkout@v6
@@ -244,10 +245,13 @@ jobs:
           git -C "$tools" checkout --quiet --detach FETCH_HEAD
 
       - name: Download accepted measurement
-        uses: actions/download-artifact@v7
-        with:
-          name: release-coverage
-          path: ${{ runner.temp }}/accepted-coverage
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARGET_SHA: ${{ needs.resolve.outputs.target_sha }}
+        run: |
+          python3 "$RUNNER_TEMP/coverage-tooling/scripts/download_emulator_coverage.py" \
+            --repo "$GITHUB_REPOSITORY" --run "$GITHUB_RUN_ID" --expected-sha "$TARGET_SHA" \
+            --accepted-out "$RUNNER_TEMP/accepted-coverage"
 
       - name: Persist main measurement before publication
         env:
