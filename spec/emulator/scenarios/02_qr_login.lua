@@ -306,6 +306,34 @@ return function(H)
         H.check(not UIManager:isWidgetShown(dialog), "QR error closes normally")
     end)
 
+    H.step("dense QR fits the viewport or shows a dismissible error", function()
+        local dismissed = 0
+        local dialog = H.call(function()
+            local widget = QRDialog:new{
+                text = ("x"):rep(2953),
+                dismiss_callback = function() dismissed = dismissed + 1 end,
+            }
+            UIManager:show(widget, "full")
+            return widget
+        end)
+        local code, frame = dialog.qr, dialog[1][1]
+        local image = code and code.image
+        H.check(image, "maximum-length payload is encoded by the real QRWidget")
+        local pixels = image:getWidth()
+        H.metric("qr_dense_width_px", pixels)
+        if pixels == 0 then
+            H.wait_text(H.tr("Could not generate a QR code"), 5)
+            H.check(frame[1] ~= code, "zero-pixel QR uses the error content")
+        else
+            H.check(frame[1] == code, "renderable dense QR uses its encoded pixels")
+            H.check(pixels + 2 * frame.padding + 2 * frame.bordersize
+                <= math.min(Screen:getWidth(), Screen:getHeight()), "dense QR and margins fit")
+        end
+        H.tap_at(Screen:getWidth() / 2, Screen:getHeight() / 2)
+        H.wait_until("dense QR dismissed", function() return dismissed == 1 end, 5)
+        H.equal(image:getAllocated(), 0, "dense native QR pixels released on close")
+    end)
+
     H.step("closing before delayed show releases the native QR", function()
         local dismissed = 0
         local dialog = H.call(function()

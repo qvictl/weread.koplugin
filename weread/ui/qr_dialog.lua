@@ -30,14 +30,16 @@ function QRDialog:init()
         local qr = QRWidget:new{ text = self.text, width = side, height = side, scale_factor = 1 }
         self.qr = qr
         if qr.image then
-            padding = math.ceil(math.max(qr.image:getWidth(), qr.image:getHeight()) * 4 / 21)
             -- ImageWidget should paint its native image size, without another
             -- scaling or a larger placeholder area inside the quiet zone.
             qr.width, qr.height = nil, nil
             -- Bind the generated image to ImageWidget's disposal path even
             -- when login is cancelled before its delayed first paint.
-            qr:getSize()
-            content = qr
+            local size = qr:getSize()
+            if size.w > 0 and size.h > 0 then
+                padding = math.ceil(math.max(size.w, size.h) * 4 / 21)
+                content = qr
+            end
         end
     end
     if not content then

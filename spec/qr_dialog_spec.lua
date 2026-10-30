@@ -56,7 +56,7 @@ package.preload["ui/widget/qrwidget"] = function()
         requests = requests + 1
         expect(options.scale_factor == 1, "QR grid must not be resampled")
         local pixels = math.floor(math.min(options.width, options.height) / modules) * modules
-        options.image = not encode_failure and pixels > 0 and {
+        options.image = not encode_failure and {
             getWidth = function() return pixels end, getHeight = function() return pixels end,
             free = function(self)
                 expect(not self.released, "native QR image must not be freed twice")
@@ -92,7 +92,7 @@ for _, viewport in ipairs({ { 600, 800 }, { 800, 600 }, { 320, 240 }, { 240, 320
         local dialog = QRDialog:new{ text = "synthetic login payload" }
         local frame = dialog[1][1]
         expect(frame.background == "white", "QR margin must have an opaque white background")
-        if dialog.qr.image then
+        if dialog.qr.image and dialog.qr.image:getWidth() > 0 then
             local pixels = dialog.qr.image:getWidth()
             local module_pixels = pixels / modules
             expect(frame.padding >= 4 * module_pixels, "each quiet margin needs at least four modules")
