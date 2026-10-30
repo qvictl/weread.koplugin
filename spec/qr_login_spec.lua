@@ -22,7 +22,7 @@ package.preload["weread.lib.logger"] = function()
         end,
     }
 end
-package.preload["ui/widget/qrmessage"] = function() return {} end
+package.preload["weread.ui.qr_dialog"] = function() return {} end
 package.preload["ffi/util"] = function()
     return { template = function(text) return text end }
 end
@@ -221,6 +221,24 @@ do
         and not tostring(err):find("attempt to index", 1, true),
         "a persistent transport failure must be reported as a network error: " .. tostring(err))
     expect(saved == nil, "no credentials saved after a transport failure")
+end
+
+-- QRWidget already creates an integer-aligned pixel grid. A second scale
+-- pass makes it smaller and resamples its modules on the e-ink surface.
+do
+    local manager = require("ui/uimanager")
+    local qr_dialog = require("weread.ui.qr_dialog")
+    local shown, refresh, options
+    qr_dialog.new = function(_self, opts) options = opts; return opts end
+    manager.show = function(_self, widget, mode) shown, refresh = widget, mode end
+    manager.scheduleIn = function(_self, delay, callback)
+        if delay == 0.2 then callback() end
+    end
+    local display = QRLogin:new({}, client, {})
+    display:_show_qr("display-uid", display.generation)
+    expect(options.width == nil and options.height == nil and options.scale_factor == nil,
+        "QR dialog owns its quiet-zone-aware layout")
+    expect(shown == options and refresh == "full", "initial QR display needs a full refresh")
 end
 
 print("qr_login_spec: " .. checks .. " checks passed")

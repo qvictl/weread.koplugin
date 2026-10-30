@@ -6,6 +6,8 @@
 >
 > This is a maintained fork of finlater/weread.koplugin with stability fixes for memory-constrained devices, built to run on the qvictl/koreader fork. Upstream updates are merged regularly and fixes are offered upstream as PRs where possible. Pull requests are welcome whether written by people or by AI; every PR must include adequate unit tests and pass unit coverage gates and the other CI checks before merging; real emulator integration is required before release publication.
 
+上游调研：[2026-10-30 问题去重与二维码修复](docs/reports/2026-10-30-upstream-plugin-triage.md)。
+
 本轮维护报告：[2026-10-29 修复、性能、测试与交付总结](docs/reports/2026-10-29-maintenance.md)。
 
 # WeRead KOReader Plugin
