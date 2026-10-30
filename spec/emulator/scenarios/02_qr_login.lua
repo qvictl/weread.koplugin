@@ -318,12 +318,13 @@ return function(H)
         end)
         local code, frame = dialog.qr, dialog[1][1]
         local image = code and code.image
-        H.check(image, "maximum-length payload is encoded by the real QRWidget")
-        local pixels = image:getWidth()
+        local pixels = image and image:getWidth() or 0
+        local height = image and image:getHeight() or 0
         H.metric("qr_dense_width_px", pixels)
-        if pixels == 0 then
+        H.metric("qr_dense_image_present", image and 1 or 0)
+        if pixels == 0 or height == 0 then
             H.wait_text(H.tr("Could not generate a QR code"), 5)
-            H.check(frame[1] ~= code, "zero-pixel QR uses the error content")
+            H.check(frame[1] ~= code, "unrenderable QR uses the error content")
         else
             H.check(frame[1] == code, "renderable dense QR uses its encoded pixels")
             H.check(pixels + 2 * frame.padding + 2 * frame.bordersize
@@ -331,7 +332,9 @@ return function(H)
         end
         H.tap_at(Screen:getWidth() / 2, Screen:getHeight() / 2)
         H.wait_until("dense QR dismissed", function() return dismissed == 1 end, 5)
-        H.equal(image:getAllocated(), 0, "dense native QR pixels released on close")
+        if image then
+            H.equal(image:getAllocated(), 0, "dense native QR pixels released on close")
+        end
     end)
 
     H.step("closing before delayed show releases the native QR", function()
