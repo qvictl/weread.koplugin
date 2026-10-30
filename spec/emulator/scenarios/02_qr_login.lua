@@ -305,4 +305,20 @@ return function(H)
         H.wait_until("QR error dismissed", function() return dismissed == 1 end, 5)
         H.check(not UIManager:isWidgetShown(dialog), "QR error closes normally")
     end)
+
+    H.step("closing before delayed show releases the native QR", function()
+        local dismissed = 0
+        local dialog = H.call(function()
+            return QRDialog:new{
+                text = "https://weread.qq.com/web/confirm?uid=cancel-before-show",
+                dismiss_callback = function() dismissed = dismissed + 1 end,
+            }
+        end)
+        local image = dialog.qr.image
+        H.check(image and image:getAllocated() == 1, "unshown QR has allocated native pixels")
+        H.call(function() UIManager:close(dialog); UIManager:close(dialog) end)
+        H.metric("qr_unshown_allocated_after_close", image:getAllocated())
+        H.equal(image:getAllocated(), 0, "unshown native QR pixels released immediately")
+        H.equal(dismissed, 1, "unshown QR dismiss callback runs once")
+    end)
 end

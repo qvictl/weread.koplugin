@@ -34,6 +34,9 @@ function QRDialog:init()
             -- ImageWidget should paint its native image size, without another
             -- scaling or a larger placeholder area inside the quiet zone.
             qr.width, qr.height = nil, nil
+            -- Bind the generated image to ImageWidget's disposal path even
+            -- when login is cancelled before its delayed first paint.
+            qr:getSize()
             content = qr
         end
     end

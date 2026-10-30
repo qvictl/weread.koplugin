@@ -9,6 +9,7 @@ end
 local width, height, modules = 600, 800, 29
 local touch, keys, encode_failure = true, true, false
 local requests, freed, dirty, closed = 0, 0, 0, 0
+local images_freed = 0
 local dirty_widget, dirty_mode
 local function widget(_self, options) return options end
 local Input = {}
@@ -57,13 +58,33 @@ package.preload["ui/widget/qrwidget"] = function()
         local pixels = math.floor(math.min(options.width, options.height) / modules) * modules
         options.image = not encode_failure and pixels > 0 and {
             getWidth = function() return pixels end, getHeight = function() return pixels end,
+            free = function(self)
+                expect(not self.released, "native QR image must not be freed twice")
+                self.released = true
+                images_freed = images_freed + 1
+            end,
         } or nil
-        options.free = function() freed = freed + 1 end
+        options.getSize = function(self)
+            self._bb = self.image
+            self._bb_disposable = true
+            return { w = pixels, h = pixels }
+        end
+        options.free = function(self)
+            freed = freed + 1
+            if self._bb then self._bb:free(); self._bb = nil end
+        end
         return options
     end }
 end
 
 local QRDialog = require("weread.ui.qr_dialog")
+local unshown = QRDialog:new{ text = "cancel before delayed show" }
+local unshown_image = unshown.qr.image
+local before_images_freed = images_freed
+unshown:onCloseWidget()
+unshown:onCloseWidget()
+expect(unshown_image.released and images_freed == before_images_freed + 1,
+    "closing before the first paint releases the generated native image once")
 for _, viewport in ipairs({ { 600, 800 }, { 800, 600 }, { 320, 240 }, { 240, 320 } }) do
     width, height = viewport[1], viewport[2]
     for _, count in ipairs({ 21, 29, 177 }) do
