@@ -320,8 +320,14 @@ return function(H)
         local image = code and code.image
         local pixels = image and image:getWidth() or 0
         local height = image and image:getHeight() or 0
+        local viewport_width, viewport_height = Screen:getWidth(), Screen:getHeight()
         H.metric("qr_dense_width_px", pixels)
         H.metric("qr_dense_image_present", image and 1 or 0)
+        H.metric("qr_viewport_width_px", viewport_width)
+        H.metric("qr_viewport_height_px", viewport_height)
+        if math.min(viewport_width, viewport_height) >= 600 then
+            H.check(image and pixels > 0 and height > 0, "maximum-density QR renders in the full-size viewport")
+        end
         if pixels == 0 or height == 0 then
             H.wait_text(H.tr("Could not generate a QR code"), 5)
             H.check(frame[1] ~= code, "unrenderable QR uses the error content")
