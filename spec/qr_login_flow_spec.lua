@@ -56,7 +56,7 @@ package.preload["ui/uimanager"] = function()
         end,
     }
 end
-package.preload["ui/widget/qrmessage"] = function()
+package.preload["weread.ui.qr_dialog"] = function()
     return { new = function(_self, args) args.kind = "qr"; return args end }
 end
 package.preload["ui/widget/inputdialog"] = function()
@@ -399,7 +399,8 @@ do
     local dialog = login.qr_dialog
     expect(dialog and dialog.kind == "qr", "QR dialog created")
     expect(dialog.text == "https://weread.qq.com/web/confirm?uid=U%2F1", "QR encodes the confirm URL")
-    expect(dialog.width == 432 and dialog.height == 432, "QR sized to 72% of the short screen edge")
+    expect(dialog.width == nil and dialog.height == nil and dialog.scale_factor == nil,
+        "QR dialog controls its pixel grid and quiet zone")
     expect(#ui.shown == 0, "dialog is shown only after the UI settled")
     expect(run_scheduled(0.2) == 1 and ui.shown[1] == dialog, "dialog shown")
     expect(#requests_to(login.client, "getLoginInfo") == 0, "no poll before the delay")

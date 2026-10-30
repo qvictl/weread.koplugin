@@ -1,9 +1,8 @@
 local Cookie = require("weread.lib.cookie")
-local Device = require("device")
 local I18n = require("weread.lib.i18n")
 local InputDialog = require("ui/widget/inputdialog")
 local logger = require("weread.lib.logger").scoped("QRLogin")
-local QRMessage = require("ui/widget/qrmessage")
+local QRDialog = require("weread.ui.qr_dialog")
 local FFIUtil = require("ffi/util")
 local T = FFIUtil.template
 local UIManager = require("ui/uimanager")
@@ -451,18 +450,9 @@ function QRLogin:start()
 end
 
 function QRLogin:_show_qr(uid, generation)
-    local screen_width = Device.screen:getWidth()
-    local screen_height = Device.screen:getHeight()
-    local qr_size = math.floor(math.min(screen_width, screen_height) * 0.72)
     local dialog
-    dialog = QRMessage:new{
+    dialog = QRDialog:new{
         text = BASE_URL .. "/web/confirm?uid=" .. WeRead.urlencode(uid),
-        -- QRMessage centers its framed content on the screen. Keeping the frame
-        -- smaller than the viewport makes it a dismissible popup instead of a
-        -- full-screen QR surface; tapping the modal surface (or pressing a key)
-        -- cancels the login flow through dismiss_callback.
-        width = qr_size,
-        height = qr_size,
         dismiss_callback = function()
             if self.qr_dialog == dialog then
                 self.qr_dialog = nil
@@ -472,14 +462,13 @@ function QRLogin:_show_qr(uid, generation)
                 self.host:showTransientInfo(_("QR login cancelled."), 2)
             end
         end,
-        scale_factor = 0.9,
     }
     self.qr_dialog = dialog
     -- Show the QR dialog after the surrounding UI has finished updating.
     -- Showing it immediately can leave part of the QR code obscured on Kindle.
     UIManager:scheduleIn(0.2, function()
         if generation == self.generation and self.qr_dialog == dialog then
-            UIManager:show(dialog)
+            UIManager:show(dialog, "full")
         end
     end)
 

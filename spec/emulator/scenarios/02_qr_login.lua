@@ -1,14 +1,16 @@
 -- @title QR login: scan, OTP and expired code against the mock
 -- @timeout 120
 -- Starts logged out (account cleared through the plugin's own confirmation
--- dialog), then drives the real QRLogin flow: QRMessage on screen, the
+-- dialog), then drives the real QRLogin flow: QR dialog on screen, the
 -- forked getLoginInfo long poll, userInfo + apikeyGet, credentials saved.
 -- Also covers the NEED_OTP path (wrong code first, then "1234") and an
 -- expired QR session that must not save any credentials, and a userInfo
 -- request whose connection drops after the scan (retried, login completes).
 return function(H)
     local UIManager = require("ui/uimanager")
-    local QRMessage = require("ui/widget/qrmessage")
+    local QRDialog = require("weread.ui.qr_dialog")
+    local QRWidget = require("ui/widget/qrwidget")
+    local Screen = require("device").screen
     local InputDialog = require("ui/widget/inputdialog")
 
     local plugin
@@ -71,12 +73,59 @@ return function(H)
     end
 
     local function wait_qr_shown()
-        local dialog = H.wait_until("QRMessage shown", function()
+        local dialog = H.wait_until("QR dialog shown", function()
             local qr = plugin.qr_login.qr_dialog
-            return qr and UIManager:isWidgetShown(qr) and is_a(qr, QRMessage) and qr or nil
+            return qr and UIManager:isWidgetShown(qr) and is_a(qr, QRDialog) and qr or nil
         end, 15)
         H.check(tostring(dialog.text):find("/web/confirm?uid=mock-login-uid", 1, true),
             "QR payload carries the login uid", tostring(dialog.text))
+        local function find_code(widget)
+            if is_a(widget, QRWidget) then return widget end
+            for _, child in ipairs(widget) do
+                if type(child) == "table" then
+                    local code = find_code(child)
+                    if code then return code end
+                end
+            end
+        end
+        local code = H.call(function() return find_code(dialog) end)
+        H.check(code and code.image, "QR surface contains a real encoded image")
+        H.wait_until("QR image painted", function() return code.dimen end, 5)
+        local image = H.call(function()
+            code:getSize()
+            local frame = dialog[1][1]
+            local encoded, matrix, modules = require("ffi/qrencode").qrcode(dialog.text)
+            assert(encoded)
+            return {
+                raw_w = code.image:getWidth(), raw_h = code.image:getHeight(),
+                w = code._bb:getWidth(), h = code._bb:getHeight(),
+                x = code.dimen.x, y = code.dimen.y,
+                area_w = code.dimen.w, area_h = code.dimen.h,
+                frame = frame.dimen, border = frame.bordersize,
+                modules = modules or #matrix,
+            }
+        end)
+        H.metric("qr_rendered_width_px", image.w)
+        H.metric("qr_encoded_width_px", image.raw_w)
+        H.equal(image.w, image.raw_w, "encoded QR pixel columns are not resampled")
+        H.equal(image.h, image.raw_h, "encoded QR pixel rows are not resampled")
+        local module_pixels = image.raw_w / image.modules
+        H.metric("qr_module_pixels", module_pixels)
+        H.metric("qr_quiet_zone_px", image.x - image.frame.x - image.border)
+        H.equal(module_pixels, math.floor(module_pixels), "QR module width is an integer pixel count")
+        H.check(image.x - image.frame.x - image.border >= 4 * module_pixels
+            and image.y - image.frame.y - image.border >= 4 * module_pixels
+            and image.frame.x + image.frame.w - image.border - image.x - image.w >= 4 * module_pixels
+            and image.frame.y + image.frame.h - image.border - image.y - image.h >= 4 * module_pixels,
+            "painted QR has four clear modules on every side")
+        H.check(image.frame.x >= 0 and image.frame.y >= 0
+            and image.frame.x + image.frame.w <= Screen:getWidth()
+            and image.frame.y + image.frame.h <= Screen:getHeight(),
+            "QR frame and white margins remain inside the viewport")
+        H.check(image.x >= 0 and image.y >= 0
+            and image.x + image.area_w <= Screen:getWidth()
+            and image.y + image.area_h <= Screen:getHeight(),
+            "QR image paint area remains inside the viewport")
         return dialog
     end
 
@@ -199,5 +248,61 @@ return function(H)
         H.equal(state.name, "合成扫码用户", "account name after the retry")
         H.close_dialogs()
         H.mock_control({ match = "", times = 0, drop = false })
+    end)
+
+    H.step("enlarged QR remains dismissible", function()
+        clear_account(false)
+        H.mock_control({ qr_mode = "succeed", qr_delay = 5 })
+        H.call(function() plugin.qr_login:start() end)
+        local dialog = wait_qr_shown()
+        H.wait_until("poll job before cancellation", function() return plugin.qr_login.poll_job end, 5)
+        local freed, dismissed, free_calls = 0, 0, 0
+        local code = dialog.qr
+        H.call(function()
+            local free, callback = code.free, dialog.dismiss_callback
+            code.free = function(self, ...)
+                free_calls = free_calls + 1
+                if self._bb then
+                    H.check(self._bb_disposable, "QR owns its native paint buffer")
+                    freed = freed + 1
+                end
+                return free(self, ...)
+            end
+            dialog.dismiss_callback = function(...)
+                dismissed = dismissed + 1
+                return callback(...)
+            end
+        end)
+        H.tap_at(Screen:getWidth() / 2, Screen:getHeight() / 2)
+        H.wait_until("QR login cancelled", function()
+            return not plugin.qr_login.qr_dialog and not plugin.qr_login.poll_job
+        end, 5)
+        H.call(function() UIManager:close(dialog) end)
+        H.equal(freed, 1, "actual UIManager close frees the QR image once")
+        H.equal(dismissed, 1, "actual UIManager close calls dismiss once")
+        H.check(code._bb == nil, "native QR paint buffer released")
+        H.metric("qr_native_release_count", freed)
+        H.metric("qr_free_method_calls", free_calls)
+        H.equal(auth().api_key, "", "cancelled QR saves no API key")
+        H.check(not auth().cookie, "cancelled QR saves no login cookies")
+        H.mock_control({ qr_mode = "succeed", qr_delay = 1 })
+    end)
+
+    H.step("oversized QR payload shows a dismissible error", function()
+        H.close_dialogs()
+        local dismissed = 0
+        local dialog = H.call(function()
+            local widget = QRDialog:new{
+                text = ("x"):rep(2954),
+                dismiss_callback = function() dismissed = dismissed + 1 end,
+            }
+            UIManager:show(widget, "full")
+            return widget
+        end)
+        H.wait_text(H.tr("Could not generate a QR code"), 5)
+        H.check(dialog.qr == nil, "oversized payload does not generate a truncated QR")
+        H.tap_at(Screen:getWidth() / 2, Screen:getHeight() / 2)
+        H.wait_until("QR error dismissed", function() return dismissed == 1 end, 5)
+        H.check(not UIManager:isWidgetShown(dialog), "QR error closes normally")
     end)
 end
