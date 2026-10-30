@@ -4,7 +4,7 @@
 
 本轮插件开发子任务已结束，[v1.6.92](https://github.com/qvictl/weread.koplugin/releases/tag/v1.6.92)
 已发布，tag/source 为 `c5855b317477db59c8896e2bc4832d6961d0ab48`。
-三仓总报告见 [KOReader 维护报告](https://github.com/qvictl/koreader/blob/main/doc/reports/2026-10-29-maintenance.md)。
+三仓总报告见 [KOReader 维护报告](https://github.com/qvictl/koreader/blob/db52bf904ff246ccafee89cd0f542a2e9262fa9b/doc/reports/2026-10-29-maintenance.md)。
 本文记录本轮已确认修复和实测，不表示全库无缺陷或原 811 章真机卡死已消失。
 
 ## 缺陷修复和结构变化
