@@ -1,6 +1,6 @@
 # 插件上游问题调研与二维码显示修复（2026-10-30）
 
-快照来源：`finlater/weread.koplugin`；本fork核查基线：`a88722251de308fe802a41503c58c1fcae0950d9`。
+快照来源：`finlater/weread.koplugin`，开放条目快照时间为2026-10-30 03:24:37 UTC；本fork条目核查基线为`a88722251de308fe802a41503c58c1fcae0950d9`。二维码首版实现/回归对应`8866be78738538f1582777c0aaad71cde1f4baaf`；补充显示前取消修复及本报告最终回归对应`013ec1d9cbcbcbf51426f61cff05a7d570d20747`，之后仅补充报告元数据。
 
 ## 范围和结论
 
@@ -10,21 +10,21 @@
 
 ## 选定修复与证据
 
-来源：[c4po 的二维码显示提案](https://github.com/finlater/weread.koplugin/pull/225)。当前fork仍使用QRMessage的版本相关布局，先指定屏幕短边72%，再对QRWidget已经按整数模块编码的位图做0.9倍缩放。官方v2026.07.1的真实回归中，377px编码图被重采样为339px；新增回归在旧代码失败。
+来源：[c4po 的二维码显示提案](https://github.com/finlater/weread.koplugin/pull/225)。上述核查基线仍使用QRMessage的版本相关布局，先指定屏幕短边72%，再对QRWidget已经按整数模块编码的位图做0.9倍缩放。官方v2026.07.1的真实回归中，377px编码图被重采样为339px；新增回归在旧代码失败。
 
-只扩大现有框并取消二次缩放的试验能得到551px，但固定框padding不足以保证quiet zone，因此没有采用该试验版本。按[DENSO WAVE的要求](https://www.qrcode.com/en/howto/code.html)，四边至少应有四模块空白。最终复用原QRWidget、FrameContainer和InputContainer组合一个小型登录容器：保留整数像素，依据最小21模块符号保守留出四模块白边，并为ceil舍入预留2px。登录URL不能被截断或拆成多码；过长/无法绘制的payload显示可关闭错误；原生位图只释放一次，dismiss callback至多一次（框架的free方法可以幂等重复调用）；保留Back和F5全刷新及物理键盘连接注册。
+只扩大现有框并取消二次缩放的试验能得到551px，但固定框padding不足以保证quiet zone，因此没有采用该试验版本。按[DENSO WAVE的要求](https://www.qrcode.com/en/howto/code.html)，四边至少应有四模块空白。最终复用原QRWidget、FrameContainer和InputContainer组合一个小型登录容器：保留整数像素，依据最小21模块符号保守留出四模块白边，并为ceil舍入预留2px。登录URL不能被截断或拆成多码；过长/无法绘制的payload显示可关闭错误；显示前取消也通过公开getSize绑定处置路径，原生位图只释放一次，dismiss callback至多一次（框架的free方法可以幂等重复调用）；保留Back和F5全刷新及物理键盘连接注册。
 
 未修改任何登录URL、认证参数、401行为、长轮询或请求重试；也未删除原先的登录提示。首次显示请求full refresh，但SDL只能证明调用/绘制路径，不能作为Kindle扫码成功或残影改善的硬件证明。
 
 | 验证 | 结果 |
 | --- | --- |
-| QR布局单测 | 107 checks，含600×800、800×600、320×240、240×320；21/29/177模块、失败/过长payload、关闭和释放 |
+| QR布局单测 | 121 checks，含600×800、800×600、320×240、240×320；21/29/177模块、失败/过长payload、关闭和释放 |
 | QRLogin与流程组件 | 69 + 241 checks通过；保留会话、取消、OTP、异常及owner行为 |
 | 修前真实负例 | 官方QRWidget原始377px→渲染339px，整数像素保持检查失败 |
-| 最终真实场景02 | 官方/current-a2c，竖屏/横屏；另含官方320×480小屏，5组均8步骤通过，原生/渲染分别406/406px，小屏203/203px |
+| 最终真实场景02 | 官方/current-a2c，竖屏/横屏；另含官方320×480小屏，5组均9步骤通过，原生/渲染分别406/406px，小屏203/203px |
 | 静态检查 | 变更Lua的luacheck、命名空间与git diff --check通过 |
 
-真实场景直接核对QRWidget原始与绘制位图尺寸、模块整数像素、四边相对Frame边界的至少四模块白边和视口边界。流程继续验证扫码完成、错误OTP后恢复、过期不落凭据、userInfo掉线原有重试，以及实际触摸关闭取消进程和过长payload错误关闭。合成服务与UID不涉及真实账号或私人内容。
+真实场景直接核对QRWidget原始与绘制位图尺寸、模块整数像素、四边相对Frame边界的至少四模块白边和视口边界。流程继续验证扫码完成、错误OTP后恢复、过期不落凭据、userInfo掉线原有重试，以及实际触摸关闭取消进程、过长payload错误关闭和尚未显示时重复关闭后的原生allocated标志1→0。合成服务与UID不涉及真实账号或私人内容。
 
 对[资源包失败提案](https://github.com/finlater/weread.koplugin/pull/226)，不能只看Content中单次GET就断言本fork缺少重试。现有Downloader已将source+images放在同一worker，失败经过0.8/1.6秒合作调度共3次；针对合成499/429的实际Downloader调用链10项检查确认该路径恢复且保留图片。499本身不等于已证明服务端限流；不叠加内部重试，不采纳最终失败后丢图却宣称完整成功的策略。
 
