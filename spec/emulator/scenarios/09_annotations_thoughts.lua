@@ -15,6 +15,55 @@ return function(H)
     local without_ui_dns = dofile(os.getenv("WEREAD_TEST_HARNESS_DIR") .. "/no_ui_dns.lua")
     local tr = H.tr
 
+    H.step("saved malformed annotation batch resumes without losing valid thoughts", function()
+        H.wait_until("weread runtime on FileManager", function() return H.plugin() end, 20)
+        H.call(function()
+            local Store = require("weread.lib.annotation_store")
+            local Sync = require("weread.lib.annotation_sync")
+            local settings = H.runtime().settings
+            local store = Store:new(settings)
+            local book_id, uid = "synthetic-malformed-annotations", "1"
+            store:clearChapters(book_id, { { chapterUid = uid } })
+            store:put(book_id, "download", uid, { revision = "1", next_batch = 2,
+                underlines = { { range = "0-10" }, { range = "11-20", markText = QUOTE } },
+            }, uid)
+            store:put(book_id, "batch", uid .. ":1", {
+                false, 42, {}, { range = "" },
+                { range = "0-10", pageReviews = { true, { review = false }, {
+                    review = { abstract = QUOTE, content = THOUGHT, author = true },
+                } } },
+                { range = "11-20", pageReviews = { {
+                    review = { content = "Second synthetic thought", author = { nick = "Reader" } },
+                } } },
+            }, uid)
+            local sync = Sync:new{
+                store = Store:new(settings), book_id = book_id,
+                chapters = { { chapterUid = uid } }, offline = true,
+                client = { build_chapter_review_batches = function()
+                    return { { "0-10", "11-20" } }
+                end },
+            }
+            local complete = false
+            for _ = 1, 20 do
+                local done, state = sync:step()
+                H.check(done ~= nil, "malformed saved batch resumes: " .. tostring(state))
+                if done then complete = true; break end
+            end
+            H.check(complete, "saved annotation batch completes in bounded steps")
+            local reopened = Store:new(settings)
+            local first = reopened:get(book_id, "thought", uid .. ":0-10")
+            local second = reopened:get(book_id, "thought", uid .. ":11-20")
+            H.equal(#first, 1, "malformed pages are skipped")
+            H.equal(first[1].content, THOUGHT, "valid thought survives real SQLite reopen")
+            H.equal(first[1].abstract, QUOTE, "first valid thought keeps its quote")
+            H.equal(first[1].author, "匿名", "malformed author uses the anonymous fallback")
+            H.equal(second[1].content, "Second synthetic thought", "adjacent range survives")
+            H.equal(reopened:get(book_id, "batch", uid .. ":1"), nil, "raw checkpoint removed")
+            H.equal(reopened:get(book_id, "download", uid), nil, "download checkpoint removed")
+            H.check(reopened:get(book_id, "source_status", uid), "source commit is durable")
+        end)
+    end)
+
     H.step("thought database creates missing parents and survives reopening", function()
         H.call(function()
             local ThoughtDB = require("weread.lib.thought_db")

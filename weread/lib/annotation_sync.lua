@@ -255,9 +255,13 @@ function Sync:run()
                 { kind = "refresh", key = uid }, { kind = "thought", uid = uid },
             }
             for _, review in ipairs(source.reviews or {}) do
-                local range = tostring(review.range or "")
-                changes[#changes + 1] = { kind = "thought", key = uid .. ":" .. range, uid = uid,
-                    value = require("weread.lib.annotations").buildThoughtPopupItems(review) }
+                -- Raw batches are already checkpointed. A malformed range
+                -- must not poison every subsequent attempt to resume them.
+                local range = type(review) == "table" and review.range or nil
+                if type(range) == "string" and range ~= "" then
+                    changes[#changes + 1] = { kind = "thought", key = uid .. ":" .. range, uid = uid,
+                        value = require("weread.lib.annotations").buildThoughtPopupItems(review) }
+                end
             end
         end
         if document_key then

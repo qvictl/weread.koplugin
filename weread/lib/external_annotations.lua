@@ -77,10 +77,17 @@ function ExternalAnnotations.quote_for(underline, reviews)
         if quote ~= "" then return quote end
     end
     local review = review_for_range(reviews, tostring(underline.range or ""))
-    local page = review and type(review.pageReviews) == "table"
-        and review.pageReviews[1] or nil
-    local item = page and (page.review or page) or nil
-    return clean_quote(item and (item.abstract or item.contextAbstract or item.markText))
+    local pages = review and type(review.pageReviews) == "table" and review.pageReviews or {}
+    for _, page in ipairs(pages) do
+        if type(page) == "table" then
+            local item = page.review == nil and page or page.review
+            if type(item) == "table" then
+                local quote = clean_quote(item.abstract or item.contextAbstract or item.markText)
+                if quote ~= "" then return quote end
+            end
+        end
+    end
+    return ""
 end
 
 local function range_start(row)
