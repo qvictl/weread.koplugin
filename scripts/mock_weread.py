@@ -286,6 +286,14 @@ class MockServer(ThreadingHTTPServer):
                 dict(commentId=f"mock-comment-{i}", content=f"合成回复 {i}", author={"nick": "测试读者"}, createTime=1700000000)
                 for i in range(1, 3)], commentsHasMore=0)
         if path == "/web/mp/content" and method == "GET":
+            if query.get("reviewId", [""])[0] == "mock-mp-oversized":
+                return 200, ("<html>" + "x" * (8 * 1024 * 1024)
+                             + '<div id="js_content"><p>Oversized response must not publish.</p></div><script>')
+            if query.get("reviewId", [""])[0] == "mock-mp-empty-body":
+                return 200, ('<div id="js_content"> <script>void(0)</script>'
+                             '<style>p{}</style><section><p>&nbsp;</p></section> </div><script>')
+            if query.get("reviewId", [""])[0] == "mock-mp-bodyless":
+                return 200, "<html><body>Synthetic page without article content.</body></html>"
             if query.get("reviewId", [""])[0] != "mock-mp-article":
                 raise ValueError("unknown synthetic MP article")
             return 200, ('<html><body><div id="js_content"><p>Synthetic article body.</p>'

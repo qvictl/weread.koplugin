@@ -249,6 +249,67 @@ do
     expect(path == root .. "/First.html" and has(html, "<p>Body text</p>") and not has(html, "<img"),
         "article was not saved with images stripped")
 
+    -- A nonempty login/error page is not usable article content. Keep trying
+    -- the existing candidate ids without changing authentication or renewal.
+    local bodyless = mp_client({ mp = function(id)
+        if id == "R-login" then return "<html>please log in</html>" end
+        return ARTICLE_HTML
+    end })
+    local recovered_path = Content.fetch_mp_article_html(bodyless, settings_with({}), book,
+        { reviewId = "R-login", originalId = "R-content", title = "Recovered" })
+    expect(bodyless:ids() == "R-login,R-content" and bodyless.renews == 0 and #bodyless.public == 0,
+        "a nonempty page without a body blocked the next content candidate")
+    expect(has(read_file(recovered_path), "Body text"), "valid later candidate was not published")
+
+    -- If no candidate contains an article, retain missing-body diagnostics.
+    logs = {}
+    local missing = mp_client({ mp = function(id)
+        if id == "R-login" then return "<html>please log in</html>", { content_type = "text/html" } end
+        return " "
+    end })
+    local missing_ok = pcall(Content.fetch_mp_article_html, missing, settings_with({}), book,
+        { reviewId = "R-login", originalId = "R-empty", title = "MissingLater" })
+    expect(not missing_ok and missing:ids() == "R-login,R-empty" and missing.renews == 0,
+        "bodyless candidates must fail without introducing authentication retries")
+    expect(has(last_warn(), "missing_body") and has(last_warn(), "attempts= 1:26,2:1")
+        and not read_file(root .. "/MissingLater.html"), "missing-body failure diagnostics changed")
+
+    -- Bodies that become empty after cleaning are not usable candidates either.
+    for index, contents in ipairs({ "<script>void(0)</script>", "<style>p{}</style>", " \n\t ",
+        "<p> </p>", "<section>&nbsp;</section>",
+        "<div><p><span>&#160;</span></p></div>", "<p><br/></p>",
+    }) do
+        local cleaned_empty = '<div id="js_content">' .. contents .. '</div><script>'
+        expect(Content.extract_mp_body(cleaned_empty) == nil, "cleaned-empty body was accepted")
+        local cleaned = mp_client({ mp = function(id)
+            return id == "R-empty" and cleaned_empty or ARTICLE_HTML
+        end })
+        local clean_path = Content.fetch_mp_article_html(cleaned, settings_with({}), book,
+            { reviewId = "R-empty", originalId = "R-content", title = "Cleaned" .. index })
+        expect(cleaned:ids() == "R-empty,R-content" and cleaned.renews == 0,
+            "cleaned-empty body blocked the next existing candidate")
+        expect(has(read_file(clean_path), "Body text"), "cleaned-empty article was published")
+    end
+
+    expect(Content.extract_mp_body('<div id="js_content"><p><img src="image.png"/></p></div><script>')
+        == '<p><img src="image.png"/></p>', "blank-block cleanup discarded a meaningful image")
+
+    -- Failed response bytes must not survive until the next network request.
+    -- Warm LuaJIT's reusable string buffer before the heap baseline.
+    assert(#string.rep("w", 4 * 1024 * 1024) == 4 * 1024 * 1024)
+    collectgarbage("collect")
+    local before_kb = collectgarbage("count")
+    local retained_kb
+    local released = mp_client({ mp = function(id)
+        if id == "R-large" then return string.rep("x", 4 * 1024 * 1024) end
+        collectgarbage("collect")
+        retained_kb = collectgarbage("count") - before_kb
+        return ARTICLE_HTML
+    end })
+    Content.fetch_mp_article_html(released, settings_with({}), book,
+        { reviewId = "R-large", originalId = "R-content", title = "Released" })
+    expect(retained_kb < 1024, "previous failed response remains live during the next download: " .. retained_kb)
+
     -- Every candidate blank: renew the cookie, retry without MP auth headers.
     local renewed = mp_client({ mp = function(id, after_renew)
         if after_renew and id == "R9" then return ARTICLE_HTML end
