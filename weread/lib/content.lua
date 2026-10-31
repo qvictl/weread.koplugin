@@ -1346,14 +1346,38 @@ local function add_image_source(src_map, source, href)
     end
 end
 
+local function image_reference_path(src)
+    -- Split URI components before decoding: %3F/%23 belong to the filename,
+    -- and %25 must not cause a second decoding pass. '+' is not a form space.
+    local path = src:match("^[^%?#]*")
+    if not path:find("%", 1, true) then return image_source_path(path) end
+    if path:gsub("%%%x%x", ""):find("%", 1, true) then
+        -- Preserve legacy literal-percent names, without partially decoding
+        -- an invalid URI (e.g. mixed%20%ZZ.png).
+        return image_source_path(path)
+    end
+    local invalid = false
+    path = path:gsub("%%(%x%x)", function(hex)
+        local byte = tonumber(hex, 16)
+        -- An encoded slash is data within a URI segment, not a hierarchy
+        -- separator. Neither it nor NUL can identify an archive filename.
+        if byte == 47 or byte == 0 then invalid = true end
+        return string.char(byte)
+    end)
+    if not invalid then return image_source_path(path) end
+end
+
 function Content.rewrite_image_sources(xhtml, src_map)
     if not src_map or not next(src_map) then
         return xhtml
     end
     local function replace_src(quote, src)
         local clean = tostring(src or ""):gsub("&amp;", "&")
-        local path = image_source_path(clean:match("^[^%?#]+") or clean)
+        local path = image_reference_path(clean)
         local href
+        if not path then
+            return "src=" .. quote .. src .. quote
+        end
         if type(src_map.paths) == "table" and type(src_map.basenames) == "table" then
             href = src_map.paths[path] or src_map.basenames[basename(path)]
         else

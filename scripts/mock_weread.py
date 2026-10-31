@@ -81,6 +81,12 @@ def resource_archive(stage):
                               tarfile.USTAR_FORMAT) for letter in ("a", "b")) \
             + entry("section-" + "a" * 96 + "/pic.png ", signature + b"spaced-name", tarfile.USTAR_FORMAT) \
             + b"\0" * 1024
+    if stage == "uri":
+        paths = ["chapter one/pic.png", "chapter two/pic.png", "first/pic.png ", "second/pic.png ",
+                 "literal/pic.png%20", "literal/pic.png%2520", "reserved/q?#.png", "utf8/插图.png",
+                 "plus/a+b.png", "percent/100%.png", "amp/a&b.png"]
+        return b"".join(entry(path, signature + str(i).encode(), tarfile.USTAR_FORMAT)
+                        for i, path in enumerate(paths, 1)) + b"\0" * 1024
     raise ValueError("unknown synthetic resource archive")
 
 

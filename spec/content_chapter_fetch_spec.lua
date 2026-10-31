@@ -643,6 +643,78 @@ do
         "an empty source map must leave the xhtml untouched")
 end
 
+-- URI references identify archive names, not pre-encoded map keys. Decode
+-- exactly once and only after separating the query and fragment components.
+do
+    local cases = {
+        { "chapter one/pic.png", "chapter%20one/pic.png" },
+        { "chapter two/pic.png", "chapter%20two/pic.png" },
+        { "first/pic.png ", "first/pic.png%20" },
+        { "second/pic.png ", "second/pic.png%20" },
+        { "literal/pic.png%20", "literal/pic.png%2520" },
+        { "literal/pic.png%2520", "literal/pic.png%252520" },
+        { "reserved/q?#.png", "reserved/q%3f%23.png?ignored=1&amp;x=2#fragment" },
+        { "utf8/插图.png", "utf8/%E6%8F%92%e5%9b%be.png" },
+        { "plus/a+b.png", "plus/a+b.png" },
+        { "percent/100%.png", "percent/100%25.png" },
+        { "amp/a&b.png", "amp/a%26b.png" },
+        { "raw/bad%ZZ.png", "raw/bad%ZZ.png" },
+        { "raw/mixed%20%ZZ.png", "raw/mixed%20%ZZ.png" },
+        { "backslash/a\\b.png", "backslash/a%5Cb.png" },
+    }
+    local entries = {}
+    for i, case in ipairs(cases) do entries[i] = tar_entry(case[1], PNG .. tostring(i)) end
+    local url = "https://res.test/uri.tar"
+    local archive = table.concat(entries) .. TAR_END
+    local client = new_client({ binary = { [url] = archive }, files = { [url] = archive } })
+    local chapter = { chapterUid = "uri", tar = url }
+    for _, disk in ipairs({ false, true }) do
+        local assets, mapping
+        if disk then
+            assets, mapping = Content.download_chapter_assets_to_files(client, { book_id = "B1" }, chapter, {}, workspace)
+        else
+            assets, mapping = Content.download_chapter_assets(client, { book_id = "B1" }, chapter, {})
+        end
+        local bytes = {}
+        for _, asset in ipairs(assets) do bytes["../" .. asset.href] = disk and read_file(asset.path) or asset.data end
+        for i, case in ipairs(cases) do
+            local html = '<img src="' .. case[2] .. '"/>'
+            local rewritten = Content.rewrite_image_sources(html, mapping)
+            expect(bytes[rewritten:match('src="(.-)"')] == PNG .. tostring(i),
+                "URI did not select its own archive bytes (disk=" .. tostring(disk) .. "): " .. case[2])
+            expect(mapping.paths[case[1]], "archive source key was URI-decoded: " .. case[1])
+        end
+        expect(Content.rewrite_image_sources('<img src="./plus/a%2bb.png"/>', mapping)
+            == '<img src="' .. mapping.paths["plus/a+b.png"] .. '"/>', "encoded plus or leading dot was lost")
+        expect(Content.rewrite_image_sources('<img src="elsewhere/100%25.png"/>', mapping)
+            == '<img src="' .. mapping.paths["percent/100%.png"] .. '"/>', "unique decoded basename fallback was lost")
+        expect(Content.rewrite_image_sources('<img src="amp/a&amp;b.png"/>', mapping)
+            == '<img src="' .. mapping.paths["amp/a&b.png"] .. '"/>', "HTML ampersand compatibility was lost")
+        for _, src in ipairs({ "pic.png%20", "unmatched/pic.png%20", "chapter%2Fone/pic.png", "a%00/pic.png",
+            "literal/pic.png%20", "raw/mixed%20%QZ.png", "#pic.png", "?pic.png" }) do
+            local html = '<img src="' .. src .. '"/>'
+            expect(Content.rewrite_image_sources(html, mapping) == html, "unmatched or ambiguous URI was guessed: " .. src)
+        end
+    end
+
+    local flat = { ["a b.png"] = "../images/space.png", ["a%20b.png"] = "../images/percent.png",
+        ["a+b.png"] = "../images/plus.png", ["a?#.png"] = "../images/reserved.png",
+        ["bad%ZZ.png"] = "../images/raw.png", ["a.png"] = false }
+    for src, href in pairs({ ["dir/a%20b.png"] = "space", ["dir/a%2520b.png"] = "percent",
+        ["dir/a+b.png"] = "plus", ["dir/a%2Bb.png"] = "plus", ["a%3F%23.png?x#y"] = "reserved",
+        ["dir/bad%ZZ.png"] = "raw" }) do
+        expect(Content.rewrite_image_sources("<img src='" .. src .. "'/>", flat)
+            == "<img src='../images/" .. href .. ".png'/>", "legacy flat-map URI compatibility failed: " .. src)
+    end
+    for _, src in ipairs({ "dir%2Fa%20b.png", "dir%2fa%20b.png", "dir%00/a+b.png" }) do
+        local html = '<img src="' .. src .. '"/>'
+        expect(Content.rewrite_image_sources(html, flat) == html,
+            "encoded separator or NUL was interpreted as a path: " .. src)
+    end
+    expect(Content.rewrite_image_sources('<img src="a.png"/>', flat) == '<img src="a.png"/>',
+        "legacy false basename was rewritten")
+end
+
 -- ----------------------------------------------- download_remote_images --
 
 do

@@ -106,6 +106,44 @@ return function(H)
                 H.equal(Content.rewrite_image_sources('<img src="pic.png"/>', mapping),
                     '<img src="pic.png"/>', "USTAR prefixes do not claim a bare source path")
             end
+
+            -- References are URI paths; the archive contains literal names.
+            -- Fetch actual bytes through both readers, including names which
+            -- would collide if decoded twice or treated as form data.
+            chapter.tar = resource_url .. "uri.tar"
+            local uri_streamed, uri_stream_map = Content.download_chapter_assets_to_files(
+                client, { book_id = "synthetic" }, chapter, names, workspace)
+            local uri_memory, uri_memory_map = Content.download_chapter_assets(
+                client, { book_id = "synthetic" }, chapter, {})
+            local refs = { "chapter%20one/pic.png", "chapter%20two/pic.png", "first/pic.png%20",
+                "second/pic.png%20", "literal/pic.png%2520", "literal/pic.png%252520",
+                "reserved/q%3F%23.png?ignored=1&amp;x=2#fragment", "utf8/%E6%8F%92%e5%9b%be.png",
+                "plus/a+b.png", "percent/100%25.png", "amp/a%26b.png" }
+            H.equal(#uri_streamed, #refs, "URI streaming retains all literal archive names")
+            H.equal(#uri_memory, #refs, "URI memory retains all literal archive names")
+            for i, ref in ipairs(refs) do
+                local html = '<img src="' .. ref .. '"/>'
+                H.equal(Content.rewrite_image_sources(html, uri_stream_map),
+                    '<img src="../' .. uri_streamed[i].href .. '"/>', "URI streaming identity " .. i)
+                H.equal(Content.rewrite_image_sources(html, uri_memory_map),
+                    '<img src="../' .. uri_memory[i].href .. '"/>', "URI memory identity " .. i)
+                local file = assert(io.open(uri_streamed[i].path, "rb"))
+                local payload = file:read("*a")
+                file:close()
+                H.equal(payload, png .. tostring(i), "URI streaming image bytes " .. i)
+                H.equal(uri_memory[i].data, payload, "URI readers agree on image bytes " .. i)
+            end
+            for _, mapping in ipairs({ uri_stream_map, uri_memory_map }) do
+                for _, ref in ipairs({ "pic.png%20", "missing/pic.png%20", "literal/pic.png%20",
+                    "plus%2Fa+b.png", "prefix%00/a+b.png" }) do
+                    local html = '<img src="' .. ref .. '"/>'
+                    H.equal(Content.rewrite_image_sources(html, mapping), html,
+                        "ambiguous or invalid URI does not select unrelated data: " .. ref)
+                end
+            end
+            local preserved = assert(io.open(workspace.asset_dir .. "/existing.png", "rb"))
+            H.equal(preserved:read("*a"), png .. "existing", "URI extraction preserves previous chapter data")
+            preserved:close()
         end)
     end)
 end
