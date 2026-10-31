@@ -330,6 +330,52 @@ local ok, err = xpcall(function()
         "unavailable worker startup changed its legacy failure or cancellation semantics")
     d.settings.data_dir = "/data"
 
+    -- Foreground annotation requests use the real adapter/worker deadline.
+    -- Advance only the deterministic worker clock, never a production timeout.
+    local annotation_timeout
+    clock = 0
+    replace_module("weread.lib.background_worker", { new = function(_, options)
+        annotation_timeout = options.timeout
+        options.clock = function() return clock end
+        return Worker:new(options)
+    end })
+    local annotation_host = setmetatable({ settings = d.settings }, { __index = Controller })
+    local function annotation_wait()
+        local outcome
+        local request = { owner = Owner.capture(d.settings), progress = { close = function() end } }
+        annotation_host._external_annotation_sync = request
+        local co = coroutine.create(function()
+            outcome = { pcall(annotation_host._runAnnotationNetwork, annotation_host, request,
+                function() error("stuck child must not execute in the parent") end) }
+        end)
+        expect(coroutine.resume(co), "annotation wait failed to launch")
+        return co, function() return outcome end, request
+    end
+    local annotation_co, annotation_result, annotation_request = annotation_wait()
+    local annotation_pid = launched
+    clock = 89; pump(1)
+    expect(not children[annotation_pid].reaped and not annotation_result()
+        and signalled[#signalled] ~= annotation_pid, "annotation timeout fired before its deadline")
+    clock = 90; pump(1)
+    expect(signalled[#signalled] == annotation_pid and not Budget.available() and not annotation_result(),
+        "annotation timeout did not terminate its child while retaining the process reservation")
+    expect(annotation_timeout == 90, "foreground annotation worker has no 90-second deadline")
+    children[annotation_pid].done = true; pump(10)
+    expect(coroutine.status(annotation_co) == "dead" and annotation_result()[1] == false
+        and annotation_result()[2] == "The operation timed out. Please try again."
+        and children[annotation_pid].reaped and Budget.available() and not annotation_request.cancelled,
+        "annotation timeout was confused with cancellation or worker startup failure")
+    clock = 0
+    local cancel_co, cancel_result, cancel_request = annotation_wait()
+    local cancel_pid = launched
+    annotation_host:_cancelUnifiedAnnotationSync()
+    expect(coroutine.status(cancel_co) == "dead" and cancel_result()[1] == true
+        and cancel_result()[2] == nil and cancel_request.cancelled and not Budget.available(),
+        "intentional annotation cancellation became a timeout error or released an unreaped child")
+    children[cancel_pid].done = true; pump(10)
+    expect(Budget.available(), "cancelled annotation child was not reaped")
+    package.loaded["weread.lib.background_worker"] = Worker
+
     local subsequent_wait = { keep_waiting = true }
     local co_waiting, waiting_result = start(subsequent_wait)
     local completed_dismiss = subsequent_wait.dismiss_callback

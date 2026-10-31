@@ -447,7 +447,7 @@ function M:_runAnnotationNetwork(request, task)
     if not ok_json then Json = require("rapidjson") end
     local WorkerSettings = require("weread.lib.worker_settings")
     local fingerprint = WorkerSettings.fingerprint(self.settings)
-    local completed, encoded = require("weread.lib.subprocess").run(function()
+    local completed, encoded, failure_reason = require("weread.lib.subprocess").run(function()
         local auth_result = WorkerSettings.capture(self.settings)
         local ok, values = xpcall(function()
             local first, second, third = task()
@@ -459,6 +459,10 @@ function M:_runAnnotationNetwork(request, task)
         return Json.encode({ ok = ok, values = values, auth = auth_result() })
     end, request.progress, true, {
         settings = self.settings,
+        -- Foreground HTTP waits publish no worker progress. Bound the child
+        -- even if an idle socket timeout is kept alive by a trickling server.
+        -- The adapter retains its reservation until the terminated PID is reaped.
+        timeout = 90,
         before_launch = function()
             return self._external_annotation_sync == request and not request.cancelled
                 and RequestOwner.matches(self.settings, request.owner), "account_changed"
@@ -470,7 +474,12 @@ function M:_runAnnotationNetwork(request, task)
         self:_cancelUnifiedAnnotationSync()
         return
     end
-    if not completed then error("could not start annotation worker") end
+    if not completed then
+        if (encoded or failure_reason) == "worker_timeout" then
+            error(_("The operation timed out. Please try again."), 0)
+        end
+        error("could not start annotation worker")
+    end
     if not encoded or encoded == "" then error("annotation worker returned no result") end
     local result = Json.decode(encoded)
     if result.auth then WorkerSettings.merge(self.settings, fingerprint, result.auth) end
