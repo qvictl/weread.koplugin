@@ -151,13 +151,17 @@ local function read_file(path)
     return data
 end
 
-local function tar_entry(name, data, typeflag)
+local function tar_entry(name, data, typeflag, prefix, magic)
     local header = name .. string.rep("\0", 100 - #name)
         .. string.rep("\0", 24)
         .. string.format("%011o\0", #data)
         .. string.rep("\0", 20)
         .. (typeflag or "0")
     header = header .. string.rep("\0", 512 - #header)
+    if prefix ~= nil then
+        header = header:sub(1, 257) .. (magic or "ustar\0") .. "00"
+            .. header:sub(266, 345) .. prefix .. string.rep("\0", 155 - #prefix) .. header:sub(501)
+    end
     return header .. data .. string.rep("\0", (512 - #data % 512) % 512)
 end
 local TAR_END = string.rep("\0", 1024)
@@ -731,6 +735,31 @@ do
     expect(client.requests[1].opts.referer == "https://weread.qq.com/web/reader/B1k4",
         "chapter resources were requested without the chapter referer")
 
+    local long_prefix = string.rep("a", 155)
+    local long_name = string.rep("b", 96) .. ".png"
+    local ustar = tar_entry("pic.png", PNG .. "first", nil, "first")
+        .. tar_entry("pic.png", PNG .. "second", nil, "second ")
+        .. tar_entry(long_name, PNG .. "long", nil, long_prefix)
+        .. tar_entry("plain.png", PNG .. "plain", nil, "")
+        .. tar_entry("gnu.png", PNG .. "gnu", nil, "not-a-prefix", "ustar ") .. TAR_END
+    local ustar_client = new_client({ binary = { ["https://res.test/ustar.tar"] = ustar } })
+    local ustar_assets, ustar_map = Content.download_chapter_assets(ustar_client, { book_id = "B1" },
+        { chapterUid = 9, tar = "https://res.test/ustar.tar" }, {})
+    local ustar_data = {}
+    for _, asset in ipairs(ustar_assets) do ustar_data["../" .. asset.href] = asset.data end
+    for source, payload in pairs({ ["first/pic.png"] = "first", ["second /pic.png"] = "second",
+        [long_prefix .. "/" .. long_name] = "long", ["plain.png"] = "plain", ["gnu.png"] = "gnu" }) do
+        local rewritten = Content.rewrite_image_sources('<img src="' .. source .. '"/>', ustar_map)
+        expect(ustar_data[rewritten:match('src="(.-)"')] == PNG .. payload,
+            "USTAR source path did not select its own image: " .. source)
+    end
+    expect(Content.rewrite_image_sources('<img src="pic.png"/>', ustar_map) == '<img src="pic.png"/>',
+        "USTAR prefixed entries incorrectly claimed a bare source path")
+    expect(ustar_map.paths[long_prefix .. "/" .. long_name],
+        "full-width USTAR prefix or name was truncated")
+    expect(ustar_map.paths["gnu.png"] and not ustar_map.paths["not-a-prefix/gnu.png"],
+        "old GNU header extension bytes were interpreted as a POSIX prefix")
+
     -- Root entries must win over ambiguous basename fallback. A generated
     -- suffix must never steal an actual source name, in either archive order.
     for _, reverse in ipairs({ false, true }) do
@@ -785,6 +814,18 @@ do
     expect(read_file(workspace.incoming_dir .. "/chapter-c1.tar") == nil, "downloaded archive was not removed")
     expect(client.requests[1].opts.max_bytes and type(client.requests[1].opts.timeout) == "table",
         "archive download was not bounded")
+
+    local prefixed, prefixed_map = fetch(tar_entry("pic.png", PNG .. "first", nil, "first")
+        .. tar_entry("pic.png", PNG .. "second", nil, "second")
+        .. tar_entry("plain.png", PNG .. "plain", nil, "")
+        .. tar_entry("gnu.png", PNG .. "gnu", nil, "not-a-prefix", "ustar ") .. TAR_END, "ustar")
+    expect(#prefixed == 4 and read_file(prefixed[1].path) == PNG .. "first"
+        and read_file(prefixed[2].path) == PNG .. "second", "USTAR bytes changed during streaming")
+    expect(Content.rewrite_image_sources('<img src="first/pic.png"/><img src="second/pic.png"/><img src="pic.png"/>', prefixed_map)
+        == '<img src="../images/pic.png"/><img src="../images/pic-2.png"/><img src="pic.png"/>',
+        "streamed USTAR source paths were conflated or claimed a bare source path")
+    expect(prefixed_map.paths["plain.png"] and prefixed_map.paths["gnu.png"]
+        and not prefixed_map.paths["not-a-prefix/gnu.png"], "streamed TAR format detection changed legacy names")
 
     -- A TAR that ends without the zero trailer is still accepted.
     local open_ended = fetch(tar_entry("x.jpg", JPEG .. "z"), "c2")

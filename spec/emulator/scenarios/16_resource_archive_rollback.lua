@@ -70,6 +70,32 @@ return function(H)
                 client, { book_id = "synthetic" }, chapter, names, workspace)
             H.equal(covers[1].href, "images/Cover-jpg-2.png",
                 "MIME extension mismatch cannot loop within the reserved cover prefix")
+
+            -- Python's standard USTAR writer splits these long source paths
+            -- across the name and prefix fields. Exercise both real readers.
+            chapter.tar = resource_url .. "ustar.tar"
+            local streamed, stream_map = Content.download_chapter_assets_to_files(
+                client, { book_id = "synthetic" }, chapter, {}, workspace)
+            local memory, memory_map = Content.download_chapter_assets(
+                client, { book_id = "synthetic" }, chapter, {})
+            H.equal(#streamed, 2, "USTAR streaming retains both images")
+            H.equal(#memory, 2, "USTAR in-memory parsing retains both images")
+            for i, letter in ipairs({ "a", "b" }) do
+                local html = '<img src="section-' .. string.rep(letter, 96) .. '/pic.png"/>'
+                H.equal(Content.rewrite_image_sources(html, stream_map),
+                    '<img src="../' .. streamed[i].href .. '"/>', "USTAR streaming source identity " .. i)
+                H.equal(Content.rewrite_image_sources(html, memory_map),
+                    '<img src="../' .. memory[i].href .. '"/>', "USTAR in-memory source identity " .. i)
+                local image = assert(io.open(streamed[i].path, "rb"))
+                local bytes = image:read("*a")
+                image:close()
+                H.equal(bytes, png .. letter, "USTAR streaming image bytes " .. i)
+                H.equal(memory[i].data, bytes, "USTAR readers agree on bytes " .. i)
+            end
+            for _, mapping in ipairs({ stream_map, memory_map }) do
+                H.equal(Content.rewrite_image_sources('<img src="pic.png"/>', mapping),
+                    '<img src="pic.png"/>', "USTAR prefixes do not claim a bare source path")
+            end
         end)
     end)
 end
