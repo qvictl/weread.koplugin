@@ -67,6 +67,13 @@ class MockTests(unittest.TestCase):
             for path, letter in zip(paths, (b"a", b"b")):
                 self.assertEqual(archive.extractfile(path).read(), b"\x89PNG\r\n\x1a\n" + letter)
             self.assertEqual(archive.extractfile(paths[0] + " ").read(), b"\x89PNG\r\n\x1a\nspaced-name")
+        with tarfile.open(fileobj=io.BytesIO(download("uri"))) as archive:
+            paths = ["chapter one/pic.png", "chapter two/pic.png", "first/pic.png ", "second/pic.png ",
+                     "literal/pic.png%20", "literal/pic.png%2520", "reserved/q?#.png", "utf8/插图.png",
+                     "plus/a+b.png", "percent/100%.png", "amp/a&b.png"]
+            self.assertEqual(archive.getnames(), paths)
+            for i, path in enumerate(paths, 1):
+                self.assertEqual(archive.extractfile(path).read(), b"\x89PNG\r\n\x1a\n" + str(i).encode())
         with self.assertRaises(tarfile.ReadError):
             with tarfile.open(fileobj=io.BytesIO(download("initial"))) as archive:
                 archive.getmembers()
