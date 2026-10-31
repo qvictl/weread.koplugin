@@ -164,7 +164,8 @@ expect(type(tar_download_opts) == "table" and type(tar_download_opts.timeout) ==
     "chapter resource download has no bounded total timeout")
 expect(assets[1].data == nil and type(assets[1].path) == "string",
     "extracted image remained resident in an asset data field")
-expect(src_map["image-001.jpg"] == "../images/image-001.jpg",
+expect(Content.rewrite_image_sources('<img src="image-001.jpg"/>', src_map)
+    == '<img src="../images/image-001.jpg"/>',
     "file-backed image map was wrong")
 expect(after_kb - before_kb < 1024,
     "file-backed extraction retained resource-sized Lua memory")
@@ -189,7 +190,8 @@ local zip_image = assert(io.open(zip_assets[1].path, "rb"))
 expect(zip_image:read(3) == "\255\216\255",
     "ZIP image was not staged on disk")
 zip_image:close()
-expect(zip_src_map["page-1.jpeg"] == "../" .. zip_assets[1].href,
+expect(Content.rewrite_image_sources('<img src="page-1.jpeg"/>', zip_src_map)
+    == '<img src="../' .. zip_assets[1].href .. '"/>',
     "ZIP image map was wrong")
 expect(io.open(workspace.incoming_dir .. "/chapter-1.tar", "rb") == nil,
     "source ZIP was not removed after extraction")

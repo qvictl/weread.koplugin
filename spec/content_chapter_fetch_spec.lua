@@ -716,10 +716,38 @@ do
             and assets[2].data == PNG .. "b", "duplicate TAR image names were not made unique")
     expect(assets[3].href == "images/cover-2.jpg" and assets[3].media_type == "image/jpeg",
         "the reserved cover name was handed to a chapter image: " .. tostring(assets[3].href))
-    expect(src_map["pic.png"] == "../images/pic-2.png" and src_map["pic-2.png"] == "../images/pic-2.png"
-            and src_map["cover.jpg"] == "../images/cover-2.jpg", "TAR source map was not built")
+    expect(Content.rewrite_image_sources('<img src="cover.jpg"/><img src="unmatched/cover.jpg"/>', src_map)
+            == '<img src="../images/cover-2.jpg"/><img src="../images/cover-2.jpg"/>',
+        "unique basename fallback was not retained")
+    expect(Content.rewrite_image_sources('<img src="pic.png"/><img src="unmatched/pic.png"/>', src_map)
+            == '<img src="pic.png"/><img src="unmatched/pic.png"/>',
+        "an ambiguous basename was silently mapped to an unrelated image")
+    expect(Content.rewrite_image_sources('<img src="./img/pic.png?x=1&amp;y=2"/><img src=\'other/pic.png#f\'/>', src_map)
+            == '<img src="../images/pic.png"/><img src=\'../images/pic-2.png\'/>',
+        "exact source paths with dot prefix, query or fragment were not mapped")
+    expect(Content.rewrite_image_sources('<img src="img/pic.png"/><img src="other/pic.png"/>', src_map)
+        == '<img src="../images/pic.png"/><img src="../images/pic-2.png"/>',
+        "distinct archive paths were aliased to the last basename match")
     expect(client.requests[1].opts.referer == "https://weread.qq.com/web/reader/B1k4",
         "chapter resources were requested without the chapter referer")
+
+    -- Root entries must win over ambiguous basename fallback. A generated
+    -- suffix must never steal an actual source name, in either archive order.
+    for _, reverse in ipairs({ false, true }) do
+        local entries = { tar_entry("./dir/pic.png", PNG .. "nested"),
+            tar_entry("pic.png", PNG .. "root"), tar_entry("pic-2.png", PNG .. "suffix") }
+        if reverse then entries[1], entries[3] = entries[3], entries[1] end
+        local collision_client = new_client({ binary = { ["https://res.test/names.tar"] = table.concat(entries) .. TAR_END } })
+        local mapped, mapping = Content.download_chapter_assets(collision_client, { book_id = "B1" },
+            { chapterUid = 8, tar = "https://res.test/names.tar" }, {})
+        local data_by_href = {}
+        for _, asset in ipairs(mapped) do data_by_href["../" .. asset.href] = asset.data end
+        for source, payload in pairs({ ["dir/pic.png"] = "nested", ["pic.png"] = "root", ["pic-2.png"] = "suffix" }) do
+            local rewritten = Content.rewrite_image_sources('<img src="' .. source .. '"/>', mapping)
+            expect(data_by_href[rewritten:match('src="(.-)"')] == PNG .. payload,
+                "source identity changed with root-name or generated-suffix collision: " .. source)
+        end
+    end
 
     Content.download_chapter_assets(client, { book_id = "B1" }, { chapterUid = 5, tar = "/tar/2" }, used)
     expect(client.requests[2].url == "https://weread.qq.com/tar/2", "site-relative TAR URL was not resolved")
@@ -751,7 +779,9 @@ do
     expect(#assets == 2 and assets[2].href == "images/fig-2.png" and assets[2].store == true
             and assets[2].size == #PNG + 4 and read_file(assets[2].path) == PNG .. "4567",
         "TAR images were not streamed to unique files")
-    expect(src_map["fig.png"] == "../images/fig-2.png", "TAR source map was not built for file assets")
+    expect(Content.rewrite_image_sources('<img src="a/fig.png"/><img src="b/fig.png"/><img src="fig.png"/>', src_map)
+            == '<img src="../images/fig.png"/><img src="../images/fig-2.png"/><img src="fig.png"/>',
+        "streamed TAR source paths were conflated or an ambiguous basename was guessed")
     expect(read_file(workspace.incoming_dir .. "/chapter-c1.tar") == nil, "downloaded archive was not removed")
     expect(client.requests[1].opts.max_bytes and type(client.requests[1].opts.timeout) == "table",
         "archive download was not bounded")
@@ -825,7 +855,9 @@ do
     expect(#zip_assets == 2 and zip_assets[2].href == "images/p1-2.jpg"
             and read_file(zip_assets[2].path) == JPEG .. "2" and zip_script.closed,
         "ZIP images were not extracted to unique files")
-    expect(zip_map["p1.jpg"] == "../images/p1-2.jpg", "ZIP source map was not built")
+    expect(Content.rewrite_image_sources('<img src="pages/p1.jpg"/><img src="other/p1.jpg"/><img src="p1.jpg"/>', zip_map)
+            == '<img src="../images/p1.jpg"/><img src="../images/p1-2.jpg"/><img src="p1.jpg"/>',
+        "ZIP source paths were conflated or an ambiguous basename was guessed")
     -- Without an asset directory the images stay in memory.
     zip_script.closed = false
     files["https://res.test/z2.tar"] = "PK\3\4zipdata"
