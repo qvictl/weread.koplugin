@@ -193,6 +193,17 @@ local function trim_nulls(value)
     return tostring(value or ""):gsub("%z.*$", ""):gsub("%s+$", "")
 end
 
+local function tar_entry_name(header)
+    local name = header:sub(1, 100):gsub("%z.*$", "")
+    -- POSIX USTAR splits long paths into prefix/name. Old GNU TAR uses
+    -- this header area for other metadata, so require the POSIX magic.
+    if name ~= "" and header:sub(258, 263) == "ustar\0" then
+        local prefix = header:sub(346, 500):gsub("%z.*$", "")
+        if prefix ~= "" then return prefix .. "/" .. name end
+    end
+    return name
+end
+
 local function tar_entries(data)
     local entries = {}
     local offset = 1
@@ -201,7 +212,7 @@ local function tar_entries(data)
         if header:match("^%z+$") then
             break
         end
-        local name = trim_nulls(header:sub(1, 100))
+        local name = tar_entry_name(header)
         local size_text = trim_nulls(header:sub(125, 136)):gsub("%s", "")
         local size = tonumber(size_text, 8) or 0
         local typeflag = header:sub(157, 157)
@@ -1535,7 +1546,7 @@ local function extract_tar_images(tar_path, asset_dir, used_names)
             if not header then break end
             if #header ~= 512 then error("truncated TAR header") end
             if header:match("^%z+$") then break end
-            local name = trim_nulls(header:sub(1, 100))
+            local name = tar_entry_name(header)
             local size_text = trim_nulls(header:sub(125, 136)):gsub("%s", "")
             local size = tonumber(size_text, 8)
             if not size or size < 0 or size > MAX_TAR_ENTRY_BYTES then

@@ -60,10 +60,10 @@ def resource_archive(stage):
     """Small synthetic resources for real-client extraction regressions."""
     signature = b"\x89PNG\r\n\x1a\n"
 
-    def entry(name, data):
+    def entry(name, data, archive_format=tarfile.DEFAULT_FORMAT):
         header = tarfile.TarInfo(name)
         header.size = len(data)
-        return header.tobuf() + data + b"\0" * (-len(data) % 512)
+        return header.tobuf(format=archive_format) + data + b"\0" * (-len(data) % 512)
 
     complete = entry("first/existing.png", signature + b"complete")
     partial = entry("second/existing.png", signature + b"x" * (128 * 1024))
@@ -76,6 +76,11 @@ def resource_archive(stage):
                         for i in range(1, 513)) + b"\0" * 1024
     if stage == "cover":
         return entry("Cover.jpg", signature + b"mismatched extension") + b"\0" * 1024
+    if stage == "ustar":
+        return b"".join(entry("section-" + letter * 96 + "/pic.png", signature + letter.encode(),
+                              tarfile.USTAR_FORMAT) for letter in ("a", "b")) \
+            + entry("section-" + "a" * 96 + "/pic.png ", signature + b"spaced-name", tarfile.USTAR_FORMAT) \
+            + b"\0" * 1024
     raise ValueError("unknown synthetic resource archive")
 
 
