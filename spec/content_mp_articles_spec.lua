@@ -275,7 +275,10 @@ do
         and not read_file(root .. "/MissingLater.html"), "missing-body failure diagnostics changed")
 
     -- Bodies that become empty after cleaning are not usable candidates either.
-    for index, contents in ipairs({ "<script>void(0)</script>", "<style>p{}</style>", " \n\t " }) do
+    for index, contents in ipairs({ "<script>void(0)</script>", "<style>p{}</style>", " \n\t ",
+        "<p> </p>", "<section>&nbsp;</section>",
+        "<div><p><span>&#160;</span></p></div>", "<p><br/></p>",
+    }) do
         local cleaned_empty = '<div id="js_content">' .. contents .. '</div><script>'
         expect(Content.extract_mp_body(cleaned_empty) == nil, "cleaned-empty body was accepted")
         local cleaned = mp_client({ mp = function(id)
@@ -287,6 +290,25 @@ do
             "cleaned-empty body blocked the next existing candidate")
         expect(has(read_file(clean_path), "Body text"), "cleaned-empty article was published")
     end
+
+    expect(Content.extract_mp_body('<div id="js_content"><p><img src="image.png"/></p></div><script>')
+        == '<p><img src="image.png"/></p>', "blank-block cleanup discarded a meaningful image")
+
+    -- Failed response bytes must not survive until the next network request.
+    -- Warm LuaJIT's reusable string buffer before the heap baseline.
+    assert(#string.rep("w", 4 * 1024 * 1024) == 4 * 1024 * 1024)
+    collectgarbage("collect")
+    local before_kb = collectgarbage("count")
+    local retained_kb
+    local released = mp_client({ mp = function(id)
+        if id == "R-large" then return string.rep("x", 4 * 1024 * 1024) end
+        collectgarbage("collect")
+        retained_kb = collectgarbage("count") - before_kb
+        return ARTICLE_HTML
+    end })
+    Content.fetch_mp_article_html(released, settings_with({}), book,
+        { reviewId = "R-large", originalId = "R-content", title = "Released" })
+    expect(retained_kb < 1024, "previous failed response remains live during the next download: " .. retained_kb)
 
     -- Every candidate blank: renew the cookie, retry without MP auth headers.
     local renewed = mp_client({ mp = function(id, after_renew)

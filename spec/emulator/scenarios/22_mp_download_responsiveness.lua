@@ -133,7 +133,7 @@ return function(H)
     end)
     H.step("bodyless first candidate falls back and publishes matching assets responsively", function()
         article.reviewId, article.originalId = "mock-mp-bodyless", "mock-mp-article"
-        article.reviewIds = { "mock-mp-empty-body" }
+        article.reviewIds = { "mock-mp-empty-body", "mock-mp-oversized" }
         local before = H.mock_state().started_counts
         H.mock_control({ match = "/web/mp/content", delay = 1.5, times = 0 })
         local running, last, max_gap = true, H.now_ms(), 0
@@ -150,8 +150,8 @@ return function(H)
         local html = read(path)
         H.check(html:find("Synthetic article body.", 1, true), "later candidate body published")
         local after = H.mock_state().started_counts
-        H.equal((after["/web/mp/content"] or 0) - (before["/web/mp/content"] or 0), 3,
-            "bodyless and cleaned-empty candidates followed by valid content")
+        H.equal((after["/web/mp/content"] or 0) - (before["/web/mp/content"] or 0), 4,
+            "bodyless, script/blank-block and oversized candidates followed by valid content")
         H.equal(after["/web/login/renewal"] or 0, before["/web/login/renewal"] or 0,
             "bodyless candidate does not trigger new authentication retries")
         local image = html:match('src="([^" ]+%.png)"')

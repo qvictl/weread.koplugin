@@ -11,6 +11,7 @@ local reset_count = 0
 local requests = {}
 local responses = {}
 local logs = {}
+local sink_targets = {}
 
 package.preload["ltn12"] = function()
     return {
@@ -43,6 +44,7 @@ package.preload["socketutil"] = function()
             reset_count = reset_count + 1
         end,
         table_sink = function(target)
+            sink_targets[#sink_targets + 1] = target
             return function(chunk)
                 if chunk then target[#target + 1] = chunk end
                 return 1
@@ -473,6 +475,26 @@ do
         "timed-out download left its partial file")
     expect(timeout_calls[#timeout_calls][1] == 20 and timeout_calls[#timeout_calls][2] == 120,
         "file download timeout was not applied to the socket")
+end
+
+-- MP article HTML has a fixed 8 MiB collection budget, independent of headers.
+do
+    local chunk = string.rep("x", 1024 * 1024)
+    responses[#responses + 1] = { code = 200, chunks = { chunk, chunk, chunk, chunk, chunk, chunk, chunk, chunk } }
+    local html, meta = client:get_mp_content("at-limit")
+    expect(#html == 8 * 1024 * 1024 and meta.length == #html, "exact HTML limit was rejected")
+    responses[#responses + 1] = { code = 200,
+        chunks = { chunk, chunk, chunk, chunk, chunk, chunk, chunk, chunk, "x" },
+        headers = { ["content-length"] = "1" } }
+    local resets = reset_count
+    local bounded_ok, bounded_err = pcall(client.get_mp_content, client, "over-limit")
+    expect(not bounded_ok and tostring(bounded_err):find("response exceeds size limit", 1, true),
+        "oversize MP HTML was retained or returned as a successful partial response")
+    expect(reset_count == resets + 1, "oversize response did not reset the socket timeout")
+    expect(next(sink_targets[#sink_targets]) == nil, "oversize response retained partial chunks")
+    expect(requests[#requests].max_response_bytes == nil, "internal size limit leaked to transport options")
+    responses[#responses + 1] = { code = 200, body = "small next response" }
+    expect(client:get_mp_content("next") == "small next response", "oversize request polluted the next request")
 end
 
 print(("client_spec: %d checks"):format(checks))

@@ -2170,6 +2170,8 @@ function Content.parse_mp_articles(data)
     return articles
 end
 
+local strip_blank_mp_blocks
+
 function Content.extract_mp_body(html)
     html = tostring(html or "")
     local body = html:match('<div[^>]*id="js_content"[^>]*>(.-)</div>%s*<script')
@@ -2187,6 +2189,7 @@ function Content.extract_mp_body(html)
     body = body:gsub(' src=""', '')
     body = body:gsub(" src=''", "")
     body = body:gsub("data%-src=", "src=")
+    body = strip_blank_mp_blocks(body)
     if body:match("^%s*$") then return nil end
     return body
 end
@@ -2285,7 +2288,7 @@ function Content.strip_mp_images(html)
     return html
 end
 
-local function strip_blank_mp_blocks(html)
+strip_blank_mp_blocks = function(html)
     html = tostring(html or "")
     html = html:gsub("<mp%-common%-profile[^>]->.-</mp%-common%-profile>", "")
     html = html:gsub("<mp%-style%-type[^>]->.-</mp%-style%-type>", "")
@@ -2551,7 +2554,8 @@ function Content.fetch_mp_article_html(client, settings, book, article, opts)
     add_candidate(article.originalId)
     add_candidate(tostring(article.reviewId or ""):match("^MP_WXS_%d+_(.+)$"))
 
-    local html, meta, used_review_id, body
+    local meta, used_review_id, body
+    local saw_nonempty_response = false
     local attempts = {}
     local function fetch_candidates(prefix, request_opts)
         for candidate_index, review_id in ipairs(candidate_ids) do
@@ -2567,8 +2571,13 @@ function Content.fetch_mp_article_html(client, settings, book, article, opts)
                     prefix .. tostring(candidate_index) .. ":" .. tostring(candidate_meta and candidate_meta.length or #(candidate_html or ""))
                 )
                 if candidate_html and not candidate_html:match("^%s*$") then
-                    html = candidate_html
-                    meta = candidate_meta
+                    saw_nonempty_response = true
+                    -- Retain diagnostics, not a whole failed response while the
+                    -- next candidate is downloaded into its own bounded buffer.
+                    meta = {
+                        length = candidate_meta and candidate_meta.length or #candidate_html,
+                        content_type = candidate_meta and candidate_meta.content_type,
+                    }
                     used_review_id = review_id
                     -- A login/error page can be nonempty. Only stop once an
                     -- existing candidate actually supplies an article body.
@@ -2584,7 +2593,7 @@ function Content.fetch_mp_article_html(client, settings, book, article, opts)
     end
 
     fetch_candidates("")
-    if not html or html:match("^%s*$") then
+    if not saw_nonempty_response then
         logger.info("MP content empty, renewing cookie before retry")
         local renew_ok = pcall(function()
             return client:renew_cookie()
@@ -2596,27 +2605,30 @@ function Content.fetch_mp_article_html(client, settings, book, article, opts)
     end
 
     local source_url = tostring(article.sourceUrl or "")
-    if (not html or html:match("^%s*$")) and source_url:match("^https?://mp%.weixin%.qq%.com/") then
+    if not saw_nonempty_response and source_url:match("^https?://mp%.weixin%.qq%.com/") then
         local ok, source_html, source_meta = pcall(function()
             return client:get_public_text(source_url)
         end)
         if ok and source_html and not source_html:match("^%s*$") then
-            html = source_html
-            meta = source_meta
+            saw_nonempty_response = true
+            body = Content.extract_mp_body(source_html)
+            meta = {
+                length = source_meta and source_meta.length or #source_html,
+                content_type = source_meta and source_meta.content_type,
+            }
             used_review_id = "source_url"
         else
             table.insert(attempts, "source_url:error")
         end
     end
-    body = body or Content.extract_mp_body(html)
     if not body then
-        local empty_response = not html or html:match("^%s*$") ~= nil
+        local empty_response = not saw_nonempty_response
         logger.warn(
             "could not extract MP article body:",
             "reason=", empty_response and "empty_response" or "missing_body",
             "candidate_count=", tostring(#candidate_ids),
             "used_candidate=", used_review_id and "yes" or "no",
-            "html_length=", tostring(meta and meta.length or #(html or "")),
+            "html_length=", tostring(meta and meta.length or 0),
             "content_type=", tostring(meta and meta.content_type or ""),
             "attempts=", table.concat(attempts, ","),
             "has_source_url=", source_url ~= "" and "yes" or "no"
