@@ -1317,14 +1317,38 @@ function Content.save_book_epub(settings, book, chapters, chapter_bodies, suffix
     return path
 end
 
+local function image_source_path(path)
+    return (path:gsub("^%./", ""))
+end
+
+local function add_image_source(src_map, source, href)
+    local path = image_source_path(source)
+    local stem = basename(path)
+    src_map.paths[path] = href
+    -- Basename fallback is safe only when the archive has one such name.
+    -- Output filenames are not source identities: their collision suffixes
+    -- can also be real filenames belonging to a different archive entry.
+    if src_map.basenames[stem] == nil then
+        src_map.basenames[stem] = href
+    elseif src_map.basenames[stem] ~= href then
+        src_map.basenames[stem] = false
+    end
+end
+
 function Content.rewrite_image_sources(xhtml, src_map)
     if not src_map or not next(src_map) then
         return xhtml
     end
     local function replace_src(quote, src)
         local clean = tostring(src or ""):gsub("&amp;", "&")
-        local key = basename(clean:match("^[^%?#]+") or clean)
-        local href = src_map[key]
+        local path = image_source_path(clean:match("^[^%?#]+") or clean)
+        local href
+        if type(src_map.paths) == "table" and type(src_map.basenames) == "table" then
+            href = src_map.paths[path] or src_map.basenames[basename(path)]
+        else
+            -- Keep compatibility with callers supplying the old flat map.
+            href = src_map[basename(path)]
+        end
         if href then
             return "src=" .. quote .. href .. quote
         end
@@ -1412,21 +1436,19 @@ function Content.download_chapter_assets(client, book, chapter, used_names)
     end
     local raw = client:get_binary(tar_url, { referer = referer, timeout = FILE_TIMEOUT })
     local assets = {}
-    local src_map = {}
+    local src_map = { paths = {}, basenames = {} }
     for entry_index, entry in ipairs(tar_entries(raw)) do
         local ext, media_type = media_type_for(entry.data)
         if media_type:match("^image/") then
             local stem = basename(entry.name)
             local filename = unique_asset_name(used_names, stem, ext)
             local href = "images/" .. filename
-            local epub_relative = "../" .. href
             table.insert(assets, {
                 href = href,
                 media_type = media_type,
                 data = entry.data,
             })
-            src_map[stem] = epub_relative
-            src_map[filename] = epub_relative
+            add_image_source(src_map, entry.name, "../" .. href)
         end
     end
     return assets, src_map
@@ -1450,7 +1472,7 @@ local function extract_zip_images(archive_path, asset_dir, used_names)
     local Archiver = require("ffi/archiver")
     local archive = Archiver.Reader:new()
     local assets = {}
-    local src_map = {}
+    local src_map = { paths = {}, basenames = {} }
     local paths, names = {}, {}
     local output
     local ok, err = xpcall(function()
@@ -1486,9 +1508,7 @@ local function extract_zip_images(archive_path, asset_dir, used_names)
                         asset.data = data
                     end
                     table.insert(assets, asset)
-                    local epub_relative = "../" .. href
-                    src_map[stem] = epub_relative
-                    src_map[filename] = epub_relative
+                    add_image_source(src_map, entry.path, "../" .. href)
                 end
             end
         end
@@ -1506,7 +1526,7 @@ local function extract_tar_images(tar_path, asset_dir, used_names)
     local input, open_err = io.open(tar_path, "rb")
     if not input then error(open_err or "could not open chapter resource archive") end
     local assets = {}
-    local src_map = {}
+    local src_map = { paths = {}, basenames = {} }
     local paths, names = {}, {}
     local output
     local ok, err = xpcall(function()
@@ -1557,10 +1577,7 @@ local function extract_tar_images(tar_path, asset_dir, used_names)
                     size = size,
                     store = true,
                 })
-                local epub_relative = "../" .. href
-                local stem = basename(name)
-                src_map[stem] = epub_relative
-                src_map[filename] = epub_relative
+                add_image_source(src_map, name, "../" .. href)
             end
             local padding = (512 - size % 512) % 512
             if padding > 0 then

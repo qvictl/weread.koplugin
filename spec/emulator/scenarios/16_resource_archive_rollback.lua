@@ -1,7 +1,8 @@
 -- @title Resource archive failure removes partial images and can be retried
 -- @timeout 30
 -- Real Client downloads from the local mock, filesystem and streaming TAR
--- reader. Other chapters' images survive failed extraction and retries.
+-- reader. Other chapters' images survive failed extraction and retries;
+-- colliding source paths keep pointing to their own image bytes.
 return function(H)
     H.wait_until("weread plugin attached", H.plugin, 20)
     H.step("failed chapter resource extraction rolls back and retries cleanly", function()
@@ -46,7 +47,7 @@ return function(H)
             H.check(names.__next_asset_suffix and names.__next_asset_suffix["existing.png"] == 4,
                 "actual worker serialization preserves the next suffix cursor")
             local started = os.clock()
-            local many = Content.download_chapter_assets_to_files(
+            local many, source_map = Content.download_chapter_assets_to_files(
                 client, { book_id = "synthetic" }, chapter, names, workspace)
             H.metric("colliding_asset_extract_cpu_ms", (os.clock() - started) * 1000)
             H.equal(#many, 512, "bulk chapter retains every colliding image")
@@ -56,7 +57,12 @@ return function(H)
                 local content = image:read("*a")
                 image:close()
                 H.equal(content, png .. tostring(i), "distinct image bytes " .. i)
+                local html = '<img src="directory-' .. i .. '/existing.png"/>'
+                H.equal(Content.rewrite_image_sources(html, source_map),
+                    '<img src="../' .. asset.href .. '"/>', "source path selects its own image " .. i)
             end
+            H.equal(Content.rewrite_image_sources('<img src="existing.png"/>', source_map),
+                '<img src="existing.png"/>', "ambiguous basename is not silently redirected")
             H.equal(lfs.attributes(workspace.asset_dir .. "/existing.png", "size"), #png + #"existing",
                 "bulk extraction preserves the previous chapter's image")
             chapter.tar = resource_url .. "cover.tar"
