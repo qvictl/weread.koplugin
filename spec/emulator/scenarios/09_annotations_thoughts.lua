@@ -230,55 +230,86 @@ return function(H)
         local Event = require("ui/event")
         local time = require("ui/time")
         local Geom = require("ui/geometry")
+        local ButtonDialog = require("ui/widget/buttondialog")
+        local BD = require("ui/bidi")
+        local gettext = require("gettext")
         local ThoughtPopup = require("weread.ui.thought_popup")
-        local original_dir = G_reader_settings:readSetting("screenshot_dir")
-        for _, position in ipairs({ "center", "bottom" }) do
+        local function with_popup(position, action)
             local popup
             local screenshot_dir = H.env.evidence .. "/screenshot-" .. position
-            H.call(function()
-                G_reader_settings:saveSetting("screenshot_dir", screenshot_dir)
-                popup = ThoughtPopup.show{
-                    pages = { { content = string.rep(THOUGHT .. "。", 100), author = "Synthetic reader" } },
-                    position = position,
-                }
-                UIManager:forceRePaint()
+            local original_dir = H.call(function() return G_reader_settings:readSetting("screenshot_dir") end)
+            local function is_confirmation(widget)
+                if getmetatable(widget) ~= ButtonDialog or not widget.modal then return false end
+                for _, path in ipairs(H.find_files(screenshot_dir, "%.png$")) do
+                    local title = gettext("Screenshot saved to:") .. "\n\n" .. BD.filepath(path) .. "\n"
+                    if widget.title == title then return true end
+                end
+                return false
+            end
+            local ok, err = pcall(function()
+                H.call(function()
+                    G_reader_settings:saveSetting("screenshot_dir", screenshot_dir)
+                    popup = ThoughtPopup.show{
+                        pages = { { content = string.rep(THOUGHT .. "。", 100), author = "Synthetic reader" } },
+                        position = position,
+                    }
+                    UIManager:forceRePaint()
+                end)
+                H.check(popup._painted, "screenshot target popup painted: " .. position)
+                action(popup, screenshot_dir, is_confirmation)
             end)
-            H.check(popup._painted, "screenshot target popup painted: " .. position)
-            H.sleep(1.1) -- Screenshoter rate-limits gestures to one per second.
             H.call(function()
-                local screen = H.screen()
-                local w, h = screen:getWidth(), screen:getHeight()
-                local box = popup.container.dimen
-                -- Start just inside the bottom-left corner of the painted popup.
-                -- A long swipe towards the opposite screen corner reaches the
-                -- global screenshot range, including for the centered layout.
-                local x, y = box.x + 2, box.y + box.h - 2
-                local distance = math.sqrt((w - 1 - x)^2 + (y - 1)^2)
-                H.check(distance >= math.sqrt(w^2 + h^2) - screen:scaleBySize(200),
-                    "synthetic diagonal reaches the native screenshot distance")
-                UIManager:sendEvent(Event:new("Gesture", {
-                    ges = "swipe", direction = "northeast", distance = distance, time = time.now(),
-                    pos = Geom:new{ x = x, y = y, w = 1, h = 1 },
-                }))
+                if original_dir == nil then
+                    G_reader_settings:delSetting("screenshot_dir")
+                else
+                    G_reader_settings:saveSetting("screenshot_dir", original_dir)
+                end
+                -- Only close widgets this scope owns, never an unrelated top window.
+                for _, widget in ipairs(H.windows()) do
+                    if widget == popup or is_confirmation(widget) then UIManager:close(widget) end
+                end
             end)
-            H.wait_until("native screenshot saved: " .. position, function()
-                return #H.find_files(screenshot_dir, "%.png$") > 0
-            end, 5)
-            H.check(H.call(function() return UIManager:isWidgetShown(popup) end),
-                "screenshot leaves the thought popup open: " .. position)
-            H.check(H.top_window() ~= popup, "native screenshot confirmation is shown")
-            H.call(function()
-                UIManager:close(H.top_window()) -- only the native screenshot confirmation
-                UIManager:close(popup)
+            if not ok then error(err, 0) end
+        end
+        for _, position in ipairs({ "center", "bottom" }) do
+            with_popup(position, function(popup, screenshot_dir, is_confirmation)
+                H.wait_until("native screenshot rate limiter ready", function()
+                    local range = H.reader().screenshot.ges_events.SwipeDiagonal[1]
+                    return not range.rate or time.now() - (range.last_time or 0) > time.s(1 / range.rate)
+                end, 5)
+                H.call(function()
+                    local screen = H.screen()
+                    local w, h = screen:getWidth(), screen:getHeight()
+                    local box = popup.container.dimen
+                    local x, y = box.x + 2, box.y + box.h - 2
+                    local distance = math.sqrt((w - 1 - x)^2 + (y - 1)^2)
+                    H.check(distance >= math.sqrt(w^2 + h^2) - screen:scaleBySize(200),
+                        "synthetic diagonal reaches the native screenshot distance")
+                    UIManager:sendEvent(Event:new("Gesture", {
+                        ges = "swipe", direction = "northeast", distance = distance, time = time.now(),
+                        pos = Geom:new{ x = x, y = y, w = 1, h = 1 },
+                    }))
+                end)
+                H.wait_until("native screenshot saved: " .. position, function()
+                    return #H.find_files(screenshot_dir, "%.png$") > 0
+                end, 5)
+                H.check(H.call(function() return UIManager:isWidgetShown(popup) end),
+                    "screenshot leaves the thought popup open: " .. position)
+                H.check(H.call(function() return is_confirmation(H.top_window()) end),
+                    "native screenshot ButtonDialog names the evidence directory")
             end)
         end
-        H.call(function()
-            if original_dir == nil then
-                G_reader_settings:delSetting("screenshot_dir")
-            else
-                G_reader_settings:saveSetting("screenshot_dir", original_dir)
-            end
+        local original_dir = H.call(function() return G_reader_settings:readSetting("screenshot_dir") end)
+        local previous = H.call(function() return H.top_window() end)
+        local ok, err = pcall(function()
+            with_popup("center", function() error("injected screenshot assertion failure", 0) end)
         end)
+        H.check(not ok and tostring(err):find("injected screenshot assertion failure", 1, true),
+            "screenshot scope rethrows its original failure")
+        H.equal(H.call(function() return G_reader_settings:readSetting("screenshot_dir") end), original_dir,
+            "failed screenshot restores the original directory")
+        H.equal(H.call(function() return H.top_window() end), previous,
+            "failed screenshot closes only its owned popup")
     end)
 
 end

@@ -61,3 +61,9 @@ Runtime UIManager SHA-256:
 `4d671b1251c6a9df4848751b0453dddd2892ae088287c03d1bd15f7c81aac0fe`.
 
 No upstream contact, account access or API behavior changes are involved.
+
+Review follow-up: the scenario now waits on the actual native gesture range's
+`last_time`/`rate`, identifies the exact modal ButtonDialog and its bidi-formatted
+PNG path, and restores the original screenshot setting plus owned windows in a
+protected cleanup scope. An injected failure verifies cleanup and rethrow. The
+updated eight-step scenario passed in 7.6 seconds; production code is unchanged.
