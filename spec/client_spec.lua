@@ -497,4 +497,25 @@ do
     expect(client:get_mp_content("next") == "small next response", "oversize request polluted the next request")
 end
 
+
+-- Public-source fallback uses the same HTML collection budget as MP candidates.
+do
+    local chunk = string.rep("y", 1024 * 1024)
+    responses[#responses + 1] = { code = 200, chunks = { chunk, chunk, chunk, chunk, chunk, chunk, chunk, chunk } }
+    local html, meta = client:get_public_text("https://mp.weixin.qq.com/s/at-limit")
+    expect(#html == 8 * 1024 * 1024 and meta.length == #html, "exact public HTML limit was rejected")
+    responses[#responses + 1] = { code = 200,
+        chunks = { chunk, chunk, chunk, chunk, chunk, chunk, chunk, chunk, "y" } }
+    local resets = reset_count
+    local bounded_ok, bounded_err = pcall(client.get_public_text, client, "https://mp.weixin.qq.com/s/over-limit")
+    expect(not bounded_ok and tostring(bounded_err):find("response exceeds size limit", 1, true),
+        "oversize public HTML was retained or returned as a successful partial response")
+    expect(reset_count == resets + 1, "oversize public response did not reset the socket timeout")
+    expect(next(sink_targets[#sink_targets]) == nil, "oversize public response retained partial chunks")
+    expect(requests[#requests].max_response_bytes == nil, "public size limit leaked to transport options")
+    responses[#responses + 1] = { code = 200, body = "small public next" }
+    expect(client:get_public_text("https://mp.weixin.qq.com/s/next") == "small public next",
+        "oversize public request polluted the next request")
+end
+
 print(("client_spec: %d checks"):format(checks))

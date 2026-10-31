@@ -608,6 +608,7 @@ function Client:get_public_text(url, opts)
     opts = opts or {}
     local req_opts = merge_req_opts(opts, {
         maxredirects = 5,
+        max_response_bytes = MP_CONTENT_MAX_BYTES,
         headers = {
             ["Accept"] = header_value(opts.headers, "Accept") or opts.accept or "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
             ["Referer"] = header_value(opts.headers, "Referer") or opts.referer or "https://mp.weixin.qq.com/",
