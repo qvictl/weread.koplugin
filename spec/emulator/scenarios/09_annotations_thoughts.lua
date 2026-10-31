@@ -224,4 +224,61 @@ return function(H)
         H.check(not popup_showing(), "edge tap did not reopen a popup")
         H.shot("09-04-after-popup")
     end)
+
+    H.step("long diagonal screenshot works over both thought popup positions", function()
+        local UIManager = require("ui/uimanager")
+        local Event = require("ui/event")
+        local time = require("ui/time")
+        local Geom = require("ui/geometry")
+        local ThoughtPopup = require("weread.ui.thought_popup")
+        local original_dir = G_reader_settings:readSetting("screenshot_dir")
+        for _, position in ipairs({ "center", "bottom" }) do
+            local popup
+            local screenshot_dir = H.env.evidence .. "/screenshot-" .. position
+            H.call(function()
+                G_reader_settings:saveSetting("screenshot_dir", screenshot_dir)
+                popup = ThoughtPopup.show{
+                    pages = { { content = string.rep(THOUGHT .. "。", 100), author = "Synthetic reader" } },
+                    position = position,
+                }
+                UIManager:forceRePaint()
+            end)
+            H.check(popup._painted, "screenshot target popup painted: " .. position)
+            H.sleep(1.1) -- Screenshoter rate-limits gestures to one per second.
+            H.call(function()
+                local screen = H.screen()
+                local w, h = screen:getWidth(), screen:getHeight()
+                local box = popup.container.dimen
+                -- Start just inside the bottom-left corner of the painted popup.
+                -- A long swipe towards the opposite screen corner reaches the
+                -- global screenshot range, including for the centered layout.
+                local x, y = box.x + 2, box.y + box.h - 2
+                local distance = math.sqrt((w - 1 - x)^2 + (y - 1)^2)
+                H.check(distance >= math.sqrt(w^2 + h^2) - screen:scaleBySize(200),
+                    "synthetic diagonal reaches the native screenshot distance")
+                UIManager:sendEvent(Event:new("Gesture", {
+                    ges = "swipe", direction = "northeast", distance = distance, time = time.now(),
+                    pos = Geom:new{ x = x, y = y, w = 1, h = 1 },
+                }))
+            end)
+            H.wait_until("native screenshot saved: " .. position, function()
+                return #H.find_files(screenshot_dir, "%.png$") > 0
+            end, 5)
+            H.check(H.call(function() return UIManager:isWidgetShown(popup) end),
+                "screenshot leaves the thought popup open: " .. position)
+            H.check(H.top_window() ~= popup, "native screenshot confirmation is shown")
+            H.call(function()
+                UIManager:close(H.top_window()) -- only the native screenshot confirmation
+                UIManager:close(popup)
+            end)
+        end
+        H.call(function()
+            if original_dir == nil then
+                G_reader_settings:delSetting("screenshot_dir")
+            else
+                G_reader_settings:saveSetting("screenshot_dir", original_dir)
+            end
+        end)
+    end)
+
 end

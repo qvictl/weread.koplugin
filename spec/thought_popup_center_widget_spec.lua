@@ -13,7 +13,7 @@ local function class(proto)
     return proto
 end
 
-local dirty_target, dirty_mode, dirty_region
+local dirty_target, dirty_mode, dirty_region, closed_widget
 package.preload["ui/bidi"] = function()
     return {
         flipIfMirroredUILayout = function(value) return value end,
@@ -62,6 +62,7 @@ end
 package.preload["ui/widget/titlebar"] = function() return class() end
 package.preload["ui/uimanager"] = function()
     return {
+        close = function(_self, widget) closed_widget = widget end,
         setDirty = function(_self, target, mode, region)
             dirty_target, dirty_mode, dirty_region = target, mode, region
         end,
@@ -137,6 +138,44 @@ for _, widget in ipairs({ CenterWidget, require("weread.ui.thought_popup.widget"
         eq(hold(30), second, "long press follows the shifted body")
         view._findItemAtContentY = function() return first end
         eq(hold(70), nil, "blank area below a short page cannot select another page's thought")
+    end
+end
+
+-- A modal popup must leave diagonal swipes to KOReader's active Screenshoter.
+-- This tests both positions independently of the global gesture configuration.
+for _, widget in ipairs({ CenterWidget, require("weread.ui.thought_popup.widget") }) do
+    local view = setmetatable({
+        container = { dimen = {} },
+        page_index = 2,
+        changePage = function(self, delta) self.page_index = self.page_index + delta end,
+    }, { __index = widget })
+    local handler = widget == CenterWidget and widget.onSwipe or widget.onSwipeClose
+    for _, inside in ipairs({ true, false }) do
+        local pos = { intersectWith = function() return inside end }
+        for _, direction in ipairs({ "northeast", "northwest", "southeast", "southwest" }) do
+            closed_widget = nil
+            eq(handler(view, nil, { direction = direction, pos = pos }), false,
+                "diagonal swipe propagates, inside=" .. tostring(inside) .. ", direction=" .. direction)
+            eq(closed_widget, nil, "diagonal swipe does not close the popup")
+            eq(view.page_index, 2, "diagonal swipe does not turn the popup page")
+        end
+        for _, direction in ipairs({ "north", "south" }) do
+            eq(handler(view, nil, { direction = direction, pos = pos }), inside,
+                "vertical swipe retains modal ownership inside the popup")
+        end
+        for _, direction in ipairs({ "west", "east" }) do
+            closed_widget = nil
+            view.page_index = 2
+            eq(handler(view, nil, { direction = direction, pos = pos }), true,
+                "horizontal swipe remains handled")
+            if widget == CenterWidget and inside then
+                eq(view.page_index, direction == "west" and 3 or 1, "centered horizontal swipe pages")
+                eq(closed_widget, nil, "centered horizontal swipe keeps popup open")
+            else
+                eq(closed_widget, view, "horizontal swipe retains close behavior")
+            end
+        end
+        view.page_index = 2
     end
 end
 

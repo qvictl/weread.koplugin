@@ -389,6 +389,12 @@ end
 
 function CenterThoughtPopupWidget:onSwipe(_, ges)
     local direction = BD.flipDirectionIfMirroredUILayout(ges.direction)
+    -- Keep KOReader's global long-diagonal screenshot gesture reachable.
+    -- Reader-scoped custom gestures still belong to the reader, not this popup.
+    if direction ~= "north" and direction ~= "south"
+        and direction ~= "west" and direction ~= "east" then
+        return false
+    end
     if ges.pos:intersectWith(self.container.dimen) then
         -- Swipe inside the window flips pages (west = next, east = previous).
         if direction == "west" then

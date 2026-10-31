@@ -239,6 +239,12 @@ end
 function ThoughtPopupWidget:onSwipeClose(_, ges)
     local BD = require("ui/bidi")
     local direction = BD.flipDirectionIfMirroredUILayout(ges.direction)
+    -- Keep KOReader's global long-diagonal screenshot gesture reachable.
+    -- Reader-scoped custom gestures still belong to the reader, not this popup.
+    if direction ~= "north" and direction ~= "south"
+        and direction ~= "west" and direction ~= "east" then
+        return false
+    end
     if direction == "west" or direction == "east" then
         UIManager:close(self)
         return true
