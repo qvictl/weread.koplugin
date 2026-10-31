@@ -284,7 +284,7 @@ store:put("book", "download", "malformed", { revision = "1", next_batch = 3,
 store:put("book", "batch", "malformed:1", {
     false, 12, "invalid", {}, { range = false }, { range = "" },
     { range = "1-2", pageReviews = { true, { review = true }, {
-        review = { abstract = "", contextAbstract = "alpha", content = "first saved thought", author = true },
+        review = { abstract = " \t\r\n", contextAbstract = "alpha", content = "first saved thought", author = true },
     } } },
 }, "malformed")
 store:put("book", "batch", "malformed:2", {

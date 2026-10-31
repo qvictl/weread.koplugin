@@ -30,7 +30,7 @@ return function(H)
             store:put(book_id, "batch", uid .. ":1", {
                 false, 42, {}, { range = "" },
                 { range = "0-10", pageReviews = { true, { review = false }, {
-                    review = { abstract = "", contextAbstract = QUOTE, content = THOUGHT, author = true },
+                    review = { abstract = " \t\r\n", contextAbstract = QUOTE, content = THOUGHT, author = true },
                 } } },
                 { range = "11-20", pageReviews = { {
                     review = { content = "Second synthetic thought", author = { nick = "Reader" } },

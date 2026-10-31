@@ -55,7 +55,7 @@ expect(External.quote_for({ range = "1-2" }, { { range = "1-2", pageReviews = {
 } } }) == "", "all-empty/malformed pages supplied a quote")
 expect(External.quote_for(false, {}) == "", "invalid underline supplied a quote")
 expect(External.quote_for({ range = "missing" }, {}) == "", "missing review supplied a quote")
-for _, value in ipairs({ "", false, 42, {}, function() end }) do
+for _, value in ipairs({ "", " \t\r\n", false, 42, {}, function() end }) do
     local recovered = Annotations.buildThoughtPopupItems({ pageReviews = {
         false, { review = { abstract = value, contextAbstract = "context quote", content = "thought" } },
     } })
@@ -79,4 +79,9 @@ for _, value in ipairs({ false, true, 42, {}, function() end }) do
     expect(External.quote_for({ range = "1-2", markText = value }, { review }) == "valid quote",
         "non-string quote candidate masked valid string content")
 end
+local no_abstract = Annotations.buildThoughtPopupItems({ pageReviews = { { review = {
+    abstract = " \t", contextAbstract = "\r\n", content = "thought without quote",
+} } } })
+expect(#no_abstract == 1 and no_abstract[1].abstract == nil,
+    "whitespace-only fallback was retained as a popup abstract")
 print(("annotation_payload_spec: %d checks"):format(checks))
