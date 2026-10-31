@@ -2187,6 +2187,7 @@ function Content.extract_mp_body(html)
     body = body:gsub(' src=""', '')
     body = body:gsub(" src=''", "")
     body = body:gsub("data%-src=", "src=")
+    if body:match("^%s*$") then return nil end
     return body
 end
 

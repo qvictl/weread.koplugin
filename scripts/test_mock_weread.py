@@ -127,6 +127,10 @@ class MockTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertIn(b"Synthetic page without article content", bodyless)
         self.assertNotIn(b"js_content", bodyless)
+        status, cleaned_empty = self.request("/web/mp/content?reviewId=mock-mp-empty-body")
+        self.assertEqual(status, 200)
+        self.assertIn(b'id="js_content"', cleaned_empty)
+        self.assertIn(b"<script>", cleaned_empty)
         self.assertEqual(self.request("/web/mp/content?reviewId=unknown")[0], 400)
         self.assertEqual(self.request("/__proxy?url=https%3A%2F%2Fmmbiz.qpic.cn%2Fapi%2FuserInfo")[0], 501)
 

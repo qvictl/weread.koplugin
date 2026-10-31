@@ -274,6 +274,20 @@ do
     expect(has(last_warn(), "missing_body") and has(last_warn(), "attempts= 1:26,2:1")
         and not read_file(root .. "/MissingLater.html"), "missing-body failure diagnostics changed")
 
+    -- Bodies that become empty after cleaning are not usable candidates either.
+    for index, contents in ipairs({ "<script>void(0)</script>", "<style>p{}</style>", " \n\t " }) do
+        local cleaned_empty = '<div id="js_content">' .. contents .. '</div><script>'
+        expect(Content.extract_mp_body(cleaned_empty) == nil, "cleaned-empty body was accepted")
+        local cleaned = mp_client({ mp = function(id)
+            return id == "R-empty" and cleaned_empty or ARTICLE_HTML
+        end })
+        local clean_path = Content.fetch_mp_article_html(cleaned, settings_with({}), book,
+            { reviewId = "R-empty", originalId = "R-content", title = "Cleaned" .. index })
+        expect(cleaned:ids() == "R-empty,R-content" and cleaned.renews == 0,
+            "cleaned-empty body blocked the next existing candidate")
+        expect(has(read_file(clean_path), "Body text"), "cleaned-empty article was published")
+    end
+
     -- Every candidate blank: renew the cookie, retry without MP auth headers.
     local renewed = mp_client({ mp = function(id, after_renew)
         if after_renew and id == "R9" then return ARTICLE_HTML end

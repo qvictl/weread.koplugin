@@ -21,7 +21,8 @@ that response for the existing `missing_body` diagnostics if all candidates
 fail. The first usable body still terminates the search immediately.
 
 No endpoint, payload, headers, authentication/renewal condition, public-source
-fallback condition, retry count, or HTML parsing behavior changes. In particular,
+fallback condition or retry count changes. Existing markup selectors and cleanup
+remain; cleaned-empty bodies are now explicitly rejected. In particular,
 a bodyless response does not introduce a new cookie renewal attempt. Existing
 article/image staging, cancellation, account isolation and publication remain
 unchanged.
@@ -51,3 +52,11 @@ These are synthetic-account checks, not validation of a private real-world
 article, physical Kindle, or the complete release-candidate integration matrix.
 All upstream access was read-only. No credentials or private article contents
 are included.
+
+Review follow-up: script-only, style-only and whitespace-only bodies now return
+no usable content after cleaning, rather than Lua's truthy empty string. All
+69 MP unit checks and 16 mock tests pass. The real worker fixture now crosses
+three existing candidates (missing body, cleaned-empty body, valid article),
+with no added renewal. Six steps pass in 13.9s, maximum UI gap 177ms. Reverting
+only this follow-up causes the final article-content assertion to fail after
+an empty article is opened; restoring it recovers the valid final candidate.
