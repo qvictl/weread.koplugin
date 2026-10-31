@@ -367,4 +367,78 @@ return function(H)
             "failed screenshot closes only its owned popup")
     end)
 
+    H.step("stalled foreground annotation worker times out and resumes its saved batch", function()
+        local Worker = require("weread.lib.background_worker")
+        local Budget = require("weread.lib.fork_budget")
+        local plugin = H.plugin()
+        local original_new, workers, offset = Worker.new, {}, 0
+        local context, uid, prior_revision, timeout_worker
+        local ok, err = xpcall(function()
+            H.call(function()
+                context = plugin:_prepareAnnotationContext(false)
+                uid = tostring(chapter.chapterUid)
+                prior_revision = context.store:get(BOOK_ID, "source_status", uid).revision
+                Worker.new = function(self, options)
+                    local worker = original_new(self, options)
+                    local clock = worker.clock
+                    workers[#workers + 1] = { worker = worker, clock = clock }
+                    worker.clock = function() return clock() + offset end
+                    return worker
+                end
+            end)
+            local before = H.mock_state().started_counts
+            H.mock_control({ match = "/book/readreviews", hold_response = true, delay = 0, times = 0 })
+            H.call(function() plugin:_runAnnotationJob(context, { chapters = { chapter }, refresh = true }) end)
+            H.wait_until("thought request held by synthetic service", function()
+                local counts = H.mock_state().started_counts
+                return (counts["/book/readreviews"] or 0) > (before["/book/readreviews"] or 0)
+                    and plugin._external_annotation_sync and #workers >= 2
+            end, 10)
+            H.call(function()
+                timeout_worker = workers[#workers].worker
+                H.check(timeout_worker.job ~= nil, "foreground child is live before deadline")
+                -- Advance the monotonic test clock, not the configured deadline.
+                offset = 91
+            end)
+            H.wait_until("deadline pauses annotation sync", function()
+                return plugin._external_annotation_sync == nil
+            end, 5)
+            H.call(function()
+                H.equal(timeout_worker.timeout, 90, "production annotation deadline is bounded")
+                H.check(timeout_worker.job == nil and Budget.available(), "terminated child is reaped before slot reuse")
+                H.equal(context.store:get(BOOK_ID, "download", uid).next_batch, 1, "download checkpoint retained")
+                H.equal(context.store:get(BOOK_ID, "source_status", uid).revision, prior_revision,
+                    "timeout does not falsely publish a refreshed source")
+            end)
+            H.check(H.has_text(tr("The operation timed out. Please try again.")), "timeout reason shown to reader")
+            H.mock_control({ match = "", hold_response = false, delay = 0, times = 0 })
+            H.close_dialogs()
+            H.call(function()
+                Worker.new = original_new
+                for _, entry in ipairs(workers) do entry.worker.clock = entry.clock end
+                offset = 0
+            end)
+            local paused = H.mock_state().started_counts
+            without_ui_dns(H, function() plugin:startUnifiedAnnotationSync{ chapters = { chapter } } end)
+            H.wait_until("resumed annotation sync starts", function() return plugin._external_annotation_sync end, 5)
+            H.wait_until("resumed annotation sync finishes", function() return not plugin._external_annotation_sync end, 20)
+            local after = H.mock_state().started_counts
+            H.equal(after["/book/underlines"], paused["/book/underlines"], "resume does not refetch saved underlines")
+            H.equal(after["/book/readreviews"], paused["/book/readreviews"] + 1, "resume retries only unfinished batch")
+            H.call(function()
+                H.check(context.store:get(BOOK_ID, "source_status", uid).revision ~= prior_revision,
+                    "resumed source is published after successful completion")
+                H.equal(context.store:get(BOOK_ID, "download", uid), nil, "successful resume removes checkpoint")
+            end)
+        end, debug.traceback)
+        H.call(function()
+            Worker.new = original_new
+            for _, entry in ipairs(workers) do entry.worker.clock = entry.clock end
+            if plugin._external_annotation_sync then plugin:_cancelUnifiedAnnotationSync() end
+        end)
+        H.mock_control({ match = "", hold_response = false, delay = 0, times = 0 })
+        H.close_dialogs()
+        if not ok then error(err, 0) end
+    end)
+
 end

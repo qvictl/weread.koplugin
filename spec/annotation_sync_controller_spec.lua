@@ -523,9 +523,9 @@ do
                 local ok, err = coroutine.resume(co, false)
                 assert(ok, err)
             end
-            resume_child = function(result)
+            resume_child = function(result, completed)
                 pending = nil
-                local ok, err = coroutine.resume(co, true, result)
+                local ok, err = coroutine.resume(co, completed ~= false, result)
                 assert(ok, err)
             end
             return coroutine.yield()
@@ -616,6 +616,26 @@ do
     complete_child()
     assert(not pending and store:get("cancel", "status", "cancel-key:cancel-source"))
     missing = false
+
+    -- A timed-out child is not a launch failure or an intentional pause.
+    -- Its previous completed batch remains resumable and is not fetched again.
+    local before_timeout_notices = #notices
+    start("timeout-batch")
+    complete_child(); complete_child()
+    assert(pending and store:get("cancel", "download", "timeout-batch").next_batch == 2)
+    local timed_out_from = #requested
+    resume_child("worker_timeout", false); drain()
+    assert(not host._external_annotation_sync and not pending and prevented == allowed)
+    assert(store:get("cancel", "batch", "timeout-batch:1")
+        and not store:get("cancel", "batch", "timeout-batch:2")
+        and not store:get("cancel", "source", "timeout-batch"), "timeout lost or falsely completed saved progress")
+    assert(#notices == before_timeout_notices + 1
+        and notices[#notices]:find("The operation timed out. Please try again.", 1, true),
+        "timeout was not reported with its real reason")
+    start("timeout-batch"); complete_child()
+    assert(not pending and store:get("cancel", "status", "cancel-key:timeout-batch")
+        and #requested == timed_out_from + 1 and requested[#requested] == "thoughts:2-3",
+        "resuming a timed-out batch refetched already completed requests")
 
     -- A response received after a reader-session change cannot be committed.
     start("stale-session")
