@@ -78,7 +78,9 @@ def resource_archive(stage):
         return entry("Cover.jpg", signature + b"mismatched extension") + b"\0" * 1024
     if stage == "ustar":
         return b"".join(entry("section-" + letter * 96 + "/pic.png", signature + letter.encode(),
-                              tarfile.USTAR_FORMAT) for letter in ("a", "b")) + b"\0" * 1024
+                              tarfile.USTAR_FORMAT) for letter in ("a", "b")) \
+            + entry("section-" + "a" * 96 + "/pic.png ", signature + b"spaced-name", tarfile.USTAR_FORMAT) \
+            + b"\0" * 1024
     raise ValueError("unknown synthetic resource archive")
 
 

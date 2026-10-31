@@ -63,9 +63,10 @@ class MockTests(unittest.TestCase):
         self.assertEqual(ustar[345:500].rstrip(b"\0"), b"section-" + b"a" * 96)
         with tarfile.open(fileobj=io.BytesIO(ustar)) as archive:
             paths = ["section-" + letter * 96 + "/pic.png" for letter in ("a", "b")]
-            self.assertEqual(archive.getnames(), paths)
+            self.assertEqual(archive.getnames(), paths + [paths[0] + " "])
             for path, letter in zip(paths, (b"a", b"b")):
                 self.assertEqual(archive.extractfile(path).read(), b"\x89PNG\r\n\x1a\n" + letter)
+            self.assertEqual(archive.extractfile(paths[0] + " ").read(), b"\x89PNG\r\n\x1a\nspaced-name")
         with self.assertRaises(tarfile.ReadError):
             with tarfile.open(fileobj=io.BytesIO(download("initial"))) as archive:
                 archive.getmembers()

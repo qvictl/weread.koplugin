@@ -78,8 +78,8 @@ return function(H)
                 client, { book_id = "synthetic" }, chapter, {}, workspace)
             local memory, memory_map = Content.download_chapter_assets(
                 client, { book_id = "synthetic" }, chapter, {})
-            H.equal(#streamed, 2, "USTAR streaming retains both images")
-            H.equal(#memory, 2, "USTAR in-memory parsing retains both images")
+            H.equal(#streamed, 3, "USTAR streaming retains all images")
+            H.equal(#memory, 3, "USTAR in-memory parsing retains all images")
             for i, letter in ipairs({ "a", "b" }) do
                 local html = '<img src="section-' .. string.rep(letter, 96) .. '/pic.png"/>'
                 H.equal(Content.rewrite_image_sources(html, stream_map),
@@ -92,6 +92,16 @@ return function(H)
                 H.equal(bytes, png .. letter, "USTAR streaming image bytes " .. i)
                 H.equal(memory[i].data, bytes, "USTAR readers agree on bytes " .. i)
             end
+            local spaced = '<img src="section-' .. string.rep("a", 96) .. '/pic.png "/>'
+            H.equal(Content.rewrite_image_sources(spaced, stream_map),
+                '<img src="../' .. streamed[3].href .. '"/>', "USTAR streaming retains name whitespace")
+            H.equal(Content.rewrite_image_sources(spaced, memory_map),
+                '<img src="../' .. memory[3].href .. '"/>', "USTAR in-memory parsing retains name whitespace")
+            local image = assert(io.open(streamed[3].path, "rb"))
+            local bytes = image:read("*a")
+            image:close()
+            H.equal(bytes, png .. "spaced-name", "USTAR spaced-name image bytes")
+            H.equal(memory[3].data, bytes, "USTAR readers agree on spaced-name image bytes")
             for _, mapping in ipairs({ stream_map, memory_map }) do
                 H.equal(Content.rewrite_image_sources('<img src="pic.png"/>', mapping),
                     '<img src="pic.png"/>', "USTAR prefixes do not claim a bare source path")

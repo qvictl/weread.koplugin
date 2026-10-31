@@ -194,7 +194,7 @@ local function trim_nulls(value)
 end
 
 local function tar_entry_name(header)
-    local name = trim_nulls(header:sub(1, 100))
+    local name = header:sub(1, 100):gsub("%z.*$", "")
     -- POSIX USTAR splits long paths into prefix/name. Old GNU TAR uses
     -- this header area for other metadata, so require the POSIX magic.
     if name ~= "" and header:sub(258, 263) == "ustar\0" then

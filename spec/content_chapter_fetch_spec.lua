@@ -739,6 +739,7 @@ do
     local long_name = string.rep("b", 96) .. ".png"
     local ustar = tar_entry("pic.png", PNG .. "first", nil, "first")
         .. tar_entry("pic.png", PNG .. "second", nil, "second ")
+        .. tar_entry("pic.png ", PNG .. "spaced-name", nil, "first")
         .. tar_entry(long_name, PNG .. "long", nil, long_prefix)
         .. tar_entry("plain.png", PNG .. "plain", nil, "")
         .. tar_entry("gnu.png", PNG .. "gnu", nil, "not-a-prefix", "ustar ") .. TAR_END
@@ -748,6 +749,7 @@ do
     local ustar_data = {}
     for _, asset in ipairs(ustar_assets) do ustar_data["../" .. asset.href] = asset.data end
     for source, payload in pairs({ ["first/pic.png"] = "first", ["second /pic.png"] = "second",
+        ["first/pic.png "] = "spaced-name",
         [long_prefix .. "/" .. long_name] = "long", ["plain.png"] = "plain", ["gnu.png"] = "gnu" }) do
         local rewritten = Content.rewrite_image_sources('<img src="' .. source .. '"/>', ustar_map)
         expect(ustar_data[rewritten:match('src="(.-)"')] == PNG .. payload,
@@ -817,13 +819,18 @@ do
 
     local prefixed, prefixed_map = fetch(tar_entry("pic.png", PNG .. "first", nil, "first")
         .. tar_entry("pic.png", PNG .. "second", nil, "second")
+        .. tar_entry("pic.png ", PNG .. "spaced-name", nil, "first")
         .. tar_entry("plain.png", PNG .. "plain", nil, "")
         .. tar_entry("gnu.png", PNG .. "gnu", nil, "not-a-prefix", "ustar ") .. TAR_END, "ustar")
-    expect(#prefixed == 4 and read_file(prefixed[1].path) == PNG .. "first"
+    expect(#prefixed == 5 and read_file(prefixed[1].path) == PNG .. "first"
         and read_file(prefixed[2].path) == PNG .. "second", "USTAR bytes changed during streaming")
     expect(Content.rewrite_image_sources('<img src="first/pic.png"/><img src="second/pic.png"/><img src="pic.png"/>', prefixed_map)
         == '<img src="../images/pic.png"/><img src="../images/pic-2.png"/><img src="pic.png"/>',
         "streamed USTAR source paths were conflated or claimed a bare source path")
+    expect(Content.rewrite_image_sources('<img src="first/pic.png "/>', prefixed_map)
+        == '<img src="../' .. prefixed[3].href .. '"/>'
+        and read_file(prefixed[3].path) == PNG .. "spaced-name",
+        "streamed USTAR name whitespace aliased distinct image sources")
     expect(prefixed_map.paths["plain.png"] and prefixed_map.paths["gnu.png"]
         and not prefixed_map.paths["not-a-prefix/gnu.png"], "streamed TAR format detection changed legacy names")
 

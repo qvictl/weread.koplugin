@@ -14,7 +14,9 @@ defines the POSIX magic at byte offset 257 and the 155-byte prefix at offset 345
 The fix shares prefix/name decoding between both readers and recognizes only
 the POSIX `ustar` plus NUL magic. Old GNU headers use that area for other
 metadata and are not interpreted as POSIX prefixes. Prefix bytes, including
-spaces and a full 155-byte non-NUL-terminated field, are preserved.
+spaces and a full 155-byte non-NUL-terminated field, are preserved. Name fields
+also end at NUL only: trailing spaces distinguish `pic.png` from `pic.png `
+and must not merge their source identities.
 
 This changes source identity only. Extraction paths remain generated safe
 basenames. Image bytes, filename allocation, archive limits, rollback and
@@ -24,10 +26,10 @@ supported by this change.
 ## Tests
 
 - The new component regression fails on main at the first prefixed source;
-  fixed chapter-fetch spec passes 231 checks, disk-assets spec passes 21.
+  fixed chapter-fetch spec passes 233 checks, disk-assets spec passes 21.
 - Cases cover both in-memory and streaming readers, colliding prefixes,
   unchanged ambiguous bare references, empty prefixes, 155-byte prefixes,
-  100-byte names, significant prefix spaces, and old GNU magic.
+  100-byte names, significant prefix/name spaces, and old GNU magic.
 - The mock fixture uses Python's standard `TarInfo.tobuf(USTAR_FORMAT)` writer.
   Its HTTP contract test verifies the actual name, magic and prefix bytes,
   then independently reads both full paths and payloads with Python tarfile.
@@ -37,6 +39,11 @@ supported by this change.
   separate source paths and image bytes. Existing rollback/retry checks pass.
 - Same real scenario with baseline production code fails in 1.8 seconds at
   USTAR streaming source selection after the prior rollback/identity checks.
+- Review also identified name-field whitespace loss. Adding `pic.png ` under
+  the same prefix as `pic.png` reproduces aliasing in the initial candidate.
+  NUL-only name decoding fixes both readers: the expanded real scenario passes
+  in 2.2 seconds, while the initial candidate fails in 2.0 seconds. The Python
+  archive contract independently confirms the two distinct names and payloads.
 - All 147 normal Lua specs pass. Python reports 120 tests passing with two
   existing platform skips. Changed-file LuaCheck reports no warnings/errors;
   namespace, secrets, Python syntax, package and whitespace checks pass.
