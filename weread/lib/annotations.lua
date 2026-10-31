@@ -254,7 +254,10 @@ function Annotations.buildThoughtPopupItems(range_review)
         local author = type(review.author) == "table" and review.author or {}
         local abstract = nil
         if #items == 0 then
-            abstract = review.abstract or review.contextAbstract
+            abstract = review.abstract
+            if type(abstract) ~= "string" or abstract == "" then
+                abstract = review.contextAbstract
+            end
             if type(abstract) ~= "string" or abstract == "" then
                 abstract = nil
             end

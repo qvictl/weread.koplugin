@@ -55,4 +55,21 @@ expect(External.quote_for({ range = "1-2" }, { { range = "1-2", pageReviews = {
 } } }) == "", "all-empty/malformed pages supplied a quote")
 expect(External.quote_for(false, {}) == "", "invalid underline supplied a quote")
 expect(External.quote_for({ range = "missing" }, {}) == "", "missing review supplied a quote")
+for _, value in ipairs({ "", false, 42, {}, function() end }) do
+    local recovered = Annotations.buildThoughtPopupItems({ pageReviews = {
+        false, { review = { abstract = value, contextAbstract = "context quote", content = "thought" } },
+    } })
+    expect(#recovered == 1 and recovered[1].abstract == "context quote",
+        "unusable abstract masked the first valid thought's context abstract")
+end
+for _, value in ipairs({ "", " \t\r\n", false, {}, function() end }) do
+    local review = { range = "1-2", pageReviews = { { review = {
+        abstract = value, contextAbstract = " context quote ", markText = "mark quote",
+    } } } }
+    expect(External.quote_for({ range = "1-2" }, { review }) == "context quote",
+        "unclean abstract masked a usable context quote")
+    review.pageReviews[1].review.contextAbstract = " \t"
+    expect(External.quote_for({ range = "1-2" }, { review }) == "mark quote",
+        "empty cleaned abstract/context masked the mark-text fallback")
+end
 print(("annotation_payload_spec: %d checks"):format(checks))

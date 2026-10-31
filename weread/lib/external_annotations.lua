@@ -82,8 +82,10 @@ function ExternalAnnotations.quote_for(underline, reviews)
         if type(page) == "table" then
             local item = page.review == nil and page or page.review
             if type(item) == "table" then
-                local quote = clean_quote(item.abstract or item.contextAbstract or item.markText)
-                if quote ~= "" then return quote end
+                for _, key in ipairs({ "abstract", "contextAbstract", "markText" }) do
+                    local quote = clean_quote(item[key])
+                    if quote ~= "" then return quote end
+                end
             end
         end
     end
