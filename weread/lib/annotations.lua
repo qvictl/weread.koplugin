@@ -255,10 +255,10 @@ function Annotations.buildThoughtPopupItems(range_review)
         local abstract = nil
         if #items == 0 then
             abstract = review.abstract
-            if type(abstract) ~= "string" or abstract == "" then
+            if type(abstract) ~= "string" or abstract:match("%S") == nil then
                 abstract = review.contextAbstract
             end
-            if type(abstract) ~= "string" or abstract == "" then
+            if type(abstract) ~= "string" or abstract:match("%S") == nil then
                 abstract = nil
             end
         end
