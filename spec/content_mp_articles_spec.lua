@@ -249,6 +249,31 @@ do
     expect(path == root .. "/First.html" and has(html, "<p>Body text</p>") and not has(html, "<img"),
         "article was not saved with images stripped")
 
+    -- A nonempty login/error page is not usable article content. Keep trying
+    -- the existing candidate ids without changing authentication or renewal.
+    local bodyless = mp_client({ mp = function(id)
+        if id == "R-login" then return "<html>please log in</html>" end
+        return ARTICLE_HTML
+    end })
+    local recovered_path = Content.fetch_mp_article_html(bodyless, settings_with({}), book,
+        { reviewId = "R-login", originalId = "R-content", title = "Recovered" })
+    expect(bodyless:ids() == "R-login,R-content" and bodyless.renews == 0 and #bodyless.public == 0,
+        "a nonempty page without a body blocked the next content candidate")
+    expect(has(read_file(recovered_path), "Body text"), "valid later candidate was not published")
+
+    -- If no candidate contains an article, retain missing-body diagnostics.
+    logs = {}
+    local missing = mp_client({ mp = function(id)
+        if id == "R-login" then return "<html>please log in</html>", { content_type = "text/html" } end
+        return " "
+    end })
+    local missing_ok = pcall(Content.fetch_mp_article_html, missing, settings_with({}), book,
+        { reviewId = "R-login", originalId = "R-empty", title = "MissingLater" })
+    expect(not missing_ok and missing:ids() == "R-login,R-empty" and missing.renews == 0,
+        "bodyless candidates must fail without introducing authentication retries")
+    expect(has(last_warn(), "missing_body") and has(last_warn(), "attempts= 1:26,2:1")
+        and not read_file(root .. "/MissingLater.html"), "missing-body failure diagnostics changed")
+
     -- Every candidate blank: renew the cookie, retry without MP auth headers.
     local renewed = mp_client({ mp = function(id, after_renew)
         if after_renew and id == "R9" then return ARTICLE_HTML end

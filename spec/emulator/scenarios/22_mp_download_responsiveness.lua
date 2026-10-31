@@ -131,7 +131,9 @@ return function(H)
             "old job cannot rewrite new-account SQLite")
         H.mock_control({ match = "", delay = 0, times = 0 })
     end)
-    H.step("delayed successful download stays responsive and opens matching assets", function()
+    H.step("bodyless first candidate falls back and publishes matching assets responsively", function()
+        article.reviewId, article.originalId = "mock-mp-bodyless", "mock-mp-article"
+        local before = H.mock_state().started_counts
         H.mock_control({ match = "/web/mp/content", delay = 1.5, times = 0 })
         local running, last, max_gap = true, H.now_ms(), 0
         local function beat()
@@ -145,7 +147,12 @@ return function(H)
         H.metric("mp_download_heartbeat_gap_ms", max_gap)
         H.check(max_gap < 800, "article download keeps event loop responsive", tostring(max_gap))
         local html = read(path)
-        H.check(html:find("Synthetic article body.", 1, true), "new article body published")
+        H.check(html:find("Synthetic article body.", 1, true), "later candidate body published")
+        local after = H.mock_state().started_counts
+        H.equal((after["/web/mp/content"] or 0) - (before["/web/mp/content"] or 0), 2,
+            "one bodyless candidate followed by one valid candidate")
+        H.equal(after["/web/login/renewal"] or 0, before["/web/login/renewal"] or 0,
+            "bodyless candidate does not trigger new authentication retries")
         local image = html:match('src="([^" ]+%.png)"')
         H.check(image and image:match("^%.weread%-mp%-.+-assets%-%d+%-%d+/"), "HTML refers to a versioned local image")
         H.check(lfs.attributes(book.cache_dir .. "/" .. image, "mode") == "file", "referenced image actually published")

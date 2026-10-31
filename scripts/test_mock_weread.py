@@ -123,6 +123,10 @@ class MockTests(unittest.TestCase):
         status, image = self.request("/__proxy?url=https%3A%2F%2Fmmbiz.qpic.cn%2Fmock%2Fillustration.png")
         self.assertEqual(status, 200)
         self.assertTrue(image.startswith(b"\x89PNG"))
+        status, bodyless = self.request("/web/mp/content?reviewId=mock-mp-bodyless")
+        self.assertEqual(status, 200)
+        self.assertIn(b"Synthetic page without article content", bodyless)
+        self.assertNotIn(b"js_content", bodyless)
         self.assertEqual(self.request("/web/mp/content?reviewId=unknown")[0], 400)
         self.assertEqual(self.request("/__proxy?url=https%3A%2F%2Fmmbiz.qpic.cn%2Fapi%2FuserInfo")[0], 501)
 

@@ -2550,7 +2550,7 @@ function Content.fetch_mp_article_html(client, settings, book, article, opts)
     add_candidate(article.originalId)
     add_candidate(tostring(article.reviewId or ""):match("^MP_WXS_%d+_(.+)$"))
 
-    local html, meta, used_review_id
+    local html, meta, used_review_id, body
     local attempts = {}
     local function fetch_candidates(prefix, request_opts)
         for candidate_index, review_id in ipairs(candidate_ids) do
@@ -2569,7 +2569,10 @@ function Content.fetch_mp_article_html(client, settings, book, article, opts)
                     html = candidate_html
                     meta = candidate_meta
                     used_review_id = review_id
-                    return true
+                    -- A login/error page can be nonempty. Only stop once an
+                    -- existing candidate actually supplies an article body.
+                    body = Content.extract_mp_body(candidate_html)
+                    if body then return true end
                 end
                 meta = meta or candidate_meta
             else
@@ -2604,7 +2607,7 @@ function Content.fetch_mp_article_html(client, settings, book, article, opts)
             table.insert(attempts, "source_url:error")
         end
     end
-    local body = Content.extract_mp_body(html)
+    body = body or Content.extract_mp_body(html)
     if not body then
         local empty_response = not html or html:match("^%s*$") ~= nil
         logger.warn(
