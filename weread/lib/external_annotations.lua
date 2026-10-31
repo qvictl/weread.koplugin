@@ -55,7 +55,10 @@ function ExternalAnnotations.normalize_search(data)
 end
 
 local function clean_quote(value)
-    local text = scalar(value)
+    -- Quote fields are text, unlike numeric identifiers. A malformed scalar
+    -- must not become a false match or hide a later usable string candidate.
+    if type(value) ~= "string" then return "" end
+    local text = value
     text = text:gsub("^%s+", ""):gsub("%s+$", "")
     text = text:gsub("[\226][\128][\139-\141]", "")
     text = text:gsub("\239\187\191", "")
@@ -77,10 +80,19 @@ function ExternalAnnotations.quote_for(underline, reviews)
         if quote ~= "" then return quote end
     end
     local review = review_for_range(reviews, tostring(underline.range or ""))
-    local page = review and type(review.pageReviews) == "table"
-        and review.pageReviews[1] or nil
-    local item = page and (page.review or page) or nil
-    return clean_quote(item and (item.abstract or item.contextAbstract or item.markText))
+    local pages = review and type(review.pageReviews) == "table" and review.pageReviews or {}
+    for _, page in ipairs(pages) do
+        if type(page) == "table" then
+            local item = page.review == nil and page or page.review
+            if type(item) == "table" then
+                for _, key in ipairs({ "abstract", "contextAbstract", "markText" }) do
+                    local quote = clean_quote(item[key])
+                    if quote ~= "" then return quote end
+                end
+            end
+        end
+    end
+    return ""
 end
 
 local function range_start(row)

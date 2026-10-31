@@ -244,12 +244,20 @@ function Annotations.buildThoughtPopupItems(range_review)
     end
 
     local items = {}
-    for i, pr in ipairs(range_review.pageReviews) do
-        local review = pr.review or {}
-        local author = review.author or {}
+    for _, pr in ipairs(range_review.pageReviews) do
+        -- Saved gateway batches may contain JSON scalars/nulls at any level.
+        -- Ignore unusable entries without discarding their valid neighbours.
+        if type(pr) ~= "table" or type(pr.review) ~= "table" then
+            goto next_review
+        end
+        local review = pr.review
+        local author = type(review.author) == "table" and review.author or {}
         local abstract = nil
-        if i == 1 then
-            abstract = review.abstract or review.contextAbstract
+        if #items == 0 then
+            abstract = review.abstract
+            if type(abstract) ~= "string" or abstract == "" then
+                abstract = review.contextAbstract
+            end
             if type(abstract) ~= "string" or abstract == "" then
                 abstract = nil
             end
@@ -260,6 +268,7 @@ function Annotations.buildThoughtPopupItems(range_review)
             content = tostring(review.content or ""),
             likes_count = tonumber(pr.likesCount) or 0,
         }
+        ::next_review::
     end
     return items
 end

@@ -275,5 +275,41 @@ assert(finish(new("refresh-log", { { chapterUid = "refresh-log" } }, {
 })))
 assert(refresh_cache_hit == false,
     "refresh diagnostics incorrectly reported the intentionally bypassed source as a cache hit")
+
+-- A bad server record may already be saved when the process stops. Resuming
+-- that batch must not fail forever before committing its valid neighbours.
+store:put("book", "download", "malformed", { revision = "1", next_batch = 3,
+    underlines = { { range = "1-2" }, { range = "3-4", markText = "beta" } },
+}, "malformed")
+store:put("book", "batch", "malformed:1", {
+    false, 12, "invalid", {}, { range = false }, { range = "" },
+    { range = "1-2", pageReviews = { true, { review = true }, {
+        review = { abstract = "", contextAbstract = "alpha", content = "first saved thought", author = true },
+    } } },
+}, "malformed")
+store:put("book", "batch", "malformed:2", {
+    { range = "3-4", pageReviews = { {
+        review = { content = "second saved thought", author = { nick = "Reader" } },
+    } } },
+}, "malformed")
+count = #calls
+assert(finish(new("malformed-resume", { { chapterUid = "malformed" } }, { offline = true })),
+    "saved malformed batch poisoned offline resume")
+local reopened = helper.new()
+local first = reopened:get("book", "thought", "malformed:1-2")
+local second = reopened:get("book", "thought", "malformed:3-4")
+assert(#first == 1 and first[1].content == "first saved thought" and first[1].abstract == "alpha"
+    and first[1].author == "匿名", "resume lost a valid thought after malformed entries")
+assert(#second == 1 and second[1].content == "second saved thought" and second[1].author == "Reader",
+    "resume lost the adjacent valid range")
+assert(reopened:get("book", "projection", "malformed-resume:malformed").stats.located == 2,
+    "malformed review prevented quote matching")
+assert(not reopened:get("book", "download", "malformed")
+    and not reopened:get("book", "batch", "malformed:1")
+    and not reopened:get("book", "batch", "malformed:2"), "resume left poisoned checkpoints behind")
+assert(not reopened:get("book", "thought", "malformed:")
+    and not reopened:get("book", "thought", "malformed:false"), "invalid ranges were persisted")
+assert(finish(new("malformed-reopen", { { chapterUid = "malformed" } }, { offline = true })))
+assert(#calls == count, "saved malformed batches or reprojection caused a network request")
 helper.cleanup()
 print("external_annotations_sync_spec: resume, cross-file reuse, empty updates and offline prefetch passed")
