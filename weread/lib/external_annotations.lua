@@ -55,7 +55,10 @@ function ExternalAnnotations.normalize_search(data)
 end
 
 local function clean_quote(value)
-    local text = scalar(value)
+    -- Quote fields are text, unlike numeric identifiers. A malformed scalar
+    -- must not become a false match or hide a later usable string candidate.
+    if type(value) ~= "string" then return "" end
+    local text = value
     text = text:gsub("^%s+", ""):gsub("%s+$", "")
     text = text:gsub("[\226][\128][\139-\141]", "")
     text = text:gsub("\239\187\191", "")

@@ -62,7 +62,7 @@ for _, value in ipairs({ "", false, 42, {}, function() end }) do
     expect(#recovered == 1 and recovered[1].abstract == "context quote",
         "unusable abstract masked the first valid thought's context abstract")
 end
-for _, value in ipairs({ "", " \t\r\n", false, {}, function() end }) do
+for _, value in ipairs({ "", " \t\r\n", false, 42, {}, function() end }) do
     local review = { range = "1-2", pageReviews = { { review = {
         abstract = value, contextAbstract = " context quote ", markText = "mark quote",
     } } } }
@@ -71,5 +71,12 @@ for _, value in ipairs({ "", " \t\r\n", false, {}, function() end }) do
     review.pageReviews[1].review.contextAbstract = " \t"
     expect(External.quote_for({ range = "1-2" }, { review }) == "mark quote",
         "empty cleaned abstract/context masked the mark-text fallback")
+end
+for _, value in ipairs({ false, true, 42, {}, function() end }) do
+    local review = { range = "1-2", pageReviews = { { review = {
+        abstract = "", contextAbstract = value, markText = " valid quote ",
+    } } } }
+    expect(External.quote_for({ range = "1-2", markText = value }, { review }) == "valid quote",
+        "non-string quote candidate masked valid string content")
 end
 print(("annotation_payload_spec: %d checks"):format(checks))

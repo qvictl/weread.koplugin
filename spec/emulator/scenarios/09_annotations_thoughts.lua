@@ -58,6 +58,12 @@ return function(H)
             H.equal(first[1].abstract, QUOTE, "first valid thought keeps its quote")
             H.equal(first[1].author, "匿名", "malformed author uses the anonymous fallback")
             H.equal(second[1].content, "Second synthetic thought", "adjacent range survives")
+            local External = require("weread.lib.external_annotations")
+            H.equal(External.quote_for({ range = "0-10", markText = 42 }, {
+                { range = "0-10", pageReviews = { { review = {
+                    abstract = "", contextAbstract = 42, markText = QUOTE,
+                } } } },
+            }), QUOTE, "numeric quote candidates cannot mask usable text")
             H.equal(reopened:get(book_id, "batch", uid .. ":1"), nil, "raw checkpoint removed")
             H.equal(reopened:get(book_id, "download", uid), nil, "download checkpoint removed")
             H.check(reopened:get(book_id, "source_status", uid), "source commit is durable")
