@@ -130,6 +130,65 @@ expect(not host:validateDownloadDir(nil), "nil path accepted")
 fs:mkdir("/mnt/new")
 ok = host:validateDownloadDir("/mnt/new")
 expect(ok == true and not fs:exists("/mnt/new/.weread_write_test"), "writable directory rejected or probe left behind")
+-- A writability check must never truncate or remove pre-existing user data.
+fs:file("/mnt/new/.weread_write_test", 123)
+local existing_probe = fs.nodes["/mnt/new/.weread_write_test"]
+ok = host:validateDownloadDir("/mnt/new")
+expect(ok == true and fs.nodes["/mnt/new/.weread_write_test"] == existing_probe
+        and existing_probe.size == 123, "directory validation destroyed an existing file")
+-- Existing file/directory/link candidates are not ours, including stale
+-- scratch folders. A new exclusive candidate is cleaned up after success.
+fs:file("/mnt/new/.weread_write_test.1", 55)
+fs:file("/mnt/new/.weread_write_test.2/keep.txt", 66)
+fs.nodes["/mnt/new/.weread_write_test.3"] = { mode = "link", size = 77 }
+local saved_nodes = {}
+for path, node in pairs(fs.nodes) do saved_nodes[path] = node end
+expect(host:validateDownloadDir("/mnt/new"), "existing probe candidates prevented a writable folder")
+for path, node in pairs(saved_nodes) do
+    expect(fs.nodes[path] == node, "validation altered an existing candidate: " .. path)
+end
+expect(not fs:exists("/mnt/new/.weread_write_test.4"), "successful validation left its claimed directory")
+
+fs:mkdir("/mnt/crowded")
+for index = 1, 16 do fs:file("/mnt/crowded/.weread_write_test." .. index, index) end
+local removed_before = #fs.removed
+expect(not host:validateDownloadDir("/mnt/crowded") and #fs.removed == removed_before,
+    "exhausted candidate names were reused or removed")
+for index = 1, 16 do
+    expect(fs.nodes["/mnt/crowded/.weread_write_test." .. index].size == index,
+        "exhausted candidate changed user bytes")
+end
+
+fs:mkdir("/mnt/probe-failure")
+local probe_dir = "/mnt/probe-failure/.weread_write_test.1"
+fs.readonly[probe_dir] = true
+expect(not host:validateDownloadDir("/mnt/probe-failure") and not fs:exists(probe_dir),
+    "failed file open accepted the folder or leaked the claimed directory")
+fs.readonly[probe_dir] = nil
+local original_open = fs.open
+fs.open = function(self, path, mode)
+    local file = original_open(self, path, mode)
+    if file and path == probe_dir .. "/probe" then file.close = function() return nil, "close failed" end end
+    return file
+end
+expect(not host:validateDownloadDir("/mnt/probe-failure") and not fs:exists(probe_dir),
+    "failed file close was ignored or skipped cleanup")
+fs.open = original_open
+fs.fail_remove[probe_dir .. "/probe"] = "Permission denied"
+expect(not host:validateDownloadDir("/mnt/probe-failure") and fs:exists(probe_dir .. "/probe"),
+    "failed probe removal was reported as successful validation")
+fs.fail_remove[probe_dir .. "/probe"] = nil
+fs:remove(probe_dir .. "/probe")
+fs:remove(probe_dir)
+fs.fail_remove[probe_dir] = "Device busy"
+expect(not host:validateDownloadDir("/mnt/probe-failure") and fs:exists(probe_dir),
+    "failed scratch-directory removal was reported as successful validation")
+fs.fail_remove[probe_dir] = nil
+fs:remove(probe_dir)
+
+fs:file("/mnt/not-a-directory", 99)
+expect(not host:validateDownloadDir("/mnt/not-a-directory")
+        and fs.nodes["/mnt/not-a-directory"].size == 99, "an existing file was accepted as a directory or changed")
 -- A missing directory is created with a quoted shell argument, so "$" and
 -- quotes in the name are not interpreted by the shell.
 local odd = "/mnt/us/it's $HOME `x`"

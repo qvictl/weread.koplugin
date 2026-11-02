@@ -122,6 +122,15 @@ function Fs:lfs()
                 return names[index]
             end
         end,
+        mkdir = function(path)
+            if fs.nodes[path] then return nil, "File exists" end
+            local parent = parent_of(path)
+            if fs.readonly[parent] or fs.mkdir_fails[path] then return nil, "Permission denied" end
+            local node = fs.nodes[parent]
+            if not node or node.mode ~= "directory" then return nil, "No such directory" end
+            fs.nodes[path] = { mode = "directory" }
+            return true
+        end,
         rmdir = function(path)
             if fs.fail_remove[path] then return nil, fs.fail_remove[path] end
             if #fs:children(path) > 0 then return nil, "Directory not empty" end

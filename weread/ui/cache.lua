@@ -118,14 +118,25 @@ function M:validateDownloadDir(path)
             return false, _("Directory does not exist and could not be created.")
         end
     end
-    local test_file = path .. "/.weread_write_test"
-    local f = io.open(test_file, "w")
-    if not f then
-        return false, _("Directory is not writable.")
+    -- Claim a scratch directory atomically before opening a probe file.
+    -- Opening a fixed name with "w" can truncate unrelated user data; an
+    -- existence check alone would still race another validator. Never reuse
+    -- or clean an existing candidate (including links and stale probes).
+    local stat = lfs.symlinkattributes or lfs.attributes
+    for attempt = 1, 16 do
+        local test_dir = path .. "/.weread_write_test." .. attempt
+        if lfs.mkdir(test_dir) then
+            local test_file = test_dir .. "/probe"
+            local f = io.open(test_file, "w")
+            local closed = f and f:close()
+            local removed = not f or os.remove(test_file)
+            local removed_dir = lfs.rmdir(test_dir)
+            if f and closed and removed and removed_dir then return true end
+            return false, _("Directory is not writable.")
+        end
+        if not stat(test_dir) then break end -- not a name collision
     end
-    f:close()
-    os.remove(test_file)
-    return true
+    return false, _("Directory is not writable.")
 end
 
 function M:showDownloadDirPicker(touchmenu_instance)
