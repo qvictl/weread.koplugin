@@ -11,6 +11,9 @@ if not ok_json then
 end
 
 local DEFAULT_TIMEOUT_SECONDS = 15
+-- MP HTML is parsed in memory; cap collection before copying or extracting it
+-- on memory-constrained readers. Images have their own streaming path.
+local MP_CONTENT_MAX_BYTES = 8 * 1024 * 1024
 local Client = {}
 Client.__index = Client
 
@@ -307,9 +310,24 @@ function Client:request(opts)
     socketutil:set_timeout(block_timeout, total_timeout)
 
     local sink_to_use = opts.sink
+    local response_limit_error
     if not sink_to_use then
         response = {}
         sink_to_use = socketutil.table_sink(response)
+        if opts.max_response_bytes then
+            local table_sink, bytes = sink_to_use, 0
+            sink_to_use = function(chunk, err)
+                if chunk and bytes + #chunk > opts.max_response_bytes then
+                    -- Drop already-collected chunks as well as the excess one.
+                    for index = #response, 1, -1 do response[index] = nil end
+                    response_limit_error = "response exceeds size limit"
+                    return nil, response_limit_error
+                end
+                bytes = bytes + (chunk and #chunk or 0)
+                -- Keep socketutil's total-timeout enforcement and errors.
+                return table_sink(chunk, err)
+            end
+        end
     end
 
     local req_opts = merge_req_opts({
@@ -321,6 +339,7 @@ function Client:request(opts)
     -- Redirects are handled explicitly by request_follow so credentials can be
     -- rebuilt for every destination instead of being copied across origins.
     req_opts.redirect = false
+    req_opts.max_response_bytes = nil
     if not is_https(opts.url) and strip_credential_headers(req_opts.headers) > 0 then
         logger.warn("HTTP credentials dropped for a non-https request:", tostring(url_origin(opts.url)))
     end
@@ -348,6 +367,7 @@ function Client:request(opts)
 
     local results = { pcall(http.request, req_opts) }
     socketutil:reset_timeout()
+    if response_limit_error then error(response_limit_error, 0) end
     if not results[1] then
         logger.err(
             "HTTP transport failed:",
@@ -588,6 +608,7 @@ function Client:get_public_text(url, opts)
     opts = opts or {}
     local req_opts = merge_req_opts(opts, {
         maxredirects = 5,
+        max_response_bytes = MP_CONTENT_MAX_BYTES,
         headers = {
             ["Accept"] = header_value(opts.headers, "Accept") or opts.accept or "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
             ["Referer"] = header_value(opts.headers, "Referer") or opts.referer or "https://mp.weixin.qq.com/",
@@ -822,6 +843,7 @@ function Client:get_mp_content(review_id, opts)
         method = "GET",
         headers = custom_headers,
         timeout = opts.timeout,
+        max_response_bytes = MP_CONTENT_MAX_BYTES,
     })
 
     if code and code >= 200 and code < 300 then
